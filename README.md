@@ -28,6 +28,17 @@ The principles behind every design decision here, each with the production scar 
 
 The name is the mechanism: a limpet clamps to one spot and returns to it after every tide. Memories here clamp onto AST-hashed symbols, follow them through renames and file moves, and go visibly stale when the code underneath them actually changes.
 
+## What makes it different (not just another memory store)
+
+Every claim here is checkable in this repo, not marketing:
+
+- **It knows when it is wrong.** Generic AI memory (vector stores, RAG, notes) trusts what it wrote forever. limpet anchors each memory to the code it describes through a normalized AST hash, so a memory flips to `stale` the moment that code is edited, follows it through renames and file moves, and heals if the change is reverted. Self-invalidation is the whole point, and no other open memory layer does it. → [the anchor lifecycle](#-the-anchor-lifecycle)
+- **It shows you what it saved.** Every recall is priced against the file reads it replaced and kept in a running ledger you can read: `limpet stats`. The benchmark measures 4.0x fewer tokens on questions an agent re-answers every session, and undercounts on purpose. → [the receipts](#-the-receipts-token-savings-measured)
+- **It indexes the whole repository, not just symbols.** Six tree-sitter grammars (PHP, JS, TS, Python, Rust, C/C++) give function- and class-level anchoring; every other file (templates, styles, configs, data, even non-UTF-8 legacy source) is anchorable at the file level. Memories can attach anywhere, and go stale when any of it changes. → [whole repo indexed](#-whole-repo-indexed-thin-on-purpose)
+- **It never lies by omission.** Every response carries an honesty envelope: what matched, what was returned, what was dropped and why, how fresh the index is, how much is stale or contradicted. There is no code path that truncates silently, and the benchmark gate has killed limpet's own features when they crossed that line.
+
+It is not a vector database, a code-search engine, or a call-graph oracle; it is the layer that remembers *why*, tied to the code, and tells you when the why no longer holds. See [what limpet is not](#-what-limpet-is-not).
+
 ## 🧠 Why this exists
 
 Code indexers answer "what is where" and answer it well. But the expensive knowledge is not in any file:
