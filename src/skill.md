@@ -37,7 +37,9 @@ their code changes. Work with it in this order.
   - `intent`: what a module is for when the code cannot say
   Write bodies short, specific, and standalone. Do not store anything
   derivable from a quick read of the code, and never store secrets,
-  credentials, tokens, or personal data.
+  credentials, tokens, or personal data. limpet enforces this: `remember`
+  rejects a body or evidence output that looks like a credential, so a
+  secret can never reach the store or a shared `.limpet/memory.jsonl`.
 - **Trust recall before re-deriving.** If recall answers the question, do
   not re-read files to confirm what an active memory already states. If the
   memory is flagged stale, verify against the code first, then update it:

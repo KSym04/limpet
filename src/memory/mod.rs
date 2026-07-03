@@ -76,6 +76,16 @@ pub fn remember(
     if body.trim().is_empty() {
         bail!("body must not be empty");
     }
+    // Never persist a credential: it would live in the local store and could
+    // later leak through `admin export` -> .limpet/memory.jsonl -> git.
+    if let Some(kind) = crate::secrets::detect(body) {
+        bail!("refusing to store memory: body looks like a {kind}. Remove the secret and describe it instead.");
+    }
+    if let Some(ev) = evidence {
+        if let Some(kind) = crate::secrets::detect(&ev.output) {
+            bail!("refusing to store memory: evidence output looks like a {kind}. Redact it before storing.");
+        }
+    }
     let source = if evidence.is_some() { "verified" } else { source };
     let id = ulid();
     let now = now_iso();
