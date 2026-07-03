@@ -58,6 +58,23 @@ fn tool_recall(store: &Store, sweep: &SweepReport, args: &Value) -> Result<Value
         .unwrap_or(1200) as usize;
 
     let result = recall::recall(store, task, &working_set, budget)?;
+
+    // Savings ledger (spec v0.7.0): price the pack against its file-reading
+    // counterfactual and accumulate. Observational only (I-L5): a failure
+    // here must never fail the recall.
+    let cost = recall::recall_cost(&result.items, |f| {
+        store
+            .conn
+            .query_row("SELECT size FROM files WHERE path = ?1", [f], |r| r.get(0))
+            .ok()
+    });
+    let query_hash = {
+        use sha2::{Digest, Sha256};
+        let d = Sha256::digest(memory::fts_escape(task).as_bytes());
+        d[..8].iter().map(|b| format!("{b:02x}")).collect::<String>()
+    };
+    let _ = store.ledger_add(cost.served, cost.baseline, cost.reads_avoided, &query_hash);
+
     let stale = result
         .items
         .iter()
@@ -115,6 +132,10 @@ fn tool_recall(store: &Store, sweep: &SweepReport, args: &Value) -> Result<Value
         stale,
         contradicted,
     );
+    // The ledger is deliberately NOT in this response: even a 2-int block
+    // per recall dropped the token-savings bench under its 4x gate. The
+    // receipt is for humans; it lives in admin {op:"ledger"}, `limpet
+    // stats`, and the UI, where reading it costs the agent nothing.
     Ok(envelope(Value::Array(items), meta))
 }
 
@@ -465,7 +486,13 @@ fn tool_admin(store: &mut Store, root: &Path, sweep: &SweepReport, args: &Value)
             let report = store.import_jsonl(&mut r)?;
             json!({ "import": report, "path": path.to_string_lossy() })
         }
-        other => bail!("unknown admin op '{other}' (index|status|forget|export|import)"),
+        "ledger" => ledger_payload(store),
+        "ledger_reset" => {
+            store.ledger_reset()?;
+            store.ledger_session_start()?;
+            json!({ "reset": true })
+        }
+        other => bail!("unknown admin op '{other}' (index|status|forget|export|import|ledger|ledger_reset)"),
     };
     let meta = build_meta(
         store,
@@ -475,6 +502,37 @@ fn tool_admin(store: &mut Store, root: &Path, sweep: &SweepReport, args: &Value)
         0,
     );
     Ok(envelope(data, meta))
+}
+
+/// The full ledger payload: session + lifetime + the method string that
+/// makes the number checkable rather than believed (I-L6).
+pub fn ledger_payload(store: &Store) -> Value {
+    let lifetime = store.ledger_read();
+    let session = lifetime.diff(&store.ledger_session_base());
+    json!({
+        "session": {
+            "recalls": session.recalls,
+            "served_tokens": session.served,
+            "baseline_tokens": session.baseline,
+            "saved_tokens": session.saved(),
+            "reads_avoided": session.reads_avoided,
+        },
+        "lifetime": {
+            "recalls": lifetime.recalls,
+            "distinct_queries": lifetime.distinct_queries,
+            "served_tokens": lifetime.served,
+            "baseline_tokens": lifetime.baseline,
+            "saved_tokens": lifetime.saved(),
+            "reads_avoided": lifetime.reads_avoided,
+            "since": store.ledger_since(),
+        },
+        "method": "tokens = ceil(bytes/4) on both sides; baseline = 300-token \
+                   search overhead + the DISTINCT files returned memories anchor \
+                   to (minimal file set); anchorless memories add zero baseline, \
+                   understating savings on questions no file answers; negatives \
+                   are shown, never floored; gross recalls and distinct queries \
+                   both reported. Same methodology as bench/token_savings.py.",
+    })
 }
 
 /// Changed files: committed-vs-HEAD is not needed here; we want the working
@@ -584,11 +642,11 @@ pub fn tool_schemas() -> Value {
         },
         {
             "name": "admin",
-            "description": "Maintenance: op=index (full reindex), status, forget (id), export / import (JSONL at .limpet/memory.jsonl for team sharing via git).",
+            "description": "Maintenance: op=index (full reindex), status, forget (id), export / import (JSONL at .limpet/memory.jsonl for team sharing via git), ledger (token-savings receipt: session + lifetime + methodology) / ledger_reset.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "op": { "type": "string", "enum": ["index","status","forget","export","import"] },
+                    "op": { "type": "string", "enum": ["index","status","forget","export","import","ledger","ledger_reset"] },
                     "id": { "type": "string" },
                     "path": { "type": "string" }
                 },

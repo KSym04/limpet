@@ -154,6 +154,26 @@ pub fn serve_ui(root: &Path, port: u16) -> Result<()> {
                         ),
                     }
                 }
+                "/api/ledger" => {
+                    // "all" has no single store; fall back to the default
+                    // project so the panel always shows something real.
+                    let param = match project_param.as_deref() {
+                        Some("all") | None => None,
+                        p => p,
+                    };
+                    match resolve_project(param, root) {
+                        Ok((store, _)) => (
+                            "200 OK",
+                            "application/json",
+                            crate::tools::ledger_payload(&store).to_string(),
+                        ),
+                        Err(e) => (
+                            "500 Internal Server Error",
+                            "application/json",
+                            json!({ "error": e.to_string() }).to_string(),
+                        ),
+                    }
+                }
                 _ => ("404 Not Found", "text/plain", "not found".to_string()),
             }
         };
