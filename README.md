@@ -74,7 +74,7 @@ That takes three properties nobody else combines:
 | `map` | Structural outline of a file or symbol plus every memory attached to it. Code and knowledge in one answer. |
 | `affected` | What does my uncommitted diff touch: symbols, memories now at risk, and decisions constraining the code being edited. |
 | `verify_queue` | Verified facts whose anchored code changed, each with the exact command that originally proved it. |
-| `admin` | index, status, forget, export, import. |
+| `admin` | index, status, forget, export / import (guarded), ledger / ledger_reset (the savings receipt). |
 
 Every response is wrapped in the honesty envelope:
 
@@ -216,6 +216,8 @@ Everyday commands:
 | `/limpet status` | counts and anything needing attention |
 | `/limpet review` | re-verify stale facts using their stored proof commands |
 | `/limpet export` | write `.limpet/memory.jsonl` to commit and share with the team |
+| `limpet stats` | the token-savings receipt: session + lifetime, methodology included |
+| `limpet doctor` | one-screen setup diagnosis; also runs automatically after install and update |
 | `limpet ui` | knowledge graph at http://127.0.0.1:9748, all projects in one view |
 | `limpet update` | self-update to the latest release, checksum-verified (the only networked command) |
 
