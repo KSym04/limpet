@@ -21,11 +21,12 @@ const UPDATE_AVAILABLE_EXIT: i32 = 10;
 fn asset_name() -> Result<&'static str> {
     Ok(match (std::env::consts::OS, std::env::consts::ARCH) {
         ("macos", "aarch64") => "limpet-aarch64-apple-darwin",
-        ("macos", "x86_64") => "limpet-x86_64-apple-darwin",
         ("linux", "x86_64") => "limpet-x86_64-unknown-linux-gnu",
         ("windows", "x86_64") => "limpet-x86_64-pc-windows-msvc.exe",
+        // Intel macOS was dropped from releases: GitHub's macos-13 runners
+        // are so scarce the asset never actually shipped.
         (os, arch) => bail!(
-            "no prebuilt binary for {os}/{arch}; build from source with `cargo install --path .`"
+            "no prebuilt binary for {os}/{arch}; update with `cargo install limpet`"
         ),
     })
 }

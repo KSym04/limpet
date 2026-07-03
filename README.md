@@ -164,16 +164,16 @@ Open http://127.0.0.1:9748 for a live force-directed view of the knowledge graph
 
 ## 📦 Install
 
-**Prebuilt binary** (macOS, Linux, Windows): download from the [latest release](https://github.com/KSym04/limpet/releases/latest), verify the sha256, put `limpet` on your PATH, then:
+**Prebuilt binary** (Apple Silicon macOS, Linux, Windows): download from the [latest release](https://github.com/KSym04/limpet/releases/latest), verify the sha256, put `limpet` on your PATH, then:
 
 ```bash
 limpet install
 ```
 
-**With Rust** ([rustup.rs](https://rustup.rs)):
+**With Rust** ([rustup.rs](https://rustup.rs)) — also the path for Intel macs and any platform without a prebuilt binary:
 
 ```bash
-cargo install --git https://github.com/KSym04/limpet limpet
+cargo install limpet
 limpet install
 ```
 
