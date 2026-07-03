@@ -109,18 +109,27 @@ mod tests {
 
     #[test]
     fn flags_real_credentials() {
-        assert_eq!(detect("key is AKIAIOSFODNN7EXAMPLE here"), Some("AWS access key id"));
+        // Fixtures are split with concat! so external secret scanners
+        // (GitHub, trufflehog) do not flag the detector's own tests; the
+        // assembled runtime value still matches each provider pattern.
         assert_eq!(
-            detect("token ghp_1234567890abcdefghijklmnopqrstuvwxyz"),
+            detect(concat!("key is ", "AKIAIOSFOD", "NN7EXAMPLE", " here")),
+            Some("AWS access key id")
+        );
+        assert_eq!(
+            detect(concat!("token ghp_", "1234567890abcdefghijklmnopqrstuvwxyz")),
             Some("GitHub token")
         );
-        assert_eq!(detect("xoxb-123456789012-abcdefghijkl"), Some("Slack token"));
         assert_eq!(
-            detect("sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"),
+            detect(concat!("xoxb-", "123456789012-abcdefghijkl")),
+            Some("Slack token")
+        );
+        assert_eq!(
+            detect(concat!("sk-proj-", "abcdefghijklmnopqrstuvwxyz0123456789")),
             Some("API secret key")
         );
         assert_eq!(
-            detect("AIzaSyD1234567890abcdefghijklmnopqrstuv"),
+            detect(concat!("AIzaSyD", "1234567890abcdefghijklmnopqrstuv")),
             Some("Google API key")
         );
         assert_eq!(
