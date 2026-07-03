@@ -1,6 +1,12 @@
-# limpet
+# 🐚 limpet
 
 **small shell. long memory.**
+
+[![CI](https://github.com/KSym04/limpet/actions/workflows/ci.yml/badge.svg)](https://github.com/KSym04/limpet/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://rustup.rs)
+[![Platforms](https://img.shields.io/badge/macOS%20%7C%20Linux%20%7C%20Windows-supported-lightgrey.svg)](https://github.com/KSym04/limpet/actions/workflows/ci.yml)
+[![100% local](https://img.shields.io/badge/network%20calls-zero-blue.svg)](SECURITY.md)
 
 Memory that clamps onto your code. Code moves, memory follows. Code changes, memory says so.
 
@@ -8,7 +14,7 @@ limpet is a memory-first code intelligence MCP server for AI coding agents. Ever
 
 The name is the mechanism: a limpet clamps to one spot and returns to it after every tide. Memories here clamp onto AST-hashed symbols, follow them through renames and file moves, and go visibly stale when the code underneath them actually changes.
 
-## Why this exists
+## 🧠 Why this exists
 
 Code indexers answer "what is where" and answer it well. But the expensive knowledge is not in any file:
 
@@ -23,7 +29,7 @@ Agents re-derive or re-ask this every session, burning tokens, or worse, they gu
 2. **Honest.** Every response carries a metadata envelope: how fresh the index is, how many results matched vs how many were returned, and how much of what you got is stale or contradicted. There is no code path that truncates silently.
 3. **Evidenced.** A fact can carry the command that proved it. When its anchor goes stale, limpet hands the agent the exact command to re-verify it.
 
-## Token savings, measured
+## 🪙 Token savings, measured
 
 Where the savings actually come from:
 
@@ -66,7 +72,7 @@ Methodology, stated so the number can be checked rather than believed:
 - The script is a regression gate: it exits nonzero if savings drop below 4x.
 - Fixture files are 58 to 179 lines. Real plugin files run several times larger, and the "without" side grows with file size while a recall response does not.
 
-## The six tools
+## 🧰 The six tools
 
 | Tool | What it does |
 |---|---|
@@ -90,7 +96,7 @@ Every response is wrapped in the honesty envelope:
 }
 ```
 
-## The anchor lifecycle
+## ⚓ The anchor lifecycle
 
 ```
 code change            anchor resolution         memory becomes
@@ -105,7 +111,7 @@ duplicate bodies       multiple matches          stale (ambiguous_anchor)
 
 Contradictions are explicit links: when a new memory contradicts an old one, both stay visible with the conflict flagged until one `supersedes` the other. History is never silently overwritten.
 
-## Visual memory
+## 🗺️ Visual memory
 
 ```bash
 limpet ui --port 9748
@@ -113,7 +119,7 @@ limpet ui --port 9748
 
 Open http://127.0.0.1:9748 for a live force-directed view of the knowledge graph: memories sized by confidence and colored by health (green active, amber stale, red invalidated), clamped to the files and symbols they describe, with contradiction and supersession edges drawn. The "needs attention" filter shows exactly what went stale and why, with the re-verify command one click away. Where other tools visualize code structure, limpet visualizes what your agent knows and whether it is still true. Served by the same single binary, bound to 127.0.0.1 only.
 
-## Install
+## 📦 Install
 
 Requires the Rust toolchain ([rustup.rs](https://rustup.rs)) until prebuilt binaries ship.
 
@@ -144,13 +150,13 @@ Data lives under `~/.local/share/limpet/`, one SQLite store per repository. `lim
 
 Team sharing without binary blobs: `limpet export` writes `.limpet/memory.jsonl`, plain text, diffable, and git-mergeable. Teammates run `limpet import`.
 
-## Thin index, on purpose
+## 🌳 Thin index, on purpose
 
 limpet ships tree-sitter grammars for PHP, JavaScript, TypeScript, Python, and Rust. The index extracts symbols, imports, and name-based call references labeled `syntactic`. There is no LSP, no type inference, and no claim of a publishable call graph: the index exists to give memory anchor points, invalidation, and recall locality. Every shipped grammar has fixture coverage in the test suite; languages are added when they can be tested, not when they pad a number.
 
 Freshness model: every tool call runs a bounded incremental sweep (changed files reparse in milliseconds via tree-sitter). Queries never block on indexing; anything still dirty is listed in the envelope.
 
-## Security posture
+## 🔒 Security posture
 
 - **100% local.** No network calls anywhere in the codebase, no telemetry, no API keys, no cloud. The UI binds 127.0.0.1 and serves one embedded page, GET only.
 - **No shell interpolation.** External commands (git only) run with argument arrays; no string ever reaches a shell.
@@ -159,20 +165,20 @@ Freshness model: every tool call runs a bounded incremental sweep (changed files
 - **Malformed input survives.** The JSON-RPC loop answers parse errors and handler panics with JSON-RPC errors and keeps serving.
 - `install` edits only its own `mcpServers.limpet` entry and refuses to touch config it does not recognize; `uninstall` reverses exactly that.
 
-## What limpet is not
+## 🚫 What limpet is not
 
 - Not a code search engine. Your agent already has grep.
 - Not a call-graph oracle. Call edges are syntactic and labeled as such.
 - Not a cloud memory platform. No account, no sync, no server.
 - Retrieval quality tracks what gets written: short, specific, anchored memories recall well, and the tool schemas steer agents toward exactly that.
 
-## Roadmap
+## 🧭 Roadmap
 
 - SessionEnd/Stop hook helpers for automatic episode mining from transcripts
 - More grammars (Go, Java, Ruby, C#, C/C++, Bash), each with fixture coverage before shipping
 - FS-event watcher (notify) to replace the on-call sweep on very large repos
 - Optional embedding reranking behind a feature flag, only if recall evals prove it earns its size
 
-## License
+## 📄 License
 
 MIT

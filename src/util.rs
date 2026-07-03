@@ -10,23 +10,37 @@ const CROCKFORD: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 static LAST_ULID_STATE: AtomicU64 = AtomicU64::new(0);
 
+/// Per-process entropy from the OS-seeded std hasher, so two processes
+/// generating a ULID in the same millisecond cannot collide.
+fn process_seed() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    use std::sync::OnceLock;
+    static SEED: OnceLock<u64> = OnceLock::new();
+    *SEED.get_or_init(|| {
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u64(std::process::id() as u64);
+        h.finish()
+    })
+}
+
 /// Generate a 26-character Crockford base32 ULID.
 ///
-/// Time-ordered: the first 10 chars encode Unix milliseconds. The random
-/// half uses OS entropy mixed with a process counter so ULIDs created in
-/// the same millisecond still sort in creation order within this process.
+/// Time-ordered: the first 10 chars encode Unix milliseconds. The next 16
+/// chars carry a monotonic per-process sequence in the high bits (so IDs
+/// created in the same millisecond still sort in creation order) followed
+/// by per-process entropy. Cryptographic strength is not required here;
+/// uniqueness and ordering are.
 pub fn ulid() -> String {
     let ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock before 1970")
         .as_millis() as u64;
 
-    // 80 bits of "randomness": 64 from a mixed counter + 16 from address
-    // entropy. Cryptographic strength is not required here; uniqueness and
-    // monotonic ordering within a process are.
     let seq = LAST_ULID_STATE.fetch_add(1, Ordering::SeqCst);
-    let mixed = splitmix64(ms ^ seq.wrapping_mul(0x9E37_79B9_7F4A_7C15));
-    let hi16 = (splitmix64(mixed) & 0xFFFF) as u64;
+    let mixed = splitmix64(ms ^ process_seed() ^ seq.rotate_left(17));
+    // High 16 bits of the random section are the raw sequence: monotonic
+    // within a process, which is what keeps same-millisecond IDs ordered.
+    let hi16 = seq & 0xFFFF;
 
     let mut out = [0u8; 26];
     // 48-bit timestamp -> 10 chars (5 bits each).
@@ -35,7 +49,7 @@ pub fn ulid() -> String {
         out[i] = CROCKFORD[(t & 0x1F) as usize];
         t >>= 5;
     }
-    // 80-bit random -> 16 chars.
+    // 80-bit tail: 16 monotonic bits then 64 entropy bits -> 16 chars.
     let mut r: u128 = ((hi16 as u128) << 64) | (mixed as u128);
     for i in (10..26).rev() {
         out[i] = CROCKFORD[(r & 0x1F) as usize];
