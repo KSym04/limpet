@@ -10,6 +10,12 @@
 
 Memory that clamps onto your code. Code moves, memory follows. Code changes, memory says so.
 
+<p align="center">
+  <img src="docs/limpet-ui.png" alt="limpet visual memory graph: memories colored by health, clamped to code symbols" width="820">
+  <br>
+  <em>limpet ui: green memories are trustworthy, amber went stale when their code changed, squares are the symbols they clamp onto</em>
+</p>
+
 limpet is a memory-first code intelligence MCP server for AI coding agents. Everything your agent learns about a project (decisions, verified facts, failed approaches, gotchas, intent) is stored as durable memory, anchored to the actual code it describes, and automatically flagged the moment that code changes. One Rust binary, one SQLite file, 100% local.
 
 The name is the mechanism: a limpet clamps to one spot and returns to it after every tide. Memories here clamp onto AST-hashed symbols, follow them through renames and file moves, and go visibly stale when the code underneath them actually changes.
@@ -128,29 +134,36 @@ cargo install --git https://github.com/KSym04/limpet limpet
 limpet install
 ```
 
-The first command builds and places the `limpet` binary in `~/.cargo/bin`. The second registers the MCP server with Claude Code (user scope, `~/.claude.json`) and installs the `/limpet` slash command; add `--dry-run` to preview the exact changes before they are written. Restart Claude Code and type `/limpet`.
+Restart Claude Code. Done. (`limpet install --dry-run` previews the exact config changes first; `limpet uninstall` reverses them.)
 
-The `/limpet` command indexes the project, recalls what is already known (with stale items flagged), surfaces verified facts that need re-proof, and sets the memory-first working mode for the session: consult memory before re-deriving, check `map` before editing unfamiliar files, check `affected` before committing, and store durable learnings as they happen. Variants: `/limpet status`, `/limpet review` (re-verify stale facts), `/limpet export` (write the shareable JSONL).
+## 🚀 Usage in 60 seconds
 
-From a clone instead:
+**1. In any project, type `/limpet`.** It indexes the code, recalls everything already known (stale items flagged), and switches the session to memory-first mode.
 
-```bash
-git clone https://github.com/KSym04/limpet
-cd limpet
-cargo install --path .
-limpet install
-```
+**2. Just work.** The agent now stores what it learns as it learns it:
 
-Verify the setup any time:
+> "The scanner batch size is 50 because shared hosts kill long requests" becomes a `decision`, anchored to the function that uses it.
 
-```bash
-limpet index --root /path/to/your/repo   # one-off index, prints counts
-limpet status --root /path/to/your/repo  # index + memory counts
-```
+**3. Next session, in a fresh context, ask anything it ever learned:**
 
-Data lives under `~/.local/share/limpet/`, one SQLite store per repository. `limpet uninstall` removes the Claude Code registration and touches nothing else.
+> you: why is the batch size 50?
+> agent: (one `recall` call, ~350 tokens) shared hosts kill requests over 30 seconds; the queue exists so a full scan survives across requests.
 
-Team sharing without binary blobs: `limpet export` writes `.limpet/memory.jsonl`, plain text, diffable, and git-mergeable. Teammates run `limpet import`.
+No file spelunking, no re-explaining your own codebase.
+
+**4. Change the code and memory reacts.** Edit that function and the memory flips to `stale: body_edited` everywhere it appears. Rename or move the function and the memory follows it silently. Nothing ever pretends to be current when it is not.
+
+Everyday commands:
+
+| Command | Does |
+|---|---|
+| `/limpet` | index + recall + memory-first mode for the session |
+| `/limpet status` | counts and anything needing attention |
+| `/limpet review` | re-verify stale facts using their stored proof commands |
+| `/limpet export` | write `.limpet/memory.jsonl` to commit and share with the team |
+| `limpet ui` | knowledge graph at http://127.0.0.1:9748, all projects in one view |
+
+Data lives under `~/.local/share/limpet/`, one SQLite store per repository. Teammates run `limpet import` after pulling the JSONL.
 
 ## 🌳 Thin index, on purpose
 

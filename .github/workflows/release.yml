@@ -1,0 +1,55 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar
+          - os: macos-13
+            target: x86_64-apple-darwin
+            archive: tar
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: cargo test --locked
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: package (unix)
+        if: matrix.archive == 'tar'
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf limpet-${{ matrix.target }}.tar.gz limpet
+          shasum -a 256 limpet-${{ matrix.target }}.tar.gz > limpet-${{ matrix.target }}.tar.gz.sha256
+      - name: package (windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          cd target/${{ matrix.target }}/release
+          Compress-Archive -Path limpet.exe -DestinationPath limpet-${{ matrix.target }}.zip
+          (Get-FileHash limpet-${{ matrix.target }}.zip -Algorithm SHA256).Hash + "  limpet-${{ matrix.target }}.zip" | Out-File limpet-${{ matrix.target }}.zip.sha256 -Encoding ascii
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            target/${{ matrix.target }}/release/limpet-${{ matrix.target }}.tar.gz
+            target/${{ matrix.target }}/release/limpet-${{ matrix.target }}.tar.gz.sha256
+            target/${{ matrix.target }}/release/limpet-${{ matrix.target }}.zip
+            target/${{ matrix.target }}/release/limpet-${{ matrix.target }}.zip.sha256
+          generate_release_notes: true
