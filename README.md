@@ -113,7 +113,12 @@ move file              body found in new file    active, anchor follows
 edit function body     hash differs at FQN       stale (body_edited), conf drops
 delete symbol          body found nowhere        invalidated (kept as history)
 duplicate bodies       multiple matches          stale (ambiguous_anchor)
+edit anchored file     file content hash differs stale (file_edited), conf drops
+delete anchored file   file row gone             invalidated (kept as history)
+lose SOME anchors      others still resolve      stale (anchor_lost), never killed
 ```
+
+A multi-anchor memory dies only when **every** anchor dies. Losing one anchor while others still resolve degrades it to `stale:anchor_lost` so the surviving knowledge stays usable. And `remember` refuses an anchor it cannot resolve, loudly, at write time: no memory is ever born dead.
 
 Contradictions are explicit links: when a new memory contradicts an old one, both stay visible with the conflict flagged until one `supersedes` the other. History is never silently overwritten.
 
@@ -122,6 +127,8 @@ Contradictions are explicit links: when a new memory contradicts an old one, bot
 ```bash
 limpet ui --port 9748
 ```
+
+The UI is its own command, separate from the MCP server. `limpet serve` (stdio) is what Claude Code launches for you automatically after `limpet install`; nothing listens on a port until you start `limpet ui` yourself. If http://127.0.0.1:9748 refuses connections, the MCP server is not broken; the UI just is not running.
 
 Open http://127.0.0.1:9748 for a live force-directed view of the knowledge graph: memories sized by confidence and colored by health (green active, amber stale, red invalidated), clamped to the files and symbols they describe, with contradiction and supersession edges drawn. The "needs attention" filter shows exactly what went stale and why, with the re-verify command one click away. Where other tools visualize code structure, limpet visualizes what your agent knows and whether it is still true. Served by the same single binary, bound to 127.0.0.1 only.
 
@@ -174,9 +181,13 @@ Everyday commands:
 
 Data lives under `~/.local/share/limpet/`, one SQLite store per repository. Teammates run `limpet import` after pulling the JSONL.
 
-## 🌳 Thin index, on purpose
+## 🌳 Whole repo indexed, thin on purpose
 
-limpet ships tree-sitter grammars for PHP, JavaScript, TypeScript, Python, and Rust. The index extracts symbols, imports, and name-based call references labeled `syntactic`. There is no LSP, no type inference, and no claim of a publishable call graph: the index exists to give memory anchor points, invalidation, and recall locality. Every shipped grammar has fixture coverage in the test suite; languages are added when they can be tested, not when they pad a number.
+**Every file in the repository is indexed and anchorable.** Files with a shipped grammar (PHP, JavaScript, TypeScript, Python, Rust) get full symbol extraction: functions, classes, imports, and name-based call references labeled `syntactic`. Every other file (`.twig`, `.scss`, `.vue`, `.blade.php`, `.md`, `.yml`, configs, anything) gets a file-level node with a content hash, so a memory can anchor to it and go `stale:file_edited` the moment it changes. On template-heavy stacks (WordPress/Timber, Rails, Laravel) that is where the knowledge worth remembering actually lives.
+
+What the walk skips, deliberately: everything in `.gitignore`, everything in an optional `.limpetignore` (gitignore syntax, works even outside a git repo), `node_modules`/`vendor`/`target`/`dist`/`build`, hidden files, `*.min.*` assets, and files over 512KB. Those bounds are what keep a full WordPress install from pegging your CPU; use `.limpetignore` to opt out anything else.
+
+There is no LSP, no type inference, and no claim of a publishable call graph: the index exists to give memory anchor points, invalidation, and recall locality. Every shipped grammar has fixture coverage in the test suite; languages are added when they can be tested, not when they pad a number.
 
 Freshness model: every tool call runs a bounded incremental sweep (changed files reparse in milliseconds via tree-sitter). Queries never block on indexing; anything still dirty is listed in the envelope.
 

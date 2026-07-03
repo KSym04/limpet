@@ -64,25 +64,51 @@ fn file_meta(path: &Path) -> Option<(i64, i64)> {
     Some((mtime, md.len() as i64))
 }
 
+/// First 128 bits of SHA-256 as hex; the content identity used everywhere.
+fn short_hash(bytes: &[u8]) -> String {
+    let d = Sha256::digest(bytes);
+    d[..16].iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// Index a single file: parse, extract, replace its rows.
 /// Parse failures are isolated: the file is recorded with `parse_ok = 0`
 /// and indexing continues (spec section 10).
+///
+/// Files without a supported grammar are still indexed at file level: a
+/// `files` row with a raw-byte content hash and no symbols. That is what
+/// lets memories anchor to templates, styles, and configs (.twig, .scss,
+/// .md, ...) and go stale when those files change.
 fn index_file(store: &Store, root: &Path, rel: &str) -> Result<(usize, bool)> {
     let abs = root.join(rel);
-    let Some(lang_id) = lang::detect(&abs) else {
-        return Ok((0, true));
-    };
     let Some((mtime_ns, size)) = file_meta(&abs) else {
         return Ok((0, false));
+    };
+    let Some(lang_id) = lang::detect(&abs) else {
+        // No grammar: file-level node only. Hash raw bytes so this also
+        // works for non-UTF-8 content.
+        let bytes = match std::fs::read(&abs) {
+            Ok(b) => b,
+            Err(_) => return Ok((0, false)),
+        };
+        let content_hash = short_hash(&bytes);
+        store.conn.execute("DELETE FROM symbols WHERE file = ?1", [rel])?;
+        store.conn.execute("DELETE FROM imports WHERE file = ?1", [rel])?;
+        store.conn.execute("DELETE FROM calls WHERE file = ?1", [rel])?;
+        store.conn.execute(
+            "INSERT INTO files(path, lang, mtime_ns, size, hash, parse_ok)
+             VALUES (?1,NULL,?2,?3,?4,1)
+             ON CONFLICT(path) DO UPDATE SET lang=NULL,
+               mtime_ns=excluded.mtime_ns, size=excluded.size,
+               hash=excluded.hash, parse_ok=1",
+            params![rel, mtime_ns, size, content_hash],
+        )?;
+        return Ok((0, true));
     };
     let src = match std::fs::read_to_string(&abs) {
         Ok(s) => s,
         Err(_) => return Ok((0, false)),
     };
-    let content_hash: String = {
-        let d = Sha256::digest(src.as_bytes());
-        d[..16].iter().map(|b| format!("{b:02x}")).collect()
-    };
+    let content_hash = short_hash(src.as_bytes());
 
     store.conn.execute("DELETE FROM symbols WHERE file = ?1", [rel])?;
     store.conn.execute("DELETE FROM imports WHERE file = ?1", [rel])?;
@@ -149,10 +175,17 @@ fn index_file(store: &Store, root: &Path, rel: &str) -> Result<(usize, bool)> {
 /// Walk the repository and collect indexable files, honoring .gitignore, an
 /// optional `.limpetignore` (gitignore syntax; works even outside a git repo),
 /// a built-in directory skip list, a max file size, and a minified-asset skip.
+///
+/// Every file that survives those bounds is indexed, whether or not a
+/// grammar exists for it: symbol-bearing files get full extraction, the
+/// rest get file-level rows so anchors can attach to them.
 fn discover(root: &Path) -> Vec<String> {
     let mut out = Vec::new();
+    // hidden(false): dotfiles and dot-dirs are walked so tracked files like
+    // .github/workflows/*.yml and .gitignore are anchorable; .git itself is
+    // excluded below and junk dirs stay opt-out via .limpetignore.
     let walker = ignore::WalkBuilder::new(root)
-        .hidden(true)
+        .hidden(false)
         .git_ignore(true)
         .git_global(false)
         .max_filesize(Some(MAX_FILE_BYTES))
@@ -161,13 +194,13 @@ fn discover(root: &Path) -> Vec<String> {
             let name = e.file_name().to_string_lossy();
             !matches!(
                 name.as_ref(),
-                "node_modules" | "vendor" | "target" | "dist" | "build" | ".git"
+                "node_modules" | "vendor" | "target" | "dist" | "build" | ".git" | ".limpet"
             )
         })
         .build();
     for entry in walker.flatten() {
         let p = entry.path();
-        if p.is_file() && lang::detect(p).is_some() {
+        if p.is_file() {
             let name = entry.file_name().to_string_lossy();
             if is_minified(&name) {
                 continue;
@@ -322,6 +355,92 @@ mod tests {
         fs::write(root.join("ignored/secret.php"), "<?php function b() {}\n").unwrap();
 
         let found = discover(root);
-        assert_eq!(found, vec!["keep.php".to_string()], "unexpected: {found:?}");
+        // .limpetignore itself is a legitimate anchor target (dotfiles are
+        // walked since hidden(false)); everything else bounded out.
+        assert_eq!(
+            found,
+            vec![".limpetignore".to_string(), "keep.php".to_string()],
+            "unexpected: {found:?}"
+        );
+    }
+
+    #[test]
+    fn discover_walks_hidden_paths_but_never_dot_git_or_dot_limpet() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join(".github/workflows")).unwrap();
+        fs::write(root.join(".github/workflows/ci.yml"), "on: push\n").unwrap();
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::write(root.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        fs::create_dir_all(root.join(".limpet")).unwrap();
+        fs::write(root.join(".limpet/memory.jsonl"), "{}\n").unwrap();
+
+        let found = discover(root);
+        assert_eq!(
+            found,
+            vec![".github/workflows/ci.yml".to_string()],
+            "unexpected: {found:?}"
+        );
+    }
+
+    #[test]
+    fn discover_includes_files_without_a_grammar() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        fs::write(root.join("page.twig"), "{% block content %}{% endblock %}\n").unwrap();
+        fs::write(root.join("style.scss"), ".a { color: red; }\n").unwrap();
+        fs::write(root.join("notes.md"), "# notes\n").unwrap();
+        fs::write(root.join("logic.php"), "<?php function a() {}\n").unwrap();
+
+        let found = discover(root);
+        assert_eq!(
+            found,
+            vec![
+                "logic.php".to_string(),
+                "notes.md".to_string(),
+                "page.twig".to_string(),
+                "style.scss".to_string(),
+            ],
+            "every bounded file must be discoverable: {found:?}"
+        );
+    }
+
+    #[test]
+    fn file_level_index_hashes_content_and_tracks_changes() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        fs::write(root.join("page.twig"), "{% block a %}{% endblock %}\n").unwrap();
+        let store = Store::open_in_memory().unwrap();
+        let report = full_index(&store, root).unwrap();
+        assert_eq!(report.files, 1);
+        assert_eq!(report.symbols, 0);
+
+        let (lang, hash1): (Option<String>, String) = store
+            .conn
+            .query_row("SELECT lang, hash FROM files WHERE path = 'page.twig'", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(lang, None, "grammar-less files carry no lang");
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(root.join("page.twig"), "{% block b %}{% endblock %}\n").unwrap();
+        sweep(&store, root).unwrap();
+        let hash2: String = store
+            .conn
+            .query_row("SELECT hash FROM files WHERE path = 'page.twig'", [], |r| r.get(0))
+            .unwrap();
+        assert_ne!(hash1, hash2, "content change must change the file hash");
+    }
+
+    #[test]
+    fn file_level_index_handles_binary_content() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        fs::write(root.join("logo.png"), [0x89u8, 0x50, 0x4e, 0x47, 0x00, 0x01]).unwrap();
+        let store = Store::open_in_memory().unwrap();
+        let report = full_index(&store, root).unwrap();
+        assert_eq!(report.files, 1);
+        assert!(report.failed.is_empty(), "binary files must index cleanly: {:?}", report.failed);
     }
 }

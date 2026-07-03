@@ -533,7 +533,7 @@ pub fn tool_schemas() -> Value {
         },
         {
             "name": "remember",
-            "description": "Store a durable memory. kinds: fact (verified behavior), decision (choice + why), episode (what worked/failed), insight (gotcha), intent (what a module is for). Anchor it to code so limpet can invalidate it when that code changes. Provide evidence {command, output} to make it a verified fact.",
+            "description": "Store a durable memory. kinds: fact (verified behavior), decision (choice + why), episode (what worked/failed), insight (gotcha), intent (what a module is for). Anchor it to code so limpet can flag it when that code changes: symbol anchors track the function/class body, file anchors (no symbol) track the whole file's content — any indexed file works, including templates, styles, and configs. Every anchor must resolve or the call fails with the reason; nothing is stored half-anchored. Provide evidence {command, output} to make it a verified fact.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -541,7 +541,7 @@ pub fn tool_schemas() -> Value {
                     "body": { "type": "string", "description": "The memory itself. Short, specific, standalone." },
                     "anchors": { "type": "array", "items": { "type": "object", "properties": {
                         "file": { "type": "string", "description": "Repo-relative path." },
-                        "symbol": { "type": "string", "description": "Function/class name or FQN in that file (optional; omit for file-level)." }
+                        "symbol": { "type": "string", "description": "Function/class name or FQN in that file. Omit to anchor to the file itself (goes stale when the file's content changes)." }
                     }, "required": ["file"] } },
                     "evidence": { "type": "object", "properties": {
                         "command": { "type": "string" }, "output": { "type": "string" }

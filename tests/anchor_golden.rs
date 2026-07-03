@@ -227,6 +227,131 @@ fn verified_fact_gets_reverify_flag_when_stale() {
 }
 
 #[test]
+fn file_anchor_goes_stale_on_edit_and_invalidated_on_delete() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    fs::write(root.join("interior.twig"), "{% block hero %}old{% endblock %}\n").unwrap();
+    let store = Store::open_in_memory().unwrap();
+    index::full_index(&store, root).unwrap();
+
+    let result = memory::remember(
+        &store,
+        "insight",
+        "hero block height is locked to 480px by the design system",
+        "explicit",
+        None,
+        &[AnchorSpec { file: "interior.twig".into(), symbol: None }],
+        None,
+        &[],
+        None,
+    )
+    .unwrap();
+    assert_eq!(result.anchored, 1);
+
+    // Untouched: stays active.
+    let report = mutate_and_resolve(&store, root);
+    assert_eq!(report.fresh, 1);
+    assert_eq!(status_of(&store, &result.id).0, "active");
+
+    // Edited: stale with file_edited.
+    fs::write(root.join("interior.twig"), "{% block hero %}new{% endblock %}\n").unwrap();
+    let report = mutate_and_resolve(&store, root);
+    assert_eq!(report.stale, 1, "editing an anchored file must stale the memory");
+    let (status, reason) = status_of(&store, &result.id);
+    assert_eq!(status, "stale");
+    assert_eq!(reason.as_deref(), Some("file_edited"));
+
+    // Deleted: invalidated.
+    fs::remove_file(root.join("interior.twig")).unwrap();
+    let report = mutate_and_resolve(&store, root);
+    assert_eq!(report.invalidated, 1);
+    let (status, reason) = status_of(&store, &result.id);
+    assert_eq!(status, "invalidated");
+    assert_eq!(reason.as_deref(), Some("anchor_deleted"));
+}
+
+#[test]
+fn legacy_file_anchor_without_hash_is_backfilled_not_killed() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    fs::write(root.join("page.twig"), "{% block a %}{% endblock %}\n").unwrap();
+    let store = Store::open_in_memory().unwrap();
+    index::full_index(&store, root).unwrap();
+
+    let result = memory::remember(
+        &store,
+        "fact",
+        "page template renders the a block",
+        "explicit",
+        None,
+        &[AnchorSpec { file: "page.twig".into(), symbol: None }],
+        None,
+        &[],
+        None,
+    )
+    .unwrap();
+    // Simulate a v0.4.0 store where file anchors carried no hash.
+    store
+        .conn
+        .execute("UPDATE anchors SET ast_body_hash = NULL WHERE entry_id = ?1", [&result.id])
+        .unwrap();
+
+    let report = mutate_and_resolve(&store, root);
+    assert_eq!(report.fresh, 1, "legacy anchor must be adopted, not stale/killed");
+    assert_eq!(status_of(&store, &result.id).0, "active");
+    let hash: Option<String> = store
+        .conn
+        .query_row("SELECT ast_body_hash FROM anchors WHERE entry_id = ?1", [&result.id], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert!(hash.is_some(), "backfill must store the current content hash");
+}
+
+#[test]
+fn one_dead_anchor_degrades_multi_anchor_memory_instead_of_killing_it() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    fs::write(root.join("score.py"), ORIGINAL).unwrap();
+    fs::write(root.join("interior.twig"), "{% block hero %}{% endblock %}\n").unwrap();
+    let store = Store::open_in_memory().unwrap();
+    index::full_index(&store, root).unwrap();
+
+    let result = memory::remember(
+        &store,
+        "insight",
+        "health score is rendered by the hero block",
+        "explicit",
+        None,
+        &[
+            AnchorSpec { file: "score.py".into(), symbol: Some("compute_health_score".into()) },
+            AnchorSpec { file: "interior.twig".into(), symbol: None },
+        ],
+        None,
+        &[],
+        None,
+    )
+    .unwrap();
+    assert_eq!(result.anchored, 2);
+
+    // One anchor dies; the other still resolves.
+    fs::remove_file(root.join("interior.twig")).unwrap();
+    let report = mutate_and_resolve(&store, root);
+    assert_eq!(report.invalidated, 1);
+    assert_eq!(report.fresh, 1);
+    let (status, reason) = status_of(&store, &result.id);
+    assert_eq!(status, "stale", "a memory with a live anchor must not be invalidated");
+    assert_eq!(reason.as_deref(), Some("anchor_lost"));
+
+    // Both anchors dead: now it is genuinely invalidated.
+    fs::write(root.join("score.py"), "def unrelated():\n    return 0\n").unwrap();
+    let _ = mutate_and_resolve(&store, root);
+    let (status, reason) = status_of(&store, &result.id);
+    assert_eq!(status, "invalidated");
+    assert_eq!(reason.as_deref(), Some("anchor_deleted"));
+}
+
+#[test]
 fn hash_properties_hold_per_language() {
     // Same-body equality and edit sensitivity for each shipped grammar.
     let cases: Vec<(Lang, &str, &str, &str)> = vec![

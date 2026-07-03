@@ -54,8 +54,84 @@ pub struct RememberResult {
     pub possible_duplicates: Vec<serde_json::Value>,
 }
 
-/// Store a memory entry. Anchors are resolved against the live symbols
-/// table at write time so the entry is born with valid body hashes.
+/// A fully resolved anchor, ready to insert. Built before any row is
+/// written so an unresolvable anchor aborts the whole `remember` with
+/// nothing persisted (invariant I-A) instead of reporting a phantom
+/// `anchored` count (invariant I-B).
+struct ResolvedAnchor {
+    file: String,
+    symbol_fqn: Option<String>,
+    hash: String,
+    context_hint: Option<String>,
+}
+
+fn resolve_anchor(store: &Store, spec: &AnchorSpec) -> Result<ResolvedAnchor> {
+    match &spec.symbol {
+        Some(symbol) => {
+            // Accept a bare name or a full FQN.
+            let row: Option<(String, String, String)> = store
+                .conn
+                .query_row(
+                    "SELECT fqn, file, body_hash FROM symbols
+                     WHERE (fqn = ?1 OR name = ?1) AND file = ?2 LIMIT 1",
+                    params![symbol, spec.file],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .ok();
+            let Some((sym_fqn, file, hash)) = row else {
+                let mut near_stmt = store.conn.prepare(
+                    "SELECT fqn FROM symbols WHERE file = ?1 ORDER BY fqn LIMIT 10",
+                )?;
+                let near: Vec<String> = near_stmt
+                    .query_map([&spec.file], |r| r.get(0))?
+                    .collect::<rusqlite::Result<_>>()?;
+                bail!(
+                    "symbol '{symbol}' not found in {} (known there: {near:?})",
+                    spec.file
+                );
+            };
+            let hint: Option<String> = store
+                .conn
+                .query_row(
+                    "SELECT parent_fqn FROM symbols WHERE fqn = ?1 LIMIT 1",
+                    [&sym_fqn],
+                    |r| r.get(0),
+                )
+                .ok()
+                .flatten();
+            Ok(ResolvedAnchor { file, symbol_fqn: Some(sym_fqn), hash, context_hint: hint })
+        }
+        None => {
+            // File-level anchor: the file must be indexed, and its current
+            // content hash is stored so edits flip the memory to stale.
+            let hash: Option<String> = store
+                .conn
+                .query_row("SELECT hash FROM files WHERE path = ?1", [&spec.file], |r| {
+                    r.get(0)
+                })
+                .ok();
+            let Some(hash) = hash else {
+                bail!(
+                    "cannot anchor to '{}': file is not in the index. Either the \
+                     path is wrong, or the file is excluded by .gitignore, \
+                     .limpetignore, the 512KB size cap, or the minified-asset \
+                     skip. Fix that, run admin op=index, and retry.",
+                    spec.file
+                );
+            };
+            Ok(ResolvedAnchor {
+                file: spec.file.clone(),
+                symbol_fqn: None,
+                hash,
+                context_hint: None,
+            })
+        }
+    }
+}
+
+/// Store a memory entry. Anchors are resolved against the live index at
+/// write time so the entry is born with valid hashes; the entry plus all
+/// its anchors and links persist atomically, or not at all.
 pub fn remember(
     store: &Store,
     kind: &str,
@@ -91,6 +167,13 @@ pub fn remember(
     let now = now_iso();
     let conf = default_confidence(source, confidence);
 
+    // Resolve every anchor before writing anything: one bad anchor aborts
+    // the whole call with a loud error instead of a half-anchored entry.
+    let resolved: Vec<ResolvedAnchor> = anchors
+        .iter()
+        .map(|spec| resolve_anchor(store, spec))
+        .collect::<Result<_>>()?;
+
     let (ev_cmd, ev_digest, ev_at) = match evidence {
         Some(ev) => {
             use sha2::{Digest, Sha256};
@@ -101,6 +184,7 @@ pub fn remember(
         None => (None, None, None),
     };
 
+    let tx = store.conn.unchecked_transaction()?;
     store.conn.execute(
         "INSERT INTO entries(id, kind, body, created_at, updated_at, source,
                              confidence, status, branch,
@@ -110,61 +194,19 @@ pub fn remember(
     )?;
 
     let mut anchored = 0usize;
-    for spec in anchors {
-        match &spec.symbol {
-            Some(symbol) => {
-                // Accept a bare name or a full FQN.
-                let row: Option<(String, String, String)> = store
-                    .conn
-                    .query_row(
-                        "SELECT fqn, file, body_hash FROM symbols
-                         WHERE (fqn = ?1 OR name = ?1) AND file = ?2 LIMIT 1",
-                        params![symbol, spec.file],
-                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-                    )
-                    .ok();
-                let Some((sym_fqn, file, hash)) = row else {
-                    let mut near_stmt = store.conn.prepare(
-                        "SELECT fqn FROM symbols WHERE file = ?1 ORDER BY fqn LIMIT 10",
-                    )?;
-                    let near: Vec<String> = near_stmt
-                        .query_map([&spec.file], |r| r.get(0))?
-                        .collect::<rusqlite::Result<_>>()?;
-                    bail!(
-                        "symbol '{symbol}' not found in {} (known there: {near:?})",
-                        spec.file
-                    );
-                };
-                let hint: Option<String> = store
-                    .conn
-                    .query_row(
-                        "SELECT parent_fqn FROM symbols WHERE fqn = ?1 LIMIT 1",
-                        [&sym_fqn],
-                        |r| r.get(0),
-                    )
-                    .ok()
-                    .flatten();
-                store.conn.execute(
-                    "INSERT INTO anchors(entry_id, file, symbol_fqn, ast_body_hash, context_hint)
-                     VALUES (?1,?2,?3,?4,?5)",
-                    params![id, file, sym_fqn, hash, hint],
-                )?;
-                anchored += 1;
-            }
-            None => {
-                store.conn.execute(
-                    "INSERT INTO anchors(entry_id, file, symbol_fqn, ast_body_hash, context_hint)
-                     VALUES (?1,?2,NULL,NULL,NULL)",
-                    params![id, spec.file],
-                )?;
-                anchored += 1;
-            }
-        }
+    for a in &resolved {
+        store.conn.execute(
+            "INSERT INTO anchors(entry_id, file, symbol_fqn, ast_body_hash, context_hint)
+             VALUES (?1,?2,?3,?4,?5)",
+            params![id, a.file, a.symbol_fqn, a.hash, a.context_hint],
+        )?;
+        anchored += 1;
     }
 
     for l in links {
         add_link(store, &id, &l.target, &l.rel)?;
     }
+    tx.commit()?;
 
     // Near-duplicate surfacing: top FTS matches on this body among entries
     // anchored to any of the same files.

@@ -210,7 +210,10 @@ pub fn recall(
             }
         }
         if status == "invalidated" {
-            flags.push("invalidated:anchor_deleted".to_string());
+            flags.push(format!(
+                "invalidated:{}",
+                stale_reason.as_deref().unwrap_or("anchor_deleted")
+            ));
         }
         let mut cstmt = store.conn.prepare(
             "SELECT src FROM links WHERE dst = ?1 AND rel = 'contradicts'
