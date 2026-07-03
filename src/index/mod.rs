@@ -172,14 +172,28 @@ fn index_file(store: &Store, root: &Path, rel: &str) -> Result<(usize, bool)> {
     Ok((count, parse_ok))
 }
 
+/// The limpet data directory holding this (and every other) project's
+/// store, resolved from the live connection. It must never be indexed:
+/// when `LIMPET_DATA_DIR` points inside the repository, the SQLite WAL
+/// mutates on every write, so indexing it would dirty the index on each
+/// sweep forever.
+fn store_exclude_dir(store: &Store) -> Option<std::path::PathBuf> {
+    let db = store.conn.path().filter(|p| !p.is_empty())?;
+    let db = Path::new(db);
+    // <data_dir>/<repo_key>/store.db -> exclude <data_dir> entirely.
+    let key_dir = db.parent()?;
+    key_dir.parent().unwrap_or(key_dir).canonicalize().ok()
+}
+
 /// Walk the repository and collect indexable files, honoring .gitignore, an
 /// optional `.limpetignore` (gitignore syntax; works even outside a git repo),
 /// a built-in directory skip list, a max file size, and a minified-asset skip.
+/// `exclude` (the store's own data dir) is never descended into.
 ///
 /// Every file that survives those bounds is indexed, whether or not a
 /// grammar exists for it: symbol-bearing files get full extraction, the
 /// rest get file-level rows so anchors can attach to them.
-fn discover(root: &Path) -> Vec<String> {
+fn discover(root: &Path, exclude: Option<&Path>) -> Vec<String> {
     let mut out = Vec::new();
     // hidden(false): dotfiles and dot-dirs are walked so tracked files like
     // .github/workflows/*.yml and .gitignore are anchorable; .git itself is
@@ -198,6 +212,7 @@ fn discover(root: &Path) -> Vec<String> {
             )
         })
         .build();
+    let croot = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     for entry in walker.flatten() {
         let p = entry.path();
         if p.is_file() {
@@ -206,6 +221,9 @@ fn discover(root: &Path) -> Vec<String> {
                 continue;
             }
             if let Ok(rel) = p.strip_prefix(root) {
+                if exclude.is_some_and(|ex| croot.join(rel).starts_with(ex)) {
+                    continue;
+                }
                 out.push(rel.to_string_lossy().replace('\\', "/"));
             }
         }
@@ -218,7 +236,8 @@ fn discover(root: &Path) -> Vec<String> {
 pub fn full_index(store: &Store, root: &Path) -> Result<IndexReport> {
     let start = Instant::now();
     let mut report = IndexReport::default();
-    for rel in discover(root) {
+    let exclude = store_exclude_dir(store);
+    for rel in discover(root, exclude.as_deref()) {
         match index_file(store, root, &rel) {
             Ok((syms, parse_ok)) => {
                 report.files += 1;
@@ -267,7 +286,8 @@ pub fn sweep(store: &Store, root: &Path) -> Result<SweepReport> {
 
     use std::collections::HashSet;
     let known_set: HashSet<&String> = known.iter().map(|(p, _, _)| p).collect();
-    for rel in discover(root) {
+    let exclude = store_exclude_dir(store);
+    for rel in discover(root, exclude.as_deref()) {
         if !known_set.contains(&rel) {
             changed.push(rel);
         }
@@ -354,7 +374,7 @@ mod tests {
         fs::create_dir(root.join("ignored")).unwrap();
         fs::write(root.join("ignored/secret.php"), "<?php function b() {}\n").unwrap();
 
-        let found = discover(root);
+        let found = discover(root, None);
         // .limpetignore itself is a legitimate anchor target (dotfiles are
         // walked since hidden(false)); everything else bounded out.
         assert_eq!(
@@ -375,7 +395,7 @@ mod tests {
         fs::create_dir_all(root.join(".limpet")).unwrap();
         fs::write(root.join(".limpet/memory.jsonl"), "{}\n").unwrap();
 
-        let found = discover(root);
+        let found = discover(root, None);
         assert_eq!(
             found,
             vec![".github/workflows/ci.yml".to_string()],
@@ -392,7 +412,7 @@ mod tests {
         fs::write(root.join("notes.md"), "# notes\n").unwrap();
         fs::write(root.join("logic.php"), "<?php function a() {}\n").unwrap();
 
-        let found = discover(root);
+        let found = discover(root, None);
         assert_eq!(
             found,
             vec![
@@ -402,6 +422,35 @@ mod tests {
                 "style.scss".to_string(),
             ],
             "every bounded file must be discoverable: {found:?}"
+        );
+    }
+
+    #[test]
+    fn store_inside_repo_is_never_indexed() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        fs::write(root.join("keep.php"), "<?php function a() {}\n").unwrap();
+
+        // Store lives inside the repo, as with LIMPET_DATA_DIR=<repo>/.data.
+        let db_path = root.join(".data/repo-key/store.db");
+        let store = Store::open(&db_path).unwrap();
+        let report = full_index(&store, root).unwrap();
+        assert_eq!(report.files, 1, "store artifacts must not be indexed");
+
+        let rows: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM files WHERE path LIKE '.data/%'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(rows, 0, "no files row may point into the data dir");
+
+        // Sweep must not rediscover it either.
+        let sweep_report = sweep(&store, root).unwrap();
+        assert!(
+            sweep_report.reindexed.iter().all(|p| !p.starts_with(".data/")),
+            "sweep leaked store artifacts: {:?}",
+            sweep_report.reindexed
         );
     }
 
