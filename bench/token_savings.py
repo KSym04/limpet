@@ -25,7 +25,7 @@ any token price; they are excluded from the savings ratio and reported
 separately, because "infinite savings" would be marketing math.
 
 Run:  python3 bench/token_savings.py [path-to-limpet-binary]
-Exits nonzero if the measured savings ratio drops below 5x (regression gate).
+Exits nonzero if the measured savings ratio drops below GATE_RATIO (regression gate).
 """
 
 import json

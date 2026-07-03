@@ -124,22 +124,22 @@ Measured with a reproducible benchmark, seeded with 12 memories over a realistic
 
 ```
 question                                                   files+grep   recall   ratio  in code?
-------------------------------------------------------------------------------------------------
-why is the batch size 50 and why is there a queue at all         1929      363    5.3x  no
-why does the scanner skip draft products, is that a bug          1630      373    4.4x  no
-how is the health score computed                                 1630      349    4.7x  yes
-why semicolon delimiter and BOM in the csv export                1327      361    3.7x  no
-where do report files get written and why                        1327      356    3.7x  no
-how long are download tokens valid                               1023      165    6.2x  yes
-has anyone tried streaming the csv export                        1327      369    3.6x  no
-can I rename check_product in the scanner                        1630      373    4.4x  no
-what does the nightly cron actually exist for                     803      313    2.6x  no
-how often does the dashboard poll progress, can I lower it       1072      336    3.2x  no
-------------------------------------------------------------------------------------------------
-TOTAL                                                           13698     3373    4.1x
+----------------------------------------------------------------------------------------------------
+why is the batch size 50 and why is there a queue at all         1929      367    5.3x  no (answer only in memory)
+why does the scanner skip draft products, is that a bug          1630      377    4.3x  no (answer only in memory)
+how is the health score computed                                 1630      352    4.6x  yes
+why semicolon delimiter and BOM in the csv export                1327      361    3.7x  no (answer only in memory)
+where do report files get written and why                        1327      371    3.6x  no (answer only in memory)
+how long are download tokens valid                               1023      167    6.1x  yes
+has anyone tried streaming the csv export                        1327      369    3.6x  no (answer only in memory)
+can I rename check_product in the scanner                        1630      377    4.3x  no (answer only in memory)
+what does the nightly cron actually exist for                     803      317    2.5x  no (answer only in memory)
+how often does the dashboard poll progress and can I lower it    1072      340    3.2x  no (answer only in memory)
+----------------------------------------------------------------------------------------------------
+TOTAL                                                           13698     3398    4.0x
 ```
 
-**4.1x fewer tokens (75.6% saved) across the benchmark.** Reproduce it yourself:
+**4.0x fewer tokens (75% saved) across the benchmark.** Reproduce it yourself:
 
 ```bash
 cargo build --release

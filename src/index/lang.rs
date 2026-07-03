@@ -1,6 +1,7 @@
 //! Language registry: extension detection and tree-sitter grammar handles.
 //!
-//! v1 ships five curated grammars. Every language listed here has fixture
+//! Six curated grammars ship (PHP, JS, TS, Python, Rust, C/C++). Every
+//! language listed here has fixture
 //! coverage in `tests/index_langs.rs` (invariant I7); adding a language
 //! without a fixture is a review-blocking change.
 
