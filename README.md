@@ -128,7 +128,9 @@ cargo install --git https://github.com/KSym04/limpet limpet
 limpet install
 ```
 
-The first command builds and places the `limpet` binary in `~/.cargo/bin`. The second registers it with Claude Code (user scope, `~/.claude.json`); add `--dry-run` to preview the exact config change before it is written. Restart Claude Code and say "index this project".
+The first command builds and places the `limpet` binary in `~/.cargo/bin`. The second registers the MCP server with Claude Code (user scope, `~/.claude.json`) and installs the `/limpet` slash command; add `--dry-run` to preview the exact changes before they are written. Restart Claude Code and type `/limpet`.
+
+The `/limpet` command indexes the project, recalls what is already known (with stale items flagged), surfaces verified facts that need re-proof, and sets the memory-first working mode for the session: consult memory before re-deriving, check `map` before editing unfamiliar files, check `affected` before committing, and store durable learnings as they happen. Variants: `/limpet status`, `/limpet review` (re-verify stale facts), `/limpet export` (write the shareable JSONL).
 
 From a clone instead:
 

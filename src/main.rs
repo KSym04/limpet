@@ -116,6 +116,16 @@ fn claude_config_path() -> Result<PathBuf> {
     Ok(PathBuf::from(home).join(".claude.json"))
 }
 
+const SKILL_MD: &str = include_str!("skill.md");
+
+/// The /limpet skill for Claude Code: ~/.claude/skills/limpet/SKILL.md.
+fn skill_path() -> Result<PathBuf> {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .context("neither HOME nor USERPROFILE is set")?;
+    Ok(PathBuf::from(home).join(".claude/skills/limpet/SKILL.md"))
+}
+
 fn install(dry_run: bool) -> Result<()> {
     let exe = std::env::current_exe()?
         .canonicalize()
@@ -146,20 +156,27 @@ fn install(dry_run: bool) -> Result<()> {
         .expect("checked above")
         .insert("limpet".to_string(), entry.clone());
 
+    let skill = skill_path()?;
     if dry_run {
         println!(
-            "would write to {}:\n  limpet: {} -> {}",
+            "would write to {}:\n  limpet: {} -> {}\nwould write skill to {}",
             cfg_path.display(),
             before.map(|v| v.to_string()).unwrap_or_else(|| "(absent)".into()),
-            entry
+            entry,
+            skill.display()
         );
         return Ok(());
     }
     std::fs::write(&cfg_path, serde_json::to_string_pretty(&cfg)?)
         .with_context(|| format!("writing {}", cfg_path.display()))?;
+    if let Some(dir) = skill.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(&skill, SKILL_MD).with_context(|| format!("writing {}", skill.display()))?;
     println!(
-        "registered limpet with Claude Code ({}). Restart Claude Code, then say: \"index this project\".",
-        cfg_path.display()
+        "registered limpet with Claude Code ({})\ninstalled /limpet skill ({})\nRestart Claude Code, then type: /limpet",
+        cfg_path.display(),
+        skill.display()
     );
     Ok(())
 }
@@ -181,6 +198,15 @@ fn uninstall() -> Result<()> {
         println!("removed limpet from {}", cfg_path.display());
     } else {
         println!("limpet was not registered in {}", cfg_path.display());
+    }
+    if let Ok(skill) = skill_path() {
+        if skill.is_file() {
+            let _ = std::fs::remove_file(&skill);
+            if let Some(dir) = skill.parent() {
+                let _ = std::fs::remove_dir(dir); // only removes if empty
+            }
+            println!("removed /limpet skill ({})", skill.display());
+        }
     }
     println!("memory stores under ~/.local/share/limpet are untouched.");
     Ok(())
