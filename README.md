@@ -91,6 +91,8 @@ lose SOME anchors      others still resolve      stale (anchor_lost), never kill
 
 A multi-anchor memory dies only when **every** anchor dies. Losing one anchor while others still resolve degrades it to `stale:anchor_lost` so the surviving knowledge stays usable. And `remember` refuses an anchor it cannot resolve, loudly, at write time: no memory is ever born dead.
 
+Staleness is also symmetric: revert the code (a rolled-back experiment, a `git checkout`) and the memory heals back to active on the next call, because the anchor hash matches again. No re-verification ritual for changes that un-happened. Invalidation is one-way by design: a memory whose every anchor was deleted stays invalidated as history even if the files come back; store a fresh memory instead.
+
 Contradictions are explicit links: when a new memory contradicts an old one, both stay visible with the conflict flagged until one `supersedes` the other. History is never silently overwritten.
 
 ## 🪙 The receipts: token savings, measured
