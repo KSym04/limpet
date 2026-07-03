@@ -5,7 +5,7 @@
 //! Every statement in this codebase is parameterized; string-built SQL
 //! with user input is forbidden.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use rusqlite::Connection;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -165,6 +165,28 @@ impl Store {
                 home.join(".local").join("share").join("limpet")
             });
         base.join(crate::util::repo_key(root)).join("store.db")
+    }
+
+    /// Refuse to serve a store that a NEWER limpet has already touched.
+    ///
+    /// `limpet update` replaces the binary on disk, but a running server
+    /// keeps its old code image; old-code writes racing new-code writes on
+    /// one store have produced a spurious invalidation (issue #9). Every
+    /// tool call and every CLI write path calls this first: it stamps the
+    /// store with the running version, and a stale image gets a loud,
+    /// self-describing error instead of silently corrupting statuses.
+    pub fn version_guard(&self) -> Result<()> {
+        let running = env!("CARGO_PKG_VERSION");
+        match self.kv_get("code_version")? {
+            Some(stamped) if ver_tuple(&stamped) > ver_tuple(running) => bail!(
+                "this limpet process is running {running} but the store was \
+                 upgraded by limpet {stamped}. Restart the MCP client (or kill \
+                 lingering `limpet serve` processes) so a current binary serves \
+                 this store."
+            ),
+            Some(stamped) if stamped == running => Ok(()),
+            _ => self.kv_set("code_version", running),
+        }
     }
 
     pub fn kv_get(&self, k: &str) -> Result<Option<String>> {
@@ -354,6 +376,20 @@ impl Store {
     }
 }
 
+/// Dotted version to a comparable tuple; missing or non-numeric components
+/// sort low, so a malformed stamp can never outrank a real version.
+fn ver_tuple(v: &str) -> (u64, u64, u64) {
+    let mut it = v
+        .trim_start_matches('v')
+        .split('.')
+        .map(|p| p.parse::<u64>().unwrap_or(0));
+    (
+        it.next().unwrap_or(0),
+        it.next().unwrap_or(0),
+        it.next().unwrap_or(0),
+    )
+}
+
 #[derive(Debug, Default, PartialEq, serde::Serialize)]
 pub struct ImportReport {
     pub added: usize,
@@ -383,6 +419,38 @@ mod tests {
         ] {
             assert!(names.iter().any(|n| n == t), "missing {t}: {names:?}");
         }
+    }
+
+    #[test]
+    fn version_guard_stamps_and_refuses_newer_stores() {
+        let s = Store::open_in_memory().unwrap();
+
+        // First contact stamps the running version.
+        s.version_guard().unwrap();
+        assert_eq!(
+            s.kv_get("code_version").unwrap().as_deref(),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+
+        // Same version: fine. Older stamp: upgraded in place.
+        s.version_guard().unwrap();
+        s.kv_set("code_version", "0.1.0").unwrap();
+        s.version_guard().unwrap();
+        assert_eq!(
+            s.kv_get("code_version").unwrap().as_deref(),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+
+        // Store touched by a newer limpet: loud refusal naming both versions.
+        s.kv_set("code_version", "99.0.0").unwrap();
+        let err = s.version_guard().unwrap_err().to_string();
+        assert!(err.contains("99.0.0"), "{err}");
+        assert!(err.contains(env!("CARGO_PKG_VERSION")), "{err}");
+        assert!(err.to_lowercase().contains("restart"), "{err}");
+
+        // Malformed stamp never outranks a real version.
+        s.kv_set("code_version", "not-a-version").unwrap();
+        s.version_guard().unwrap();
     }
 
     #[test]
