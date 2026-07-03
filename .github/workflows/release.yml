@@ -45,11 +45,24 @@ jobs:
           cd target/${{ matrix.target }}/release
           Compress-Archive -Path limpet.exe -DestinationPath limpet-${{ matrix.target }}.zip
           (Get-FileHash limpet-${{ matrix.target }}.zip -Algorithm SHA256).Hash + "  limpet-${{ matrix.target }}.zip" | Out-File limpet-${{ matrix.target }}.zip.sha256 -Encoding ascii
+      - uses: actions/upload-artifact@v4
+        with:
+          name: limpet-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/limpet-${{ matrix.target }}.*
+          if-no-files-found: error
+
+  # Single job publishes the release once. Generating release notes inside the
+  # build matrix (one run per platform) is what triplicated the notes: each
+  # matrix job re-published the release and re-appended the generated block.
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
-          files: |
-            target/${{ matrix.target }}/release/limpet-${{ matrix.target }}.tar.gz
-            target/${{ matrix.target }}/release/limpet-${{ matrix.target }}.tar.gz.sha256
-            target/${{ matrix.target }}/release/limpet-${{ matrix.target }}.zip
-            target/${{ matrix.target }}/release/limpet-${{ matrix.target }}.zip.sha256
+          files: dist/*
           generate_release_notes: true
