@@ -259,6 +259,27 @@ Freshness model: every tool call runs a bounded incremental sweep (changed files
 
 See [ROADMAP.md](ROADMAP.md) for the full plan — snippet-by-symbol retrieval, the rework-avoided metric, portable repo identity, grammar wave 2, and the 1.0 stability contract. One rule governs all of it: a feature ships only if it feeds a receipt (`limpet stats`, the benchmark, rework-avoided) or the honesty envelope.
 
+## ⚖️ Reliance and license
+
+limpet is an aid to judgment, not a substitute for it. Its freshness and
+confidence signals are heuristics computed from code structure, not proof:
+an "active" memory is limpet's best evidence that stored knowledge still
+holds, never a guarantee that it is correct or complete. Verify anything you
+would not want to be wrong about before you rely on it, especially in
+security-sensitive or production changes. The whole design philosophy is to
+surface uncertainty rather than hide it ([PHILOSOPHY.md](PHILOSOPHY.md)), and
+that only protects you if you read the flags it gives you.
+
+The software is provided "as is", without warranty of any kind, and the
+authors carry no liability for its use, as set out in the license below.
+
+Contributions are welcome and are accepted under the same MIT license as the
+project (inbound = outbound): by opening a pull request you agree your
+contribution may be distributed under these terms. See
+[CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## 📄 License
 
-MIT
+MIT. See [LICENSE](LICENSE). The MIT permission notice includes an explicit
+disclaimer of warranty and limitation of liability; those clauses are the
+legally operative protection for both users and authors.

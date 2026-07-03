@@ -6,10 +6,15 @@ beyond that is possible.
 
 ## Guarantees, enforced in code and tests
 
-- **No network.** The codebase contains no HTTP client, no DNS, no sockets
-  except the visual memory server, which binds 127.0.0.1 only, answers GET
-  only, and serves one embedded document. There is no telemetry, no update
-  check, no cloud. Verify: `grep -rn "reqwest\|TcpStream::connect" src/`.
+- **No network, with exactly one explicit exception.** Indexing, recall,
+  memory, and the visual UI make no network calls at all: no telemetry, no
+  background update check, no cloud. The UI server binds 127.0.0.1 only,
+  answers GET only, and serves one embedded document. The single exception
+  is `limpet update`, which you invoke by hand: it fetches a
+  checksum-verified release binary over HTTPS (`ureq` + rustls) and sends
+  nothing but a `limpet/<version>` User-Agent. No other command touches the
+  network. Verify the boundary: `grep -rln "ureq" src/` returns only
+  `src/update.rs`.
 - **No shell.** The only external process is `git`, invoked with argument
   arrays. No user input ever reaches a shell interpreter.
 - **Path confinement.** Every file path arriving over MCP passes one
@@ -42,3 +47,19 @@ server, the CLI, or the store file format.
 
 Out of scope: attacks requiring an already-compromised local account, and
 the security of the coding agent connected to limpet.
+
+## Known residual risk (documented, not hidden)
+
+- **The updater trusts a same-origin checksum, not a signature.** `limpet
+  update` verifies the downloaded binary against a `.sha256` served from the
+  same GitHub release. This defends against corruption and a network MITM
+  that cannot rewrite both files, but not against a compromised GitHub
+  release or account, which could serve a matching malicious binary and
+  hash. Signed release binaries (minisign) are on the roadmap for 1.0. Until
+  then, you may skip the updater entirely and install from source
+  (`cargo install limpet`) if your threat model requires it.
+- **Imported memory is treated as untrusted** and passes the same guards as
+  a local write (secret rejection, size and confidence bounds, local anchor
+  re-resolution), but a teammate you import from can still plant plausible
+  *wrong* knowledge. Memory is an aid, not an authority: see the reliance
+  note in the README.
