@@ -175,6 +175,43 @@ fn file_anchor_stores_content_hash_at_write_time() {
 }
 
 #[test]
+fn verified_without_evidence_is_refused() {
+    let dir = TempDir::new().unwrap();
+    let store = seeded_store(dir.path());
+    let err = memory::remember(
+        &store, "fact", "claims to be proven", "verified", None, &[], None, &[], None,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("evidence"), "{err}");
+}
+
+#[test]
+fn ambiguous_bare_name_is_refused_with_candidates() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("two.py"),
+        "class A:\n    def push(self):\n        return 1\n\nclass B:\n    def push(self):\n        return 2\n",
+    )
+    .unwrap();
+    let store = seeded_store(dir.path());
+    let err = memory::remember(
+        &store,
+        "insight",
+        "push does a thing",
+        "explicit",
+        None,
+        &[AnchorSpec { file: "two.py".into(), symbol: Some("push".into()) }],
+        None,
+        &[],
+        None,
+    )
+    .unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("ambiguous"), "{msg}");
+    assert!(msg.contains("two.A.push") && msg.contains("two.B.push"), "must list candidates: {msg}");
+}
+
+#[test]
 fn kind_and_source_validation() {
     let dir = TempDir::new().unwrap();
     let store = seeded_store(dir.path());

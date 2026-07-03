@@ -58,6 +58,8 @@ pub struct SweepReport {
     pub dirty: Vec<String>,
     pub removed: Vec<String>,
     pub failed: Vec<String>,
+    /// The sweep itself errored: freshness is UNKNOWN, not clean.
+    pub sweep_failed: bool,
 }
 
 fn file_meta(path: &Path) -> Option<(i64, i64)> {
@@ -85,7 +87,7 @@ fn short_hash(bytes: &[u8]) -> String {
 /// `files` row with a raw-byte content hash and no symbols. That is what
 /// lets memories anchor to templates, styles, and configs (.twig, .scss,
 /// .md, ...) and go stale when those files change.
-fn index_file(store: &Store, root: &Path, rel: &str) -> Result<(usize, bool)> {
+pub(crate) fn index_file(store: &Store, root: &Path, rel: &str) -> Result<(usize, bool)> {
     let abs = root.join(rel);
     let Some((mtime_ns, size)) = file_meta(&abs) else {
         return Ok((0, false));
@@ -97,27 +99,61 @@ fn index_file(store: &Store, root: &Path, rel: &str) -> Result<(usize, bool)> {
     // A grammar match only upgrades a file from file-level to symbol-level;
     // it must never downgrade it (invariant I-N1). Two degradations land on
     // the file-level row instead of dropping the file: source that is not
-    // valid UTF-8 (CP949 / UTF-16 legacy engine code), and source over the
-    // parse cap (giant hand-written translation units), because the cap
+    // valid UTF-8 (CP49 legacy engine code, UTF-16 headers), and source over
+    // the parse cap (giant hand-written translation units), because the cap
     // protects tree-sitter from generated bundles, not hashing.
-    let src = match lang::detect(&abs) {
-        Some(_) if size > MAX_PARSE_BYTES as i64 => {
-            return index_file_level(store, rel, mtime_ns, size, &bytes)
-        }
+    enum Plan {
+        FileLevel(Vec<u8>),
+        Parsed(lang::Lang, String),
+    }
+    let plan = match lang::detect(&abs) {
+        Some(_) if size > MAX_PARSE_BYTES as i64 => Plan::FileLevel(bytes),
         Some(lang_id) => match String::from_utf8(bytes) {
-            Ok(s) => (lang_id, s),
-            Err(e) => return index_file_level(store, rel, mtime_ns, size, &e.into_bytes()),
+            Ok(s) => Plan::Parsed(lang_id, s),
+            Err(e) => Plan::FileLevel(e.into_bytes()),
         },
-        None => return index_file_level(store, rel, mtime_ns, size, &bytes),
+        None => Plan::FileLevel(bytes),
     };
-    let (lang_id, src) = src;
+
+    // All row mutations for one file happen in one transaction: a crash (or
+    // a concurrent resolve) must never observe a half-indexed file, which
+    // previously looked fresh (matching mtime) yet had zero symbols and
+    // could spuriously invalidate anchors (audit 2026-07).
+    store.conn.execute_batch("BEGIN IMMEDIATE")?;
+    let outcome = match &plan {
+        Plan::FileLevel(raw) => index_file_level(store, rel, mtime_ns, size, raw),
+        Plan::Parsed(lang_id, src) => index_file_parsed(store, rel, mtime_ns, size, *lang_id, src),
+    };
+    match outcome {
+        Ok(r) => {
+            store.conn.execute_batch("COMMIT")?;
+            Ok(r)
+        }
+        Err(e) => {
+            let _ = store.conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
+}
+
+/// Symbol-level indexing of decodable source. Runs inside index_file's
+/// transaction. The file is parsed ONCE; all symbol body hashes come from
+/// that single tree instead of a full reparse per symbol.
+fn index_file_parsed(
+    store: &Store,
+    rel: &str,
+    mtime_ns: i64,
+    size: i64,
+    lang_id: lang::Lang,
+    src: &str,
+) -> Result<(usize, bool)> {
     let content_hash = short_hash(src.as_bytes());
 
     store.conn.execute("DELETE FROM symbols WHERE file = ?1", [rel])?;
     store.conn.execute("DELETE FROM imports WHERE file = ?1", [rel])?;
     store.conn.execute("DELETE FROM calls WHERE file = ?1", [rel])?;
 
-    let (facts, parse_ok) = match extract::extract(lang_id, &src) {
+    let (facts, parse_ok) = match extract::extract(lang_id, src) {
         Ok(f) => (f, true),
         Err(_) => (extract::FileFacts::default(), false),
     };
@@ -131,6 +167,10 @@ fn index_file(store: &Store, root: &Path, rel: &str) -> Result<(usize, bool)> {
         params![rel, lang_id.as_str(), mtime_ns, size, content_hash, parse_ok],
     )?;
 
+    let ranges: Vec<(usize, usize)> = facts.symbols.iter().map(|s| s.byte_range).collect();
+    let hashes = anchor::ast_body_hashes(lang_id, src, &ranges)
+        .unwrap_or_else(|_| vec![String::from("unhashed"); ranges.len()]);
+
     let mut count = 0usize;
     for (ordinal, sym) in facts.symbols.iter().enumerate() {
         let parent_refs: Vec<&str> = sym.parents.iter().map(String::as_str).collect();
@@ -141,8 +181,10 @@ fn index_file(store: &Store, root: &Path, rel: &str) -> Result<(usize, bool)> {
             let up = &parent_refs[..parent_refs.len() - 1];
             Some(fqn::fqn(rel, up, parent_refs[parent_refs.len() - 1]))
         };
-        let body_hash = anchor::ast_body_hash(lang_id, &src, sym.byte_range)
-            .unwrap_or_else(|_| String::from("unhashed"));
+        let body_hash = hashes
+            .get(ordinal)
+            .cloned()
+            .unwrap_or_else(|| String::from("unhashed"));
         store.conn.execute(
             "INSERT INTO symbols(fqn, name, kind, file, start_line, end_line,
                                  body_hash, parent_fqn, ordinal)

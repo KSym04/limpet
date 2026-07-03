@@ -20,7 +20,12 @@ pub fn dispatch(store: &mut Store, root: &Path, name: &str, args: &Value) -> Res
     // are trustworthy.
     store.version_guard()?;
     // Freshness first (I6): bounded sweep + anchor resolution on every call.
-    let sweep = index::sweep(store, root).unwrap_or_default();
+    // A failed sweep must not be reported as "dirty: 0" — that asserts a
+    // freshness that was never checked (audit 2026-07).
+    let sweep = match index::sweep(store, root) {
+        Ok(s) => s,
+        Err(_) => SweepReport { sweep_failed: true, ..SweepReport::default() },
+    };
     let _ = anchor::resolve_all(store);
 
     match name {
@@ -123,8 +128,15 @@ fn tool_recall(store: &Store, sweep: &SweepReport, args: &Value) -> Result<Value
         Completeness {
             matched: result.matched,
             returned: result.returned,
+            // Name the TRUE cause of omission: the relevance floor and the
+            // token budget are different things (audit 2026-07).
             omitted_reason: if result.returned < result.matched {
-                Some("budget")
+                let budget_cut = result.matched - result.returned - result.cut_by_floor;
+                match (result.cut_by_floor > 0, budget_cut > 0) {
+                    (true, true) => Some("budget+relevance_floor"),
+                    (true, false) => Some("relevance_floor"),
+                    _ => Some("budget"),
+                }
             } else {
                 None
             },
@@ -151,6 +163,11 @@ fn tool_remember(store: &Store, root: &Path, sweep: &SweepReport, args: &Value) 
     };
     for a in &anchors {
         crate::util::validate_rel_path(root, &a.file)?;
+        // A memory must anchor to the file's CURRENT content: under sweep
+        // budget starvation the target could still be dirty, minting an
+        // anchor with the pre-edit hash that flips stale on the very next
+        // sweep (audit 2026-07). Anchors are few, so this is cheap.
+        let _ = index::index_file(store, root, &a.file);
     }
     let evidence: Option<memory::Evidence> = match args.get("evidence") {
         Some(v) if !v.is_null() => Some(serde_json::from_value(v.clone()).context("parsing evidence")?),
@@ -302,11 +319,31 @@ fn tool_map(store: &Store, sweep: &SweepReport, args: &Value) -> Result<Value> {
         .iter()
         .filter(|m| m["status"].as_str() == Some("stale"))
         .count();
-    let matched = symbols.len() + memories.len();
+    // True totals, so a clipped list is disclosed instead of silently
+    // presented as complete (envelope invariant; audit 2026-07).
+    let sym_total: i64 = store.conn.query_row(
+        "SELECT COUNT(*) FROM symbols WHERE file = ?1 OR fqn = ?1 OR name = ?1",
+        [target],
+        |r| r.get(0),
+    )?;
+    let mut calls_total = 0i64;
+    for f in &files {
+        calls_total += store.conn.query_row(
+            "SELECT COUNT(*) FROM calls WHERE file = ?1",
+            [f],
+            |r| r.get::<_, i64>(0),
+        )?;
+    }
+    let returned = symbols.len() + memories.len() + calls_out.len();
+    let matched = sym_total as usize + calls_total as usize + memories.len();
     let meta = build_meta(
         store,
         sweep,
-        Completeness { matched, returned: matched, omitted_reason: None },
+        Completeness {
+            matched: matched.max(returned),
+            returned,
+            omitted_reason: if matched > returned { Some("limit") } else { None },
+        },
         stale,
         0,
     );
@@ -373,11 +410,26 @@ fn tool_affected(store: &Store, root: &Path, sweep: &SweepReport) -> Result<Valu
         .iter()
         .filter(|m| m["kind"].as_str() == Some("decision"))
         .collect();
-    let matched = changed.len() + impacted_symbols.len() + touched_memories.len();
+    // Disclose symbol clipping (LIMIT 50 per changed file) instead of
+    // reporting the clipped view as complete (audit 2026-07).
+    let mut sym_total = 0i64;
+    for f in &changed {
+        sym_total += store.conn.query_row(
+            "SELECT COUNT(*) FROM symbols WHERE file = ?1",
+            [f],
+            |r| r.get::<_, i64>(0),
+        )?;
+    }
+    let returned = changed.len() + impacted_symbols.len() + touched_memories.len();
+    let matched = changed.len() + sym_total as usize + touched_memories.len();
     let meta = build_meta(
         store,
         sweep,
-        Completeness { matched, returned: matched, omitted_reason: None },
+        Completeness {
+            matched: matched.max(returned),
+            returned,
+            omitted_reason: if matched > returned { Some("limit") } else { None },
+        },
         stale,
         0,
     );

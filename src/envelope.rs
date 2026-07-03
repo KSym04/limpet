@@ -32,6 +32,10 @@ pub fn build_meta(
     // non-empty lists are shown (capped) so nothing is hidden.
     let mut freshness = serde_json::Map::new();
     freshness.insert("indexed_at".into(), json!(indexed_at));
+    if sweep.sweep_failed {
+        // Freshness is unknown, not clean; say so (audit 2026-07).
+        freshness.insert("sweep_failed".into(), json!(true));
+    }
     if !sweep.reindexed.is_empty() {
         freshness.insert("reindexed_now".into(), json!(sweep.reindexed.len()));
     }

@@ -14,6 +14,10 @@ pub const SCHEMA_VERSION: i64 = 1;
 
 pub struct Store {
     pub conn: Connection,
+    /// This process's session baseline for the savings ledger. In-memory on
+    /// purpose: a shared-kv base let one server boot (or a ledger_reset in
+    /// another process) corrupt every other process's session view.
+    session_base: std::cell::Cell<Ledger>,
 }
 
 const SCHEMA_V1: &str = r#"
@@ -131,7 +135,7 @@ impl Store {
              ON CONFLICT(k) DO NOTHING",
             [SCHEMA_VERSION.to_string()],
         )?;
-        Ok(Store { conn })
+        Ok(Store { conn, session_base: std::cell::Cell::new(Ledger::default()) })
     }
 
     /// Open an in-memory store (tests).
@@ -139,7 +143,7 @@ impl Store {
         let conn = Connection::open_in_memory()?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.execute_batch(SCHEMA_V1)?;
-        Ok(Store { conn })
+        Ok(Store { conn, session_base: std::cell::Cell::new(Ledger::default()) })
     }
 
     /// Default database path for a repository root.
@@ -177,15 +181,31 @@ impl Store {
     /// self-describing error instead of silently corrupting statuses.
     pub fn version_guard(&self) -> Result<()> {
         let running = env!("CARGO_PKG_VERSION");
-        match self.kv_get("code_version")? {
-            Some(stamped) if ver_tuple(&stamped) > ver_tuple(running) => bail!(
-                "this limpet process is running {running} but the store was \
-                 upgraded by limpet {stamped}. Restart the MCP client (or kill \
-                 lingering `limpet serve` processes) so a current binary serves \
-                 this store."
-            ),
-            Some(stamped) if stamped == running => Ok(()),
-            _ => self.kv_set("code_version", running),
+        // Compare-and-stamp atomically: without the IMMEDIATE transaction a
+        // stale image could read the old stamp in the window before a newer
+        // binary writes its own, and proceed to write (audit 2026-07).
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let outcome = (|| -> Result<()> {
+            match self.kv_get("code_version")? {
+                Some(stamped) if ver_tuple(&stamped) > ver_tuple(running) => bail!(
+                    "this limpet process is running {running} but the store was \
+                     upgraded by limpet {stamped}. Restart the MCP client (or kill \
+                     lingering `limpet serve` processes) so a current binary serves \
+                     this store."
+                ),
+                Some(stamped) if stamped == running => Ok(()),
+                _ => self.kv_set("code_version", running),
+            }
+        })();
+        match outcome {
+            Ok(()) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
         }
     }
 
@@ -304,13 +324,43 @@ impl Store {
                 Err(other) => return Err(other.into()),
             };
 
-            match existing {
+            let entry_skipped = match existing {
                 Some(cur) if cur.as_str() >= incoming_updated => {
                     report.skipped += 1;
-                    continue;
+                    true
                 }
-                Some(_) => report.updated += 1,
-                None => report.added += 1,
+                Some(_) => {
+                    report.updated += 1;
+                    false
+                }
+                None => {
+                    report.added += 1;
+                    false
+                }
+            };
+            if entry_skipped {
+                // The entry body is not newer, but links merge regardless:
+                // add_link never bumps updated_at, so link-only changes would
+                // otherwise never propagate between machines.
+                if let Some(links) = obj["links"].as_array() {
+                    for l in links {
+                        let dst = l["dst"].as_str().unwrap_or_default();
+                        let dst_exists: bool = tx.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM entries WHERE id = ?1)",
+                            [dst],
+                            |r| r.get(0),
+                        )?;
+                        if !dst_exists {
+                            report.links_dropped += 1;
+                            continue;
+                        }
+                        tx.execute(
+                            "INSERT OR IGNORE INTO links(src, dst, rel) VALUES (?1,?2,?3)",
+                            rusqlite::params![id, dst, l["rel"].as_str().unwrap_or("supports")],
+                        )?;
+                    }
+                }
+                continue;
             }
 
             tx.execute(
@@ -360,13 +410,22 @@ impl Store {
             }
             if let Some(links) = obj["links"].as_array() {
                 for l in links {
+                    let dst = l["dst"].as_str().unwrap_or_default();
+                    // INSERT OR IGNORE would swallow an FK violation as a
+                    // silent drop; check and count instead (honesty applies
+                    // to imports too).
+                    let dst_exists: bool = tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM entries WHERE id = ?1)",
+                        [dst],
+                        |r| r.get(0),
+                    )?;
+                    if !dst_exists {
+                        report.links_dropped += 1;
+                        continue;
+                    }
                     tx.execute(
                         "INSERT OR IGNORE INTO links(src, dst, rel) VALUES (?1,?2,?3)",
-                        rusqlite::params![
-                            id,
-                            l["dst"].as_str().unwrap_or_default(),
-                            l["rel"].as_str().unwrap_or("supports"),
-                        ],
+                        rusqlite::params![id, dst, l["rel"].as_str().unwrap_or("supports")],
                     )?;
                 }
             }
@@ -434,7 +493,9 @@ impl Store {
     }
 
     /// Accumulate one recall's figures. `query_hash` marks the query as
-    /// seen (lifetime): first sighting bumps distinct_queries.
+    /// seen (lifetime): first sighting bumps distinct_queries. The whole
+    /// read-modify-write runs in one IMMEDIATE transaction so concurrent
+    /// serve processes can neither lose updates nor tear the counters.
     pub fn ledger_add(
         &self,
         served: i64,
@@ -442,26 +503,39 @@ impl Store {
         reads_avoided: i64,
         query_hash: &str,
     ) -> Result<()> {
-        let cur = self.ledger_read();
-        let seen_key = format!("ledger.q.{query_hash}");
-        let newly_seen = self
-            .conn
-            .execute(
-                "INSERT OR IGNORE INTO meta_kv(k, v) VALUES(?1, '1')",
-                [&seen_key],
-            )?
-            > 0;
-        self.kv_set(LEDGER_KEYS[0], &(cur.recalls + 1).to_string())?;
-        if newly_seen {
-            self.kv_set(LEDGER_KEYS[1], &(cur.distinct_queries + 1).to_string())?;
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        let outcome = (|| -> Result<()> {
+            let cur = self.ledger_read();
+            let seen_key = format!("ledger.q.{query_hash}");
+            let newly_seen = self
+                .conn
+                .execute(
+                    "INSERT OR IGNORE INTO meta_kv(k, v) VALUES(?1, '1')",
+                    [&seen_key],
+                )?
+                > 0;
+            self.kv_set(LEDGER_KEYS[0], &(cur.recalls + 1).to_string())?;
+            if newly_seen {
+                self.kv_set(LEDGER_KEYS[1], &(cur.distinct_queries + 1).to_string())?;
+            }
+            self.kv_set(LEDGER_KEYS[2], &(cur.served + served).to_string())?;
+            self.kv_set(LEDGER_KEYS[3], &(cur.baseline + baseline).to_string())?;
+            self.kv_set(LEDGER_KEYS[4], &(cur.reads_avoided + reads_avoided).to_string())?;
+            if self.kv_get("ledger.since")?.is_none() {
+                self.kv_set("ledger.since", &crate::index::now_iso())?;
+            }
+            Ok(())
+        })();
+        match outcome {
+            Ok(()) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
         }
-        self.kv_set(LEDGER_KEYS[2], &(cur.served + served).to_string())?;
-        self.kv_set(LEDGER_KEYS[3], &(cur.baseline + baseline).to_string())?;
-        self.kv_set(LEDGER_KEYS[4], &(cur.reads_avoided + reads_avoided).to_string())?;
-        if self.kv_get("ledger.since")?.is_none() {
-            self.kv_set("ledger.since", &crate::index::now_iso())?;
-        }
-        Ok(())
     }
 
     pub fn ledger_since(&self) -> Option<String> {
@@ -474,26 +548,16 @@ impl Store {
         Ok(())
     }
 
-    /// Stamp the current lifetime figures as this process's session base.
-    /// Session view = lifetime - base; independent per process.
+    /// Snapshot the current lifetime figures as this process's session base.
+    /// Session view = lifetime - base. In-memory: shared-kv storage let one
+    /// server boot clobber every other process's session view.
     pub fn ledger_session_start(&self) -> Result<()> {
-        let cur = self.ledger_read();
-        self.kv_set("ledger_session.recalls", &cur.recalls.to_string())?;
-        self.kv_set("ledger_session.distinct_queries", &cur.distinct_queries.to_string())?;
-        self.kv_set("ledger_session.served", &cur.served.to_string())?;
-        self.kv_set("ledger_session.baseline", &cur.baseline.to_string())?;
-        self.kv_set("ledger_session.reads_avoided", &cur.reads_avoided.to_string())?;
+        self.session_base.set(self.ledger_read());
         Ok(())
     }
 
     pub fn ledger_session_base(&self) -> Ledger {
-        Ledger {
-            recalls: self.kv_i64("ledger_session.recalls"),
-            distinct_queries: self.kv_i64("ledger_session.distinct_queries"),
-            served: self.kv_i64("ledger_session.served"),
-            baseline: self.kv_i64("ledger_session.baseline"),
-            reads_avoided: self.kv_i64("ledger_session.reads_avoided"),
-        }
+        self.session_base.get()
     }
 }
 
@@ -516,6 +580,9 @@ pub struct ImportReport {
     pub added: usize,
     pub updated: usize,
     pub skipped: usize,
+    /// Links whose target entry does not exist locally: reported, not
+    /// silently swallowed by INSERT OR IGNORE.
+    pub links_dropped: usize,
 }
 
 #[cfg(test)]

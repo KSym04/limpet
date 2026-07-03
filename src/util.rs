@@ -96,6 +96,9 @@ pub fn repo_key(root: &Path) -> String {
 /// This is the single choke point for all file arguments arriving over MCP.
 pub fn validate_rel_path(root: &Path, rel: &str) -> Result<PathBuf> {
     let p = Path::new(rel);
+    if p.as_os_str().is_empty() {
+        bail!("empty path is not allowed");
+    }
     if p.is_absolute() {
         bail!("absolute paths are not allowed: {rel}");
     }
@@ -108,7 +111,29 @@ pub fn validate_rel_path(root: &Path, rel: &str) -> Result<PathBuf> {
             _ => {}
         }
     }
-    Ok(root.join(p))
+    let joined = root.join(p);
+    // Symlink check (audit 2026-07): canonicalize the deepest EXISTING
+    // ancestor (the file itself may legitimately not exist yet, e.g. a
+    // fresh export target) and require it to stay under the canonical
+    // root, so a repo-internal `evil -> /etc` link cannot escape.
+    if let Ok(canon_root) = root.canonicalize() {
+        let mut probe: &Path = &joined;
+        let canon_probe = loop {
+            match probe.canonicalize() {
+                Ok(c) => break Some(c),
+                Err(_) => match probe.parent() {
+                    Some(parent) => probe = parent,
+                    None => break None,
+                },
+            }
+        };
+        if let Some(c) = canon_probe {
+            if !c.starts_with(&canon_root) {
+                bail!("path escapes the repository via a symlink: {rel}");
+            }
+        }
+    }
+    Ok(joined)
 }
 
 #[cfg(test)]
@@ -130,6 +155,24 @@ mod tests {
         assert_eq!(token_estimate(""), 0);
         assert_eq!(token_estimate("abcd"), 1);
         assert_eq!(token_estimate("abcde"), 2);
+    }
+
+    #[test]
+    fn rel_path_rejects_empty_and_symlink_escape() {
+        assert!(validate_rel_path(Path::new("/tmp/repo"), "").is_err());
+
+        #[cfg(unix)]
+        {
+            let dir = tempfile::TempDir::new().unwrap();
+            let root = dir.path();
+            std::fs::create_dir(root.join("ok")).unwrap();
+            std::os::unix::fs::symlink("/etc", root.join("evil")).unwrap();
+            assert!(
+                validate_rel_path(root, "evil/hosts").is_err(),
+                "symlink out of the repo must be rejected"
+            );
+            assert!(validate_rel_path(root, "ok/new-file.txt").is_ok());
+        }
     }
 
     #[test]
