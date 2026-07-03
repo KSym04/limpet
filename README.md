@@ -213,7 +213,9 @@ Data lives under `~/.local/share/limpet/`, one SQLite store per repository. Team
 
 ## 🌳 Whole repo indexed, thin on purpose
 
-**Every file in the repository is indexed and anchorable.** Files with a shipped grammar (PHP, JavaScript, TypeScript, Python, Rust) get full symbol extraction: functions, classes, imports, and name-based call references labeled `syntactic`. Every other file (`.twig`, `.scss`, `.vue`, `.blade.php`, `.md`, `.yml`, configs, anything) gets a file-level node with a content hash, so a memory can anchor to it and go `stale:file_edited` the moment it changes. On template-heavy stacks (WordPress/Timber, Rails, Laravel) that is where the knowledge worth remembering actually lives.
+**Every file in the repository is indexed and anchorable.** Files with a shipped grammar (PHP, JavaScript, TypeScript, Python, Rust, C/C++) get full symbol extraction: functions, classes, imports, and name-based call references labeled `syntactic`. Every other file (`.twig`, `.scss`, `.vue`, `.blade.php`, `.md`, `.yml`, configs, anything) gets a file-level node with a content hash, so a memory can anchor to it and go `stale:file_edited` the moment it changes. On template-heavy stacks (WordPress/Timber, Rails, Laravel) that is where the knowledge worth remembering actually lives.
+
+Legacy encodings degrade gracefully: a grammar-matched file that is not valid UTF-8 (CP949 or UTF-16 source in an old C++ engine, say) keeps its file-level anchor instead of disappearing from the index. A grammar can only ever upgrade a file, never make it less anchorable.
 
 What the walk skips, deliberately: everything in `.gitignore`, everything in an optional `.limpetignore` (gitignore syntax, works even outside a git repo), `node_modules`/`vendor`/`target`/`dist`/`build`, hidden files, `*.min.*` assets, and files over 512KB. Those bounds are what keep a full WordPress install from pegging your CPU; use `.limpetignore` to opt out anything else.
 
@@ -242,7 +244,7 @@ Freshness model: every tool call runs a bounded incremental sweep (changed files
 ## 🧭 Roadmap
 
 - SessionEnd/Stop hook helpers for automatic episode mining from transcripts
-- More grammars (Go, Java, Ruby, C#, C/C++, Bash), each with fixture coverage before shipping
+- More grammars (Go, Java, Ruby, C#, Bash), each with fixture coverage before shipping
 - FS-event watcher (notify) to replace the on-call sweep on very large repos
 - Optional embedding reranking behind a feature flag, only if recall evals prove it earns its size
 - Signed release binaries (minisign) so `limpet update` verifies a maintainer signature, not just a same-origin checksum

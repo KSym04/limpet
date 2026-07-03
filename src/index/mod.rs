@@ -83,31 +83,22 @@ fn index_file(store: &Store, root: &Path, rel: &str) -> Result<(usize, bool)> {
     let Some((mtime_ns, size)) = file_meta(&abs) else {
         return Ok((0, false));
     };
-    let Some(lang_id) = lang::detect(&abs) else {
-        // No grammar: file-level node only. Hash raw bytes so this also
-        // works for non-UTF-8 content.
-        let bytes = match std::fs::read(&abs) {
-            Ok(b) => b,
-            Err(_) => return Ok((0, false)),
-        };
-        let content_hash = short_hash(&bytes);
-        store.conn.execute("DELETE FROM symbols WHERE file = ?1", [rel])?;
-        store.conn.execute("DELETE FROM imports WHERE file = ?1", [rel])?;
-        store.conn.execute("DELETE FROM calls WHERE file = ?1", [rel])?;
-        store.conn.execute(
-            "INSERT INTO files(path, lang, mtime_ns, size, hash, parse_ok)
-             VALUES (?1,NULL,?2,?3,?4,1)
-             ON CONFLICT(path) DO UPDATE SET lang=NULL,
-               mtime_ns=excluded.mtime_ns, size=excluded.size,
-               hash=excluded.hash, parse_ok=1",
-            params![rel, mtime_ns, size, content_hash],
-        )?;
-        return Ok((0, true));
-    };
-    let src = match std::fs::read_to_string(&abs) {
-        Ok(s) => s,
+    let bytes = match std::fs::read(&abs) {
+        Ok(b) => b,
         Err(_) => return Ok((0, false)),
     };
+    // A grammar match only upgrades a file from file-level to symbol-level;
+    // it must never downgrade it. Grammar-matched files that are not valid
+    // UTF-8 (CP949 / UTF-16 legacy engine source) cannot be parsed by
+    // tree-sitter, so they keep the file-level row instead of vanishing.
+    let src = match lang::detect(&abs) {
+        Some(lang_id) => match String::from_utf8(bytes) {
+            Ok(s) => (lang_id, s),
+            Err(e) => return index_file_level(store, rel, mtime_ns, size, &e.into_bytes()),
+        },
+        None => return index_file_level(store, rel, mtime_ns, size, &bytes),
+    };
+    let (lang_id, src) = src;
     let content_hash = short_hash(src.as_bytes());
 
     store.conn.execute("DELETE FROM symbols WHERE file = ?1", [rel])?;
@@ -170,6 +161,30 @@ fn index_file(store: &Store, root: &Path, rel: &str) -> Result<(usize, bool)> {
         )?;
     }
     Ok((count, parse_ok))
+}
+
+/// File-level row: content hash over raw bytes, no symbols. Used for files
+/// without a grammar and for grammar-matched files that are not valid UTF-8.
+fn index_file_level(
+    store: &Store,
+    rel: &str,
+    mtime_ns: i64,
+    size: i64,
+    bytes: &[u8],
+) -> Result<(usize, bool)> {
+    let content_hash = short_hash(bytes);
+    store.conn.execute("DELETE FROM symbols WHERE file = ?1", [rel])?;
+    store.conn.execute("DELETE FROM imports WHERE file = ?1", [rel])?;
+    store.conn.execute("DELETE FROM calls WHERE file = ?1", [rel])?;
+    store.conn.execute(
+        "INSERT INTO files(path, lang, mtime_ns, size, hash, parse_ok)
+         VALUES (?1,NULL,?2,?3,?4,1)
+         ON CONFLICT(path) DO UPDATE SET lang=NULL,
+           mtime_ns=excluded.mtime_ns, size=excluded.size,
+           hash=excluded.hash, parse_ok=1",
+        params![rel, mtime_ns, size, content_hash],
+    )?;
+    Ok((0, true))
 }
 
 /// The limpet data directory holding this (and every other) project's

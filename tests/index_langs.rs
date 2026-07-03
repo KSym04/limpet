@@ -152,6 +152,77 @@ impl ScanQueue {
 }
 
 #[test]
+fn cpp_extraction() {
+    let src = r#"
+#include <vector>
+#include "GLGaeaClient.h"
+
+int top_level(int x) {
+    helper_call(x);
+    return x + 1;
+}
+
+class ScanQueue {
+public:
+    void push(int item) {
+        this->validate(item);
+    }
+};
+
+void GLGaeaClient::GetSkinChar(int id) {
+    Lookup::Find(id);
+}
+"#;
+    let facts = extract::extract(Lang::Cpp, src).unwrap();
+    assert_eq!(names(&facts, "function"), vec!["top_level", "GetSkinChar"]);
+    assert_eq!(names(&facts, "class"), vec!["ScanQueue"]);
+    assert_eq!(names(&facts, "method"), vec!["push"]);
+    assert!(facts.imports.iter().any(|i| i == "vector"), "{:?}", facts.imports);
+    assert!(facts.imports.iter().any(|i| i == "GLGaeaClient.h"), "{:?}", facts.imports);
+    assert!(facts
+        .calls
+        .iter()
+        .any(|(scope, callee)| scope == "top_level" && callee == "helper_call"));
+    assert!(facts
+        .calls
+        .iter()
+        .any(|(scope, callee)| scope == "GetSkinChar" && callee == "Find"),
+        "{:?}", facts.calls);
+}
+
+#[test]
+fn cpp_non_utf8_source_keeps_file_level_row() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    fs::write(root.join("good.cpp"), "int ok(int a) { return a + 1; }\n").unwrap();
+    // CP949-encoded comment bytes (legacy Korean engine source): a grammar
+    // match must degrade to a file-level row, never drop the file (I-N1).
+    let mut cp949 = b"// ".to_vec();
+    cp949.extend_from_slice(&[0xB0, 0xA1, 0xB3, 0xAA, 0xB4, 0xD9]);
+    cp949.extend_from_slice(b"\nint legacy(int a) { return a + 1; }\n");
+    fs::write(root.join("legacy.cpp"), &cp949).unwrap();
+
+    let store = Store::open_in_memory().unwrap();
+    let report = index::full_index(&store, root).unwrap();
+    assert_eq!(report.files, 2);
+    assert!(report.failed.is_empty(), "decode fallback is not a failure: {:?}", report.failed);
+
+    let (lang, hash): (Option<String>, String) = store
+        .conn
+        .query_row("SELECT lang, hash FROM files WHERE path = 'legacy.cpp'", [], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    assert_eq!(lang, None, "undecodable source is file-level, not cpp");
+    assert!(!hash.is_empty());
+    let syms: i64 = store
+        .conn
+        .query_row("SELECT COUNT(*) FROM symbols WHERE file = 'good.cpp'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(syms, 1, "UTF-8 sibling still gets symbols");
+}
+
+#[test]
 fn full_index_and_sweep_reindexes_only_changed() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
