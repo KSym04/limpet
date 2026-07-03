@@ -217,7 +217,7 @@ Data lives under `~/.local/share/limpet/`, one SQLite store per repository. Team
 
 Legacy encodings degrade gracefully: a grammar-matched file that is not valid UTF-8 (CP949 or UTF-16 source in an old C++ engine, say) keeps its file-level anchor instead of disappearing from the index. A grammar can only ever upgrade a file, never make it less anchorable.
 
-What the walk skips, deliberately: everything in `.gitignore`, everything in an optional `.limpetignore` (gitignore syntax, works even outside a git repo), `node_modules`/`vendor`/`target`/`dist`/`build`, hidden files, `*.min.*` assets, and files over 512KB. Those bounds are what keep a full WordPress install from pegging your CPU; use `.limpetignore` to opt out anything else.
+What the walk skips, deliberately: everything in `.gitignore`, everything in an optional `.limpetignore` (gitignore syntax, works even outside a git repo), `node_modules`/`vendor`/`target`/`dist`/`build`, hidden junk, `*.min.*` assets, and files over 8MB. Source files over 512KB are indexed at file level but never parsed for symbols: the cap protects tree-sitter from generated bundles, and a giant hand-written translation unit stays anchorable instead of vanishing. Those bounds are what keep a full WordPress install from pegging your CPU; use `.limpetignore` to opt out anything else.
 
 There is no LSP, no type inference, and no claim of a publishable call graph: the index exists to give memory anchor points, invalidation, and recall locality. Every shipped grammar has fixture coverage in the test suite; languages are added when they can be tested, not when they pad a number.
 

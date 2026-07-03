@@ -21,11 +21,18 @@ use std::time::Instant;
 /// Max changed files reindexed inline during one sweep.
 const SWEEP_REINDEX_BUDGET: usize = 32;
 
-/// Files larger than this are skipped by the walker. Generated bundles
-/// (webpacked JS, concatenated vendor blobs) routinely reach several MB and
-/// make tree-sitter pathologically slow while yielding no useful anchors.
-/// Hand-written source essentially never exceeds this.
-const MAX_FILE_BYTES: u64 = 512 * 1024;
+/// Files larger than this are never parsed for symbols, only file-level
+/// indexed. Generated bundles (webpacked JS, concatenated vendor blobs)
+/// routinely reach several MB and make tree-sitter pathologically slow,
+/// but legacy hand-written source (old C++ engine translation units) does
+/// legitimately exceed it, so the bound degrades to a file-level row
+/// instead of dropping the file (invariant I-N1).
+const MAX_PARSE_BYTES: u64 = 512 * 1024;
+
+/// Files larger than this are skipped by the walker entirely. Above this
+/// size nothing is plausibly a knowledge anchor (media, archives, database
+/// dumps), and hashing it on every full index would be pure waste.
+const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Returns true for generated/minified assets that should never be indexed
 /// (`app.min.js`, `bundle.min.mjs`, ...). These are noise as memory anchors
@@ -88,10 +95,15 @@ fn index_file(store: &Store, root: &Path, rel: &str) -> Result<(usize, bool)> {
         Err(_) => return Ok((0, false)),
     };
     // A grammar match only upgrades a file from file-level to symbol-level;
-    // it must never downgrade it. Grammar-matched files that are not valid
-    // UTF-8 (CP949 / UTF-16 legacy engine source) cannot be parsed by
-    // tree-sitter, so they keep the file-level row instead of vanishing.
+    // it must never downgrade it (invariant I-N1). Two degradations land on
+    // the file-level row instead of dropping the file: source that is not
+    // valid UTF-8 (CP949 / UTF-16 legacy engine code), and source over the
+    // parse cap (giant hand-written translation units), because the cap
+    // protects tree-sitter from generated bundles, not hashing.
     let src = match lang::detect(&abs) {
+        Some(_) if size > MAX_PARSE_BYTES as i64 => {
+            return index_file_level(store, rel, mtime_ns, size, &bytes)
+        }
         Some(lang_id) => match String::from_utf8(bytes) {
             Ok(s) => (lang_id, s),
             Err(e) => return index_file_level(store, rel, mtime_ns, size, &e.into_bytes()),
@@ -438,6 +450,30 @@ mod tests {
             ],
             "every bounded file must be discoverable: {found:?}"
         );
+    }
+
+    #[test]
+    fn oversize_source_gets_file_level_row_not_dropped() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        // Over the parse cap, under the walk cap: a giant legacy translation
+        // unit. Must be file-level anchorable, never parsed, never dropped.
+        let big = format!(
+            "int big_fn(int a) {{ return a + 1; }}\n// {}\n",
+            "x".repeat(MAX_PARSE_BYTES as usize)
+        );
+        fs::write(root.join("GLGaeaClient.cpp"), &big).unwrap();
+        let store = Store::open_in_memory().unwrap();
+        let report = full_index(&store, root).unwrap();
+        assert_eq!(report.files, 1, "over-parse-cap file must stay indexed");
+        assert_eq!(report.symbols, 0, "over-parse-cap file must not be parsed");
+        let lang: Option<String> = store
+            .conn
+            .query_row("SELECT lang FROM files WHERE path = 'GLGaeaClient.cpp'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(lang, None);
     }
 
     #[test]

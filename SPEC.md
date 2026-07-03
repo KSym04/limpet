@@ -71,5 +71,9 @@ anchor is_identity_leaf += number_literal, char_literal, raw_string_literal
 - [ ] index/mod.rs: byte-read refactor with non-UTF-8 -> file-level fallback
 - [ ] tests: index_langs cpp fixture (incl. out-of-line method name);
       anchor_golden Cpp hash-properties case; CP949-bytes fallback test
-- [ ] README: grammar list + legacy-encoding note
+- [ ] index/mod.rs: split MAX_PARSE_BYTES (512KB, symbol parse cap, degrades
+      to file-level) from MAX_FILE_BYTES (8MB, walk skip): giant legacy
+      translation units stay anchorable (I-N1 applied to size, not just
+      encoding)
+- [ ] README: grammar list + legacy-encoding note + size-bound wording
 - [ ] cargo test --locked green; bench gate holds; dogfood on a CP949 fixture
