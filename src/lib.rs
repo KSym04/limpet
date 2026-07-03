@@ -6,6 +6,7 @@ pub mod envelope;
 pub mod index;
 pub mod mcp;
 pub mod memory;
+pub mod secrets;
 pub mod store;
 pub mod tools;
 pub mod ui;

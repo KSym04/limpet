@@ -77,3 +77,21 @@ Each asset ships a sibling `<asset>.sha256` (`<hex>  <name>` format).
 - [x] `server.json`: version 0.4.0
 - [x] Build + `cargo test --locked` green
 - [ ] Branch -> PR -> merge -> tag v0.4.0
+
+## Security hardening: no-secret-leak guarantee
+
+Threat: an agent calls `remember` with a credential in the body or evidence.
+It would persist to the local store and later leak through
+`admin export` -> `.limpet/memory.jsonl` -> `git push`.
+
+Control: `src/secrets.rs::detect` runs on the write path in `memory::remember`.
+It refuses (hard error, no write) any body or evidence output containing a
+provider-specific credential: AWS/ASIA keys, GitHub tokens, Slack tokens,
+OpenAI/Stripe secret keys, Google API keys, PEM private-key blocks, and JWTs.
+High-precision (prefix + length + charset) to avoid tripping on prose. No new
+dependency.
+
+Out of scope for v1 (documented, not yet built):
+- Release-binary signing (updater trusts a same-origin GitHub checksum; a
+  release-signing key would defend a compromised release).
+- Entropy-based generic secret detection (higher false-positive rate).
