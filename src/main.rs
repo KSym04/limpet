@@ -41,6 +41,19 @@ fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = args.first().map(String::as_str).unwrap_or("help");
 
+    // Help/version flags short-circuit any subcommand. Without this,
+    // `limpet index --help` falls through to the "index" arm and runs a full
+    // index of the current directory (the flag is ignored by the hand-rolled
+    // parser) instead of printing help.
+    if cmd != "help" && args.iter().any(|a| a == "-h" || a == "--help") {
+        println!("{HELP}");
+        return Ok(());
+    }
+    if cmd != "version" && args.iter().any(|a| a == "-V" || a == "--version") {
+        println!("limpet {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
     match cmd {
         "serve" => {
             let root = root_from(&args)?;

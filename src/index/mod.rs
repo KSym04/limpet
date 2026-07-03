@@ -21,6 +21,22 @@ use std::time::Instant;
 /// Max changed files reindexed inline during one sweep.
 const SWEEP_REINDEX_BUDGET: usize = 32;
 
+/// Files larger than this are skipped by the walker. Generated bundles
+/// (webpacked JS, concatenated vendor blobs) routinely reach several MB and
+/// make tree-sitter pathologically slow while yielding no useful anchors.
+/// Hand-written source essentially never exceeds this.
+const MAX_FILE_BYTES: u64 = 512 * 1024;
+
+/// Returns true for generated/minified assets that should never be indexed
+/// (`app.min.js`, `bundle.min.mjs`, ...). These are noise as memory anchors
+/// and slow to parse.
+fn is_minified(name: &str) -> bool {
+    matches!(
+        name.rsplit_once('.').map(|(stem, _)| stem),
+        Some(stem) if stem.ends_with(".min")
+    )
+}
+
 #[derive(Debug, Default, serde::Serialize)]
 pub struct IndexReport {
     pub files: usize,
@@ -130,14 +146,17 @@ fn index_file(store: &Store, root: &Path, rel: &str) -> Result<(usize, bool)> {
     Ok((count, parse_ok))
 }
 
-/// Walk the repository and collect indexable files, honoring .gitignore
-/// plus a built-in skip list.
+/// Walk the repository and collect indexable files, honoring .gitignore, an
+/// optional `.limpetignore` (gitignore syntax; works even outside a git repo),
+/// a built-in directory skip list, a max file size, and a minified-asset skip.
 fn discover(root: &Path) -> Vec<String> {
     let mut out = Vec::new();
     let walker = ignore::WalkBuilder::new(root)
         .hidden(true)
         .git_ignore(true)
         .git_global(false)
+        .max_filesize(Some(MAX_FILE_BYTES))
+        .add_custom_ignore_filename(".limpetignore")
         .filter_entry(|e| {
             let name = e.file_name().to_string_lossy();
             !matches!(
@@ -149,6 +168,10 @@ fn discover(root: &Path) -> Vec<String> {
     for entry in walker.flatten() {
         let p = entry.path();
         if p.is_file() && lang::detect(p).is_some() {
+            let name = entry.file_name().to_string_lossy();
+            if is_minified(&name) {
+                continue;
+            }
             if let Ok(rel) = p.strip_prefix(root) {
                 out.push(rel.to_string_lossy().replace('\\', "/"));
             }
@@ -263,4 +286,42 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
     let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn is_minified_matches_only_dot_min_assets() {
+        assert!(is_minified("app.min.js"));
+        assert!(is_minified("bundle.min.mjs"));
+        assert!(is_minified("jquery.min.css"));
+        assert!(!is_minified("app.js"));
+        assert!(!is_minified("minify.js")); // stem is "minify", not "*.min"
+        assert!(!is_minified("min.js")); // stem is "min", no ".min" suffix
+        assert!(!is_minified("README.md"));
+    }
+
+    #[test]
+    fn discover_skips_oversize_minified_and_limpetignored() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+
+        // Kept: ordinary source under the size cap.
+        fs::write(root.join("keep.php"), "<?php function a() {}\n").unwrap();
+        // Skipped: minified asset.
+        fs::write(root.join("app.min.js"), "var a=1;\n").unwrap();
+        // Skipped: over the size cap.
+        fs::write(root.join("bundle.js"), "x".repeat((MAX_FILE_BYTES + 1) as usize)).unwrap();
+        // Skipped via .limpetignore (works without a git repo).
+        fs::write(root.join(".limpetignore"), "ignored/\n").unwrap();
+        fs::create_dir(root.join("ignored")).unwrap();
+        fs::write(root.join("ignored/secret.php"), "<?php function b() {}\n").unwrap();
+
+        let found = discover(root);
+        assert_eq!(found, vec!["keep.php".to_string()], "unexpected: {found:?}");
+    }
 }
