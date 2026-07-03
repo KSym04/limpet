@@ -251,11 +251,7 @@ Freshness model: every tool call runs a bounded incremental sweep (changed files
 
 ## 🧭 Roadmap
 
-- SessionEnd/Stop hook helpers for automatic episode mining from transcripts
-- More grammars (Go, Java, Ruby, C#, Bash), each with fixture coverage before shipping
-- FS-event watcher (notify) to replace the on-call sweep on very large repos
-- Optional embedding reranking behind a feature flag, only if recall evals prove it earns its size
-- Signed release binaries (minisign) so `limpet update` verifies a maintainer signature, not just a same-origin checksum
+See [ROADMAP.md](ROADMAP.md) for the full plan through 1.5 — snippet-by-symbol retrieval, the rework-avoided metric, portable repo identity, grammar wave 2, the 1.0 stability contract, and the team layer. One rule governs all of it: a feature ships only if it feeds a receipt (`limpet stats`, the benchmark, rework-avoided) or the honesty envelope.
 
 ## 📄 License
 
