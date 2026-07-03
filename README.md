@@ -24,6 +24,8 @@ read -> reason -> remember -> verify -> flag stale when code changes -> re-verif
 
 Everything your agent learns about a project (decisions, verified facts, failed approaches, gotchas, intent) is stored as durable memory, anchored to the actual code it describes, and automatically flagged the moment that code changes. Ships as an MCP server, so any MCP-capable agent can use it: one Rust binary, one SQLite file, 100% local.
 
+The principles behind every design decision here, each with the production scar that earned it, live in [PHILOSOPHY.md](PHILOSOPHY.md).
+
 The name is the mechanism: a limpet clamps to one spot and returns to it after every tide. Memories here clamp onto AST-hashed symbols, follow them through renames and file moves, and go visibly stale when the code underneath them actually changes.
 
 ## 🧠 Why this exists
