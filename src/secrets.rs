@@ -19,8 +19,16 @@ pub fn detect(text: &str) -> Option<&'static str> {
 
     // Everything else is a self-contained token: split on characters that
     // never appear inside these credentials and inspect each candidate.
+    // '=' and ':' matter most: `AWS_KEY=AKIA...` and `token: ghp_...` are
+    // the standard .env/YAML shapes and slipped through unsplit
+    // (audit 2026-07).
     for tok in text.split(|c: char| {
-        c.is_whitespace() || matches!(c, '"' | '\'' | '`' | ',' | ';' | '(' | ')' | '<' | '>')
+        c.is_whitespace()
+            || matches!(
+                c,
+                '"' | '\'' | '`' | ',' | ';' | '(' | ')' | '<' | '>' | '=' | ':' | '{' | '}'
+                    | '[' | ']' | '|'
+            )
     }) {
         if let Some(label) = classify_token(tok) {
             return Some(label);
@@ -56,8 +64,19 @@ fn classify_token(tok: &str) -> Option<&'static str> {
         return Some("GitHub token");
     }
 
-    // Slack tokens: xoxb-/xoxp-/xoxa-/xoxr-/xoxs- + digits/hyphens.
-    if tok.starts_with("xox") && n >= 5 && tok.as_bytes().get(4) == Some(&b'-') && n >= 20 {
+    // Slack tokens: xoxb-/xoxp-/xoxa-/xoxr-/xoxs- + a credential-shaped
+    // body. Three gates keep prose like "xoxo-hugs-and-kisses" out
+    // (audit 2026-07): a real variant letter, token charset, and at least
+    // one digit (Slack bodies always carry numeric segments).
+    if tok.starts_with("xox")
+        && n >= 20
+        && matches!(tok.as_bytes().get(3), Some(b'b' | b'p' | b'a' | b'r' | b's'))
+        && tok.as_bytes().get(4) == Some(&b'-')
+        && tok[5..]
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        && tok[5..].bytes().any(|b| b.is_ascii_digit())
+    {
         return Some("Slack token");
     }
 
@@ -137,6 +156,29 @@ mod tests {
             Some("private key block")
         );
         assert!(detect("Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcDEFghiJKL").is_some());
+    }
+
+    #[test]
+    fn env_and_yaml_forms_are_caught() {
+        // The standard .env / YAML shapes must split on = and : so the
+        // credential body is inspected (audit 2026-07).
+        assert_eq!(
+            detect(concat!("AWS_KEY=", "AKIAIOSFOD", "NN7EXAMPLE")),
+            Some("AWS access key id")
+        );
+        assert_eq!(
+            detect(concat!("token: ghp_", "1234567890abcdefghijklmnopqrstuvwxyz")),
+            Some("GitHub token")
+        );
+        assert_eq!(
+            detect(concat!("{\"key\":\"sk-proj-", "abcdefghijklmnopqrstuvwxyz0123456789", "\"}")),
+            Some("API secret key")
+        );
+    }
+
+    #[test]
+    fn xoxo_prose_is_not_a_slack_token() {
+        assert_eq!(detect("sending xoxo-hugs-and-kisses-to-everyone!!!"), None);
     }
 
     #[test]

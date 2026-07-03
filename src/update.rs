@@ -117,11 +117,25 @@ pub fn run(check_only: bool) -> Result<()> {
         bail!("checksum mismatch (expected {want}, got {got}); aborting, nothing changed");
     }
 
-    // Stage to a temp file, then atomically swap it in (INVARIANT I3).
-    // `self_replace` handles the Windows case where a running .exe cannot be
-    // overwritten directly.
-    let tmp = std::env::temp_dir().join(format!("limpet-update-{}", std::process::id()));
-    std::fs::write(&tmp, &bin).with_context(|| format!("writing {}", tmp.display()))?;
+    // Stage NEXT TO the target binary, not in the shared temp dir: a
+    // predictable name in a world-writable directory invites symlink
+    // pre-creation (audit 2026-07). The parent of the running executable is
+    // already trusted (we are about to replace a file there), and same-dir
+    // staging keeps the final swap on one filesystem. create_new refuses to
+    // follow anything pre-existing.
+    let exe = std::env::current_exe().context("locating the running executable")?;
+    let stage_dir = exe.parent().context("executable has no parent directory")?;
+    let tmp = stage_dir.join(format!(".limpet-update-{}", std::process::id()));
+    {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .with_context(|| format!("staging {}", tmp.display()))?;
+        f.write_all(&bin)
+            .with_context(|| format!("writing {}", tmp.display()))?;
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

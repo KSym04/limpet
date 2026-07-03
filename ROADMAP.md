@@ -22,8 +22,10 @@ own staleness does not ship. That discipline is the product.
 ## v0.9.0 — portability (the seams users actually hit)
 
 - **Repo identity by git remote, path fallback.** Today the store is keyed by
-  absolute path: move or re-clone a repository and its memory is orphaned.
-  Ships with a store migration path.
+  absolute path: move or re-clone a repository and its memory is orphaned, and
+  distinct paths can even collide onto one key (`/a/b` vs `/a-b`, 2026-07
+  audit). Ships with a store migration path; the collision fix rides along
+  because rekeying is only worth doing once.
 - **Extension map in `.limpet.json`** (e.g. `.blade.php` → php, `.inc` → cpp)
   for template-heavy and legacy stacks.
 - **Auto-import on first index** when a committed `.limpet/memory.jsonl`
@@ -33,9 +35,17 @@ own staleness does not ship. That discipline is the product.
 
 Go, Java, Ruby, C#, Bash. Each gated on the I7 fixture (function, class,
 method, import, call), a golden hash-property case (cosmetic-invariant,
-edit-sensitive), and an identity-leaf audit — the C++ `number_literal` lesson
-says every grammar hides at least one node kind that silently breaks edit
-detection. The non-UTF-8 file-level fallback (I-N1) already generalizes.
+edit-sensitive), an identity-leaf audit, and an own-name-node check — the C++
+lessons (`number_literal` missing from the hash identity set, the definition
+name hiding in the declarator chain) say every grammar conceals at least one
+node-shape surprise. The non-UTF-8 file-level fallback (I-N1) generalizes.
+
+Riding along with this milestone, from the 2026-07 audit: full FQN
+disambiguation (trait impls, C++ overloads, nested modules currently share
+FQNs; the `(fqn, hash)` existence check shipped in 0.7.2 stops the flapping,
+uniqueness needs schema work), and a low-entropy follow guard so trivial
+duplicate bodies (empty functions, delegating one-liners) cannot be silently
+followed to the wrong twin.
 
 ## v0.11.0 — freshness at scale
 

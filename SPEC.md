@@ -1,3 +1,67 @@
+# SPEC — audit hardening (v0.7.2)
+
+Three parallel audits (staleness engine, store/API, periphery) produced 32
+findings; ~20 confirmed and fixed here, 4 deferred to the roadmap with
+reasons, the rest discarded on verification. Governing outcomes:
+
+## Semantics changes (deliberate)
+
+- **Resurrection.** resolve_all re-resolves invalidated entries; restored
+  code (branch switch, stash, rebase, sweep lag) heals them. Only
+  `superseded` is final. README updated; golden tests cover restore-heals
+  and superseded-stays.
+- **File anchors follow moves** by content hash (one home = followed,
+  many = ambiguous_anchor), symmetric with symbol anchors.
+- **Stale confidence penalty applies once**, on the active->stale
+  transition; it previously compounded on every tool call.
+- **Relevance floor exempts flagged items** (I3 now actually holds) and is
+  skipped when the top score is non-positive.
+- **C++ renames follow**: the own-name node is resolved through the
+  declarator chain and excluded from the body hash.
+
+## Trust and honesty
+
+- remember: `verified` requires evidence; ambiguous bare-name anchors are
+  refused with the candidate FQN list; anchor files are reindexed before
+  hashing so anchors are never born stale.
+- Envelope: failed sweeps report `sweep_failed` instead of dirty:0;
+  map/affected disclose limit-clipping; recall names the true omission
+  cause (budget vs relevance_floor).
+- (fqn, hash) existence check kills nondeterministic anchor flapping on
+  duplicate FQNs; full FQN disambiguation deferred to the roadmap.
+- Import merges links on skipped entries and counts dropped links.
+
+## Concurrency and robustness
+
+- index_file is transactional (no half-indexed files); version_guard and
+  ledger_add are IMMEDIATE-transaction atomic; the ledger session base is
+  in-memory per process.
+- MCP stdin loop survives invalid UTF-8 and caps line size at 8MB.
+- UI: read timeout + bounded request/header reads.
+- validate_rel_path rejects empty paths and symlink escapes.
+- Updater stages next to the target binary with create_new (no predictable
+  world-writable temp path).
+- Secret detector splits on =/:/{}/[] (env/YAML/JSON forms) and gates Slack
+  tokens on variant letter + digit presence.
+
+## New: limpet doctor
+
+`limpet doctor` checks binary/registration/skill/store/version-stamp/index
+and prints ok/FAIL lines; runs automatically after `limpet install` and
+`limpet update`.
+
+## Deferred to ROADMAP (with reasons)
+
+- Repo-key collision fix -> 0.9 repo-identity rework (rekeying orphans
+  every existing store; needs the migration path anyway).
+- Full FQN disambiguation (trait impls, overloads, nested modules) ->
+  grammar-wave milestone; schema-touching.
+- Low-entropy follow guard (trivial duplicate bodies) -> needs a body-size
+  column.
+- ledger.q row growth: accepted debt, tiny rows, cleared by ledger_reset.
+
+---
+
 # SPEC — session savings ledger (v0.7.0)
 
 ## Positioning

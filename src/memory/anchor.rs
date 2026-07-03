@@ -49,26 +49,31 @@ fn is_comment(kind: &str) -> bool {
     kind.contains("comment")
 }
 
-fn emit(node: Node, src: &[u8], out: &mut Vec<u8>) {
-    let kind = node.kind();
-    if is_comment(kind) {
-        return;
+
+/// The node carrying a definition's own name. Most grammars expose a
+/// `name` field; C/C++ `function_definition` buries it in the declarator
+/// chain (possibly qualified, `GLGaeaClient::GetSkinChar`), so without the
+/// descent the name feeds the hash and C++ rename-following is dead
+/// (audit 2026-07).
+fn own_name_node(node: Node) -> Option<Node> {
+    if let Some(n) = node.child_by_field_name("name") {
+        return Some(n);
     }
-    out.extend_from_slice(kind.as_bytes());
-    out.push(b'(');
-    if node.child_count() == 0 {
-        if is_identity_leaf(kind) {
-            out.extend_from_slice(&src[node.byte_range()]);
-        }
-        // Non-identity leaves (operators, keywords) already contributed
-        // their kind above; their text adds nothing structural.
-    } else {
-        let mut cursor = node.walk();
-        for child in node.children(&mut cursor) {
-            emit(child, src, out);
+    let mut cur = node.child_by_field_name("declarator")?;
+    loop {
+        match cur.kind() {
+            "function_declarator" | "pointer_declarator" | "reference_declarator"
+            | "parenthesized_declarator" => cur = cur.child_by_field_name("declarator")?,
+            "identifier" | "field_identifier" | "destructor_name" | "operator_name" => {
+                return Some(cur)
+            }
+            "qualified_identifier" => match cur.child_by_field_name("name") {
+                Some(n) if n.kind() == "qualified_identifier" => cur = n,
+                other => return other,
+            },
+            _ => return None,
         }
     }
-    out.push(b')');
 }
 
 /// Hash the normalized AST subtree rooted at `node`.
@@ -83,19 +88,42 @@ fn emit(node: Node, src: &[u8], out: &mut Vec<u8>) {
 /// hash identically across files and names.
 pub fn ast_body_hash_node(node: Node, src: &[u8]) -> String {
     let mut buf = Vec::with_capacity(1024);
-    let own_name_id = node.child_by_field_name("name").map(|n| n.id());
+    let own_name_id = own_name_node(node).map(|n| n.id());
     buf.extend_from_slice(node.kind().as_bytes());
     buf.push(b'(');
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        if Some(child.id()) == own_name_id {
-            continue;
-        }
-        emit(child, src, &mut buf);
+        emit_excluding(child, src, &mut buf, own_name_id);
     }
     buf.push(b')');
     let digest = Sha256::digest(&buf);
     hex32(&digest)
+}
+
+/// Like `emit`, but skips one node id anywhere in the subtree. Needed for
+/// C++ where the name node is nested inside the declarator, not a direct
+/// child of the definition.
+fn emit_excluding(node: Node, src: &[u8], out: &mut Vec<u8>, skip: Option<usize>) {
+    if Some(node.id()) == skip {
+        return;
+    }
+    let kind = node.kind();
+    if is_comment(kind) {
+        return;
+    }
+    out.extend_from_slice(kind.as_bytes());
+    out.push(b'(');
+    if node.child_count() == 0 {
+        if is_identity_leaf(kind) {
+            out.extend_from_slice(&src[node.byte_range()]);
+        }
+    } else {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            emit_excluding(child, src, out, skip);
+        }
+    }
+    out.push(b')');
 }
 
 fn hex32(digest: &[u8]) -> String {
@@ -106,6 +134,16 @@ fn hex32(digest: &[u8]) -> String {
 /// Parse `src` and hash the subtree covering `byte_range` (a symbol's
 /// defining node, as recorded by extraction).
 pub fn ast_body_hash(lang_id: Lang, src: &str, byte_range: (usize, usize)) -> Result<String> {
+    Ok(ast_body_hashes(lang_id, src, &[byte_range])?.remove(0))
+}
+
+/// Hash many symbol ranges from ONE parse. Indexing previously reparsed the
+/// whole file once per symbol, O(symbols x full parse) on big files.
+pub fn ast_body_hashes(
+    lang_id: Lang,
+    src: &str,
+    ranges: &[(usize, usize)],
+) -> Result<Vec<String>> {
     let mut parser = Parser::new();
     parser
         .set_language(&lang::ts_language(lang_id))
@@ -114,10 +152,13 @@ pub fn ast_body_hash(lang_id: Lang, src: &str, byte_range: (usize, usize)) -> Re
         bail!("tree-sitter returned no tree");
     };
     let root = tree.root_node();
-    let node = root
-        .descendant_for_byte_range(byte_range.0, byte_range.1)
-        .unwrap_or(root);
-    Ok(ast_body_hash_node(node, src.as_bytes()))
+    Ok(ranges
+        .iter()
+        .map(|&(s, e)| {
+            let node = root.descendant_for_byte_range(s, e).unwrap_or(root);
+            ast_body_hash_node(node, src.as_bytes())
+        })
+        .collect())
 }
 
 /// Outcome of resolving one anchor against the current index.
@@ -157,10 +198,14 @@ pub fn resolve_all(store: &crate::store::Store) -> Result<ResolveReport> {
         symbol_fqn: Option<String>,
         hash: Option<String>,
     }
+    // Invalidated entries ARE re-resolved: a transient disappearance (branch
+    // switch, git stash, mid-rebase, sweep-budget lag) must not be a death
+    // sentence. If the code comes back and the anchors resolve again, the
+    // entry recovers (audit 2026-07). Only superseded is final.
     let mut stmt = store.conn.prepare(
         "SELECT a.id, a.entry_id, a.file, a.symbol_fqn, a.ast_body_hash
          FROM anchors a JOIN entries e ON e.id = a.entry_id
-         WHERE e.status != 'invalidated' AND e.status != 'superseded'",
+         WHERE e.status != 'superseded'",
     )?;
     let rows: Vec<Row> = stmt
         .query_map([], |r| {
@@ -188,7 +233,31 @@ pub fn resolve_all(store: &crate::store::Store) -> Result<ResolveReport> {
                 })
                 .ok();
             let fate = match (current, &row.hash) {
-                (None, _) => AnchorFate::Invalidated,
+                (None, Some(h)) => {
+                    // File row gone, but the content may have MOVED: follow
+                    // by hash exactly like symbol anchors follow bodies.
+                    let mut fstmt = store
+                        .conn
+                        .prepare("SELECT path FROM files WHERE hash = ?1 LIMIT 3")?;
+                    let homes: Vec<String> = fstmt
+                        .query_map([h], |r| r.get(0))?
+                        .collect::<rusqlite::Result<_>>()?;
+                    match homes.len() {
+                        0 => AnchorFate::Invalidated,
+                        1 => {
+                            store.conn.execute(
+                                "UPDATE anchors SET file = ?1 WHERE id = ?2",
+                                params![homes[0], row.anchor_id],
+                            )?;
+                            AnchorFate::Followed {
+                                new_fqn: homes[0].clone(),
+                                new_file: homes[0].clone(),
+                            }
+                        }
+                        _ => AnchorFate::Stale { reason: "ambiguous_anchor" },
+                    }
+                }
+                (None, None) => AnchorFate::Invalidated,
                 (Some(cur), None) => {
                     // Legacy anchor written before file hashes were stored:
                     // adopt the current content as its baseline.
@@ -213,19 +282,25 @@ pub fn resolve_all(store: &crate::store::Store) -> Result<ResolveReport> {
             continue;
         };
 
-        let hash_at_fqn: Option<String> = store
-            .conn
-            .query_row(
-                "SELECT body_hash FROM symbols WHERE fqn = ?1 LIMIT 1",
-                [anchor_fqn],
-                |r| r.get(0),
-            )
-            .ok();
+        // FQNs are not unique (trait impls, overloads): check for ANY row
+        // matching (fqn, hash) before declaring the body edited, otherwise
+        // which duplicate a LIMIT 1 returns is nondeterministic and anchors
+        // flap between fresh and stale across sweeps (audit 2026-07).
+        let hash_matches: bool = store.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM symbols WHERE fqn = ?1 AND body_hash = ?2)",
+            params![anchor_fqn, anchor_hash],
+            |r| r.get(0),
+        )?;
+        let fqn_exists: bool = store.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM symbols WHERE fqn = ?1)",
+            [anchor_fqn],
+            |r| r.get(0),
+        )?;
 
-        let fate = match hash_at_fqn {
-            Some(ref h) if h == anchor_hash => AnchorFate::Fresh,
-            Some(_) => AnchorFate::Stale { reason: "body_edited" },
-            None => {
+        let fate = match (hash_matches, fqn_exists) {
+            (true, _) => AnchorFate::Fresh,
+            (false, true) => AnchorFate::Stale { reason: "body_edited" },
+            (false, false) => {
                 // FQN gone: search for the body elsewhere (rename/move).
                 let mut fstmt = store.conn.prepare(
                     "SELECT fqn, file FROM symbols WHERE body_hash = ?1 LIMIT 3",
@@ -269,18 +344,27 @@ pub fn resolve_all(store: &crate::store::Store) -> Result<ResolveReport> {
             } else {
                 t.stale_reason.unwrap_or("stale")
             };
+            // Confidence penalty applies ONCE, on the active->stale
+            // transition. resolve_all runs on every tool call; re-applying
+            // *0.6 each time collapsed stale memories to the floor within a
+            // handful of calls (audit 2026-07). The CASE reads the pre-
+            // update status, so an already-stale entry keeps its confidence.
             store.conn.execute(
-                "UPDATE entries SET status = 'stale', stale_reason = ?2,
-                    confidence = CASE WHEN source = 'verified'
-                                      THEN MIN(confidence, 0.5)
-                                      ELSE confidence * 0.6 END
-                 WHERE id = ?1 AND status IN ('active','stale')",
+                "UPDATE entries SET
+                    confidence = CASE
+                        WHEN status = 'active' AND source = 'verified'
+                            THEN MIN(confidence, 0.5)
+                        WHEN status = 'active'
+                            THEN confidence * 0.6
+                        ELSE confidence END,
+                    status = 'stale', stale_reason = ?2
+                 WHERE id = ?1 AND status != 'superseded'",
                 params![entry_id, reason],
             )?;
         } else {
             store.conn.execute(
                 "UPDATE entries SET status = 'active', stale_reason = NULL
-                 WHERE id = ?1 AND status IN ('active','stale')",
+                 WHERE id = ?1 AND status != 'superseded'",
                 [entry_id],
             )?;
         }

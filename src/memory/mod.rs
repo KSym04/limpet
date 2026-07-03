@@ -68,7 +68,23 @@ struct ResolvedAnchor {
 fn resolve_anchor(store: &Store, spec: &AnchorSpec) -> Result<ResolvedAnchor> {
     match &spec.symbol {
         Some(symbol) => {
-            // Accept a bare name or a full FQN.
+            // Accept a bare name or a full FQN — but never guess between
+            // duplicates: two `push` methods in one file must surface as a
+            // choice, not a silently-picked LIMIT 1 (audit 2026-07).
+            let mut cstmt = store.conn.prepare(
+                "SELECT DISTINCT fqn FROM symbols
+                 WHERE (fqn = ?1 OR name = ?1) AND file = ?2 LIMIT 5",
+            )?;
+            let candidates: Vec<String> = cstmt
+                .query_map(params![symbol, spec.file], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            if candidates.len() > 1 {
+                bail!(
+                    "symbol '{symbol}' is ambiguous in {}: matches {candidates:?}. \
+                     Anchor with the full FQN instead.",
+                    spec.file
+                );
+            }
             let row: Option<(String, String, String)> = store
                 .conn
                 .query_row(
@@ -148,6 +164,11 @@ pub fn remember(
     }
     if !SOURCES.contains(&source) {
         bail!("unknown source '{source}' (expected one of {SOURCES:?})");
+    }
+    // "verified" is earned, not claimed: without evidence it would mint a
+    // 0.95-confidence fact with nothing to re-verify (audit 2026-07).
+    if source == "verified" && evidence.is_none() {
+        bail!("source 'verified' requires evidence {{command, output}}; pass the proof or use source 'explicit'");
     }
     if body.trim().is_empty() {
         bail!("body must not be empty");

@@ -16,19 +16,53 @@ pub const PROTOCOL_VERSION: &str = "2025-06-18";
 pub fn serve(root: PathBuf) -> Result<()> {
     let db_path = Store::default_db_path(&root);
     let mut store = Store::open(&db_path)?;
-    // Session baseline for the savings ledger: "this session" = lifetime
-    // minus this stamp. Last server boot owns the session view.
-    let _ = store.ledger_session_start();
+    // Session baseline for the savings ledger (in-memory, per process).
+    // Taken only after the guard: a stale image must not touch the store,
+    // and the read itself is harmless but the ordering keeps the rule clean.
+    if store.version_guard().is_ok() {
+        let _ = store.ledger_session_start();
+    }
 
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
 
-    for line in stdin.lock().lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => break,
+    // Byte-oriented reads: `lines()` errors out on any invalid UTF-8 and a
+    // single unbounded line could exhaust memory. Neither may kill the loop
+    // ("never dies on bad input" is a documented property).
+    const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
+    let mut reader = stdin.lock();
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        buf.clear();
+        // Bounded read: take() caps how much one line may pull.
+        let n = match std::io::Read::take(std::io::Read::by_ref(&mut reader), MAX_LINE_BYTES as u64 + 1)
+            .read_until(b'\n', &mut buf)
+        {
+            Ok(0) => break, // EOF
+            Ok(n) => n,
+            Err(_) => break, // real I/O error on stdin: the client is gone
         };
+        if n > MAX_LINE_BYTES {
+            write_msg(
+                &mut out,
+                &json!({
+                    "jsonrpc": "2.0", "id": Value::Null,
+                    "error": { "code": -32700, "message": "parse error: line too large" }
+                }),
+            )?;
+            // Drain the remainder of the oversized line before continuing.
+            while {
+                buf.clear();
+                matches!(
+                    std::io::Read::take(std::io::Read::by_ref(&mut reader), MAX_LINE_BYTES as u64)
+                        .read_until(b'\n', &mut buf),
+                    Ok(m) if m > 0 && !buf.ends_with(b"\n")
+                )
+            } {}
+            continue;
+        }
+        let line = String::from_utf8_lossy(&buf);
         if line.trim().is_empty() {
             continue;
         }

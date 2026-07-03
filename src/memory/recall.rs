@@ -35,6 +35,9 @@ pub struct RecallResult {
     pub items: Vec<RecallItem>,
     pub matched: usize,
     pub returned: usize,
+    /// Items dropped by the relevance floor (as opposed to the token
+    /// budget), so the envelope can state the true omission reason.
+    pub cut_by_floor: usize,
 }
 
 /// Per-item fixed overhead in the packed response (labels, flags, ids),
@@ -73,7 +76,7 @@ pub fn recall(
         }
     }
     if candidate_ids.is_empty() {
-        return Ok(RecallResult { items: vec![], matched: 0, returned: 0 });
+        return Ok(RecallResult { items: vec![], matched: 0, returned: 0, cut_by_floor: 0 });
     }
 
     // BM25 rank per candidate (lower rank value = better in FTS5; normalize
@@ -104,8 +107,10 @@ pub fn recall(
         let mut fwd = store
             .conn
             .prepare("SELECT target FROM imports WHERE file = ?1")?;
+        // ESCAPE '\' with %/_ escaped in the stem: a caller-supplied file
+        // name containing LIKE metacharacters must not widen the match.
         let mut rev = store.conn.prepare(
-            "SELECT file FROM imports WHERE target LIKE '%' || ?1 || '%'",
+            "SELECT file FROM imports WHERE target LIKE '%' || ?1 || '%' ESCAPE '\\'",
         )?;
         for f in working_set {
             for t in fwd.query_map([f], |r| r.get::<_, String>(0))? {
@@ -114,7 +119,10 @@ pub fn recall(
             let stem = std::path::Path::new(f)
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| f.clone());
+                .unwrap_or_else(|| f.clone())
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_");
             for t in rev.query_map([&stem], |r| r.get::<_, String>(0))? {
                 neighborhood.insert(t?);
             }
@@ -249,13 +257,19 @@ pub fn recall(
     let matched = items.len();
 
     // Relevance cutoff: items scoring far below the best match are noise
-    // that costs the agent tokens. Stale or contradicted items that made
-    // the cut are kept regardless of score elsewhere in the pipeline; the
-    // cutoff drops only the low-relevance tail. The dropped count stays
-    // visible via matched vs returned (I2).
+    // that costs the agent tokens. Two carve-outs keep it honest
+    // (audit 2026-07): flagged items (stale/contradicted) are exempt, so
+    // the cutoff can never silently hide exactly what I3 promises to show;
+    // and a non-positive top score disables the cutoff entirely, because
+    // top*0.35 > top when top < 0 would drop every item including the best.
+    let mut cut_by_floor = 0usize;
     if let Some(top) = items.first().map(|i| i.score) {
-        let floor = top * 0.35;
-        items.retain(|i| i.score >= floor);
+        if top > 0.0 {
+            let floor = top * 0.35;
+            let before = items.len();
+            items.retain(|i| i.score >= floor || !i.flags.is_empty());
+            cut_by_floor = before - items.len();
+        }
     }
 
     // Greedy budget packing, best first. No silent truncation: the caller
@@ -273,7 +287,7 @@ pub fn recall(
         }
     }
     let returned = packed.len();
-    Ok(RecallResult { items: packed, matched, returned })
+    Ok(RecallResult { items: packed, matched, returned, cut_by_floor })
 }
 
 /// Flat cost of the search round trips the agent skips by recalling.

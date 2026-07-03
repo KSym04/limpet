@@ -352,6 +352,150 @@ fn one_dead_anchor_degrades_multi_anchor_memory_instead_of_killing_it() {
 }
 
 #[test]
+fn transient_deletion_heals_after_restore() {
+    // Branch switches, git stash, and mid-rebase states make files vanish
+    // briefly. Invalidation must not be a death sentence: when the code
+    // comes back, the memory recovers (audit 2026-07).
+    let dir = TempDir::new().unwrap();
+    let (store, id) = seed(dir.path());
+
+    fs::remove_file(dir.path().join("score.py")).unwrap();
+    let _ = mutate_and_resolve(&store, dir.path());
+    assert_eq!(status_of(&store, &id).0, "invalidated");
+
+    fs::write(dir.path().join("score.py"), ORIGINAL).unwrap();
+    let _ = mutate_and_resolve(&store, dir.path());
+    assert_eq!(
+        status_of(&store, &id).0,
+        "active",
+        "restored code must resurrect the memory"
+    );
+}
+
+#[test]
+fn superseded_never_resurrects() {
+    let dir = TempDir::new().unwrap();
+    let (store, id) = seed(dir.path());
+    let newer = memory::remember(
+        &store,
+        "fact",
+        "score subtracts twenty five per critical now",
+        "explicit",
+        None,
+        &[AnchorSpec { file: "score.py".into(), symbol: Some("compute_health_score".into()) }],
+        None,
+        &[memory::LinkSpec { target: id.clone(), rel: "supersedes".into() }],
+        None,
+    )
+    .unwrap();
+    let _ = mutate_and_resolve(&store, dir.path());
+    assert_eq!(status_of(&store, &id).0, "superseded", "supersession is final");
+    assert_eq!(status_of(&store, &newer.id).0, "active");
+}
+
+#[test]
+fn stale_confidence_penalty_applies_once() {
+    let dir = TempDir::new().unwrap();
+    let (store, id) = seed(dir.path());
+    let conf_before: f64 = store
+        .conn
+        .query_row("SELECT confidence FROM entries WHERE id = ?1", [&id], |r| r.get(0))
+        .unwrap();
+
+    fs::write(dir.path().join("score.py"), ORIGINAL.replace("* 2", "* 9")).unwrap();
+    let _ = mutate_and_resolve(&store, dir.path());
+    let conf_first: f64 = store
+        .conn
+        .query_row("SELECT confidence FROM entries WHERE id = ?1", [&id], |r| r.get(0))
+        .unwrap();
+    assert!(conf_first < conf_before, "transition must drop confidence");
+
+    // Further resolves with no code change must NOT keep compounding: the
+    // penalty applies on the active->stale transition only (audit 2026-07).
+    let _ = mutate_and_resolve(&store, dir.path());
+    let _ = mutate_and_resolve(&store, dir.path());
+    let conf_after: f64 = store
+        .conn
+        .query_row("SELECT confidence FROM entries WHERE id = ?1", [&id], |r| r.get(0))
+        .unwrap();
+    assert!(
+        (conf_after - conf_first).abs() < 1e-9,
+        "stale penalty compounded: {conf_first} -> {conf_after}"
+    );
+}
+
+#[test]
+fn cpp_rename_is_followed() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    let original = "int compute_score(int a) {\n    return a * 10 + 7;\n}\n";
+    fs::write(root.join("engine.cpp"), original).unwrap();
+    let store = Store::open_in_memory().unwrap();
+    index::full_index(&store, root).unwrap();
+    let result = memory::remember(
+        &store,
+        "fact",
+        "score multiplies by ten and adds seven",
+        "explicit",
+        None,
+        &[AnchorSpec { file: "engine.cpp".into(), symbol: Some("compute_score".into()) }],
+        None,
+        &[],
+        None,
+    )
+    .unwrap();
+
+    // A pure rename: the declarator name is excluded from the hash, so the
+    // anchor must FOLLOW, not stale or die (audit 2026-07: C++ names live
+    // in the declarator chain, not a `name` field).
+    fs::write(root.join("engine.cpp"), original.replace("compute_score", "calc_score")).unwrap();
+    let _ = mutate_and_resolve(&store, root);
+    assert_eq!(status_of(&store, &result.id).0, "active", "C++ rename must not kill memory");
+    let fqn: String = store
+        .conn
+        .query_row(
+            "SELECT symbol_fqn FROM anchors WHERE entry_id = ?1",
+            [&result.id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(fqn, "engine.calc_score");
+}
+
+#[test]
+fn file_anchor_follows_a_move() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    fs::write(root.join("hero.twig"), "{% block hero %}x{% endblock %}\n").unwrap();
+    let store = Store::open_in_memory().unwrap();
+    index::full_index(&store, root).unwrap();
+    let result = memory::remember(
+        &store,
+        "insight",
+        "hero height is design locked",
+        "explicit",
+        None,
+        &[AnchorSpec { file: "hero.twig".into(), symbol: None }],
+        None,
+        &[],
+        None,
+    )
+    .unwrap();
+
+    // git mv: same bytes, new path. File anchors get the same follow
+    // courtesy symbol anchors always had (audit 2026-07).
+    fs::create_dir_all(root.join("views")).unwrap();
+    fs::rename(root.join("hero.twig"), root.join("views/hero.twig")).unwrap();
+    let _ = mutate_and_resolve(&store, root);
+    assert_eq!(status_of(&store, &result.id).0, "active", "moved file must be followed");
+    let file: String = store
+        .conn
+        .query_row("SELECT file FROM anchors WHERE entry_id = ?1", [&result.id], |r| r.get(0))
+        .unwrap();
+    assert_eq!(file, "views/hero.twig");
+}
+
+#[test]
 fn hash_properties_hold_per_language() {
     // Same-body equality and edit sensitivity for each shipped grammar.
     let cases: Vec<(Lang, &str, &str, &str)> = vec![

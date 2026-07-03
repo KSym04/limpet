@@ -85,21 +85,44 @@ pub fn serve_ui(root: &Path, port: u16) -> Result<()> {
 
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else { continue };
+        // The accept loop is single-threaded by design (one local user); a
+        // read timeout and hard byte/line caps keep one stuck or hostile
+        // local client from wedging it or growing memory without bound
+        // (audit 2026-07).
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+        const MAX_REQ_LINE: u64 = 8 * 1024;
+        const MAX_HEADER_LINES: usize = 100;
         let mut reader = BufReader::new(match stream.try_clone() {
             Ok(s) => s,
             Err(_) => continue,
         });
         let mut request_line = String::new();
-        if reader.read_line(&mut request_line).is_err() {
-            continue;
-        }
-        // Drain headers; nothing in them is trusted or used.
-        let mut line = String::new();
-        while reader.read_line(&mut line).is_ok() {
-            if line == "\r\n" || line == "\n" || line.is_empty() {
-                break;
+        {
+            let mut limited = std::io::Read::take(std::io::Read::by_ref(&mut reader), MAX_REQ_LINE);
+            let mut lr = BufReader::new(&mut limited);
+            if lr.read_line(&mut request_line).is_err() || request_line.is_empty() {
+                continue;
             }
+        }
+        // Drain headers (bounded); nothing in them is trusted or used.
+        let mut line = String::new();
+        let mut header_count = 0usize;
+        loop {
             line.clear();
+            let mut limited = std::io::Read::take(std::io::Read::by_ref(&mut reader), MAX_REQ_LINE);
+            let mut lr = BufReader::new(&mut limited);
+            match lr.read_line(&mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    if line == "\r\n" || line == "\n" || line.is_empty() {
+                        break;
+                    }
+                    header_count += 1;
+                    if header_count > MAX_HEADER_LINES {
+                        break;
+                    }
+                }
+            }
         }
 
         let mut parts = request_line.split_whitespace();
