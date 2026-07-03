@@ -13,6 +13,7 @@ pub enum Lang {
     Ts,
     Py,
     Rust,
+    Cpp,
 }
 
 impl Lang {
@@ -23,11 +24,16 @@ impl Lang {
             Lang::Ts => "typescript",
             Lang::Py => "python",
             Lang::Rust => "rust",
+            Lang::Cpp => "cpp",
         }
     }
 }
 
 /// Map a file path to a supported language by extension.
+///
+/// `.h` and `.c` go to the C++ grammar: tree-sitter-cpp parses plain C,
+/// and per-file parse isolation means an occasional Objective-C header
+/// degrades to parse_ok=0 without affecting anything else.
 pub fn detect(path: &std::path::Path) -> Option<Lang> {
     match path.extension()?.to_str()? {
         "php" => Some(Lang::Php),
@@ -35,6 +41,7 @@ pub fn detect(path: &std::path::Path) -> Option<Lang> {
         "ts" | "tsx" | "mts" | "cts" => Some(Lang::Ts),
         "py" => Some(Lang::Py),
         "rs" => Some(Lang::Rust),
+        "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" | "h" | "c" | "inl" => Some(Lang::Cpp),
         _ => None,
     }
 }
@@ -47,5 +54,6 @@ pub fn ts_language(lang: Lang) -> Language {
         Lang::Ts => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
         Lang::Py => tree_sitter_python::LANGUAGE.into(),
         Lang::Rust => tree_sitter_rust::LANGUAGE.into(),
+        Lang::Cpp => tree_sitter_cpp::LANGUAGE.into(),
     }
 }

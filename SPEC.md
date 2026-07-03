@@ -1,109 +1,79 @@
-# SPEC — whole-repo indexing + honest anchors (v0.5.0)
+# SPEC — C++ grammar + legacy-encoding fallback (v0.6.0)
 
-Field-tested on a Bedrock/Timber WordPress theme (451 tracked files): only
-123 files indexed, memories anchored to `.twig`/`.scss` files died silently,
-`remember` reported phantom `anchored` counts, one dead anchor nuked whole
-multi-anchor memories. This spec fixes all four plus two latent bugs found
-during the audit.
+Driven by a real target: a legacy MMO C++ engine (CP949-encoded source,
+UTF-16 headers mixed in) whose knowledge currently anchors only at file
+level. Goal: symbol anchors for C/C++ where the source is UTF-8, and a
+guaranteed non-regression for files a grammar matches but cannot decode.
 
 ## Core Architecture
 
 ```
-discover(root)                       every file passing walk bounds (was: lang-detected only)
-  bounds unchanged: .gitignore, .limpetignore, hidden, dir blocklist,
-                    512KB cap, *.min.* skip
-index_file(rel)
-  lang detected   -> parse, symbols + imports + calls + files row (as today)
-  lang unknown    -> files row only: lang=NULL, parse_ok=1, hash=sha256(bytes)[..16]
-                     (binary-safe: raw bytes, no UTF-8 requirement)
+lang::detect            + Cpp: cpp cc cxx hpp hh hxx h c inl -> tree-sitter-cpp
+index_file              read bytes ONCE
+  no grammar            -> file-level row (raw-byte hash)          [unchanged]
+  grammar + valid UTF-8 -> parse, symbols, imports, calls          [unchanged]
+  grammar + NOT UTF-8   -> file-level row (raw-byte hash), 0 syms  [NEW]
+                           (CP949/UTF-16 legacy source keeps its
+                            anchorability instead of vanishing)
 
-remember(anchors)                    ALL validation before any write, one tx
-  symbol anchor   -> must resolve in symbols table (unchanged) else hard error
-  file anchor     -> must exist in files table else hard error naming the file
-                     and whether it exists on disk (=> excluded by bounds)
-                     stores files.hash into anchors.ast_body_hash
+extract walk, Lang::Cpp:
+  function_definition   -> function/method (method when inside class/struct)
+                           name via declarator descent: function_declarator /
+                           pointer / reference / parenthesized -> identifier |
+                           field_identifier | destructor_name | operator_name |
+                           qualified_identifier (rightmost name; out-of-line
+                           GLGaeaClient::GetSkinChar anchors as GetSkinChar)
+  class_specifier | struct_specifier | enum_specifier (named) -> class
+  namespace_definition  -> parent scope push only (like Rust impl_item)
+  preproc_include       -> import (path, <> and "" trimmed)
+  call_expression       -> call edge; callee_name grows qualified_identifier
 
-resolve_all: file-level anchor fate
-  file row gone            -> Invalidated
-  anchor hash NULL (legacy)-> backfill current hash, Fresh
-  hash == files.hash       -> Fresh
-  hash != files.hash       -> Stale{file_edited}
-
-resolve_all: entry status aggregation (was: worst anchor wins)
-  all anchors Invalidated       -> invalidated, 'anchor_deleted'
-  some Invalidated, some alive  -> stale, 'anchor_lost'
-  any Stale                     -> stale, <reason>
-  else                          -> active
+anchor is_identity_leaf += number_literal, char_literal, raw_string_literal
+  (C++ numerics are `number_literal`; without this a body edit `a+1 -> a+2`
+   would NOT change the hash and staleness would silently lie)
 ```
-
-## State / Data Model
-
-No schema change. Existing columns absorb everything:
-
-| column                 | new use                                            |
-|------------------------|----------------------------------------------------|
-| `files.lang`           | NULL for non-parsed (file-level-only) files        |
-| `files.hash`           | already sha256[..16]; now compared for file anchors|
-| `anchors.ast_body_hash`| file-level anchors: content hash (was always NULL) |
-| `entries.stale_reason` | new values: `file_edited`, `anchor_lost`           |
-
-Legacy stores (v0.4.0) migrate lazily: NULL file-anchor hashes are
-backfilled on first `resolve_all`; unindexed files appear on next sweep.
 
 ## INVARIANTS
 
-- I-A: `remember` is atomic — either the entry and ALL its anchors persist, or
-  nothing does. `anchored` in the result equals anchors written, always.
-- I-B: an anchor never resolves against a file limpet has not indexed;
-  `remember` refuses it loudly at write time instead.
-- I-C: one dead anchor never invalidates an entry that still has a live
-  anchor; entry dies only when every anchor dies.
-- I-D: file-level anchors participate in staleness — editing the file flips
-  attached memories to `stale:file_edited`, deleting it invalidates them.
-- I-E: walk bounds (size cap, ignore files, dir blocklist, minified skip)
-  survive unchanged — indexing all extensions must not reopen the
-  WordPress-tree CPU-peg (see memory 01KWJZ51DV).
+- I7 (existing): no grammar ships without fixture coverage in
+  tests/index_langs.rs. Cpp gets: function, class+method, include, call.
+- I-N1: adding a grammar must never make any file LESS anchorable than
+  v0.5.x file-level indexing. Decode failure degrades to the file-level
+  row; it never drops the file. Regression test with real CP949 bytes.
+- Golden hash properties (cosmetic-invariant, edit-sensitive) must hold
+  for Cpp in tests/anchor_golden.rs hash_properties_hold_per_language.
 
 ## ATTACK SURFACE
 
-- Binary files (images, fonts) now walk into `index_file` -> hash raw bytes,
-  never `read_to_string`; 512KB cap bounds cost.
-- Giant text configs (`package-lock.json` < 512KB) -> file row only, no
-  parse; harmless.
-- Repo with no `.gitignore` -> unchanged risk profile; bounds are the
-  defense, not extension filtering (extension filter never guarded the walk
-  anyway — walk visited every file, filter only dropped them post-stat).
-- Legacy entry invalidated by OLD all-or-nothing rule stays invalidated
-  (status write is one-way for invalidated). Documented: re-`remember` or
-  `admin index` after upgrade will not resurrect; user re-seeds.
-- FTS duplicate surfacing on file anchors unchanged (same `anchors.file`).
+- `.h` claimed by Cpp: plain C headers parse fine under tree-sitter-cpp;
+  Objective-C headers will parse poorly -> parse_ok=0 path already isolates
+  failures per file, no spread.
+- Templates: template_declaration wraps function_definition; recursive walk
+  finds the inner node, no special casing.
+- Macro-heavy regions: tree-sitter-cpp error-recovers; worst case fewer
+  symbols, file row always present.
+- UTF-16 files contain interior NULs, from_utf8 fails -> fallback path, not
+  a crash.
 
 ## TECH STACK DEPS
 
-- No new crates. rusqlite `unchecked_transaction` for atomic remember.
-- tree-sitter grammars untouched; `lang::detect` still gates parsing only.
+- + tree-sitter-cpp = "0.23" (matches the 0.23 grammar family, core 0.24).
+  No other new deps.
 
 ## Task Implementation Checklist
 
-- [x] `src/index/mod.rs`: `discover` drops lang filter; `index_file` handles
-      unknown-lang path (raw-byte hash, files row, purge symbol rows);
-      hidden(false) so .github/.gitignore are anchorable; `.limpet` dir
-      blocklisted so the export never indexes itself
-- [x] `src/memory/mod.rs`: validate-then-write in one tx; file anchors
-      require files row, store content hash; loud errors
-- [x] `src/memory/anchor.rs`: file-anchor hash compare + legacy backfill;
-      per-anchor aggregation (I-C)
-- [x] `src/memory/recall.rs`: invalidated flag no longer hardcodes
-      `anchor_deleted`; use stored stale_reason
-- [x] tests: golden transitions for file anchors (edit -> stale,
-      delete -> invalidated, legacy NULL hash -> fresh+backfill);
-      multi-anchor partial-death -> stale not invalidated;
-      remember atomicity (failed anchor leaves zero rows);
-      discover picks up .twig/.scss/.md/unknown extensions and hidden paths
-- [x] `README.md`: serve vs ui note; document .limpetignore + whole-repo
-      indexing; `src/skill.md`: anchor-to-any-file guidance + recall-before-read
-- [x] version 0.4.0 -> 0.5.0 (Cargo.toml, Cargo.lock, server.json)
-- [x] `cargo test --locked` green (55 tests); bench gate holds at 4.1x;
-      dogfood verified over MCP stdio: 47/47 anchorable tracked files indexed,
-      file_edited/anchor_lost/anchor_deleted transitions all observed live
-- [ ] Branch feat/whole-repo-index -> PR -> merge -> tag v0.5.0
+- [ ] Cargo.toml: tree-sitter-cpp; version -> 0.6.0 (+ server.json, lock)
+- [ ] lang.rs: Lang::Cpp, detect map, ts_language arm
+- [ ] extract.rs: Cpp walk arm + cpp_declarator_name helper +
+      callee_name qualified_identifier arm
+- [ ] anchor.rs: is_identity_leaf += number_literal | char_literal |
+      raw_string_literal
+- [ ] index/mod.rs: byte-read refactor with non-UTF-8 -> file-level fallback
+- [ ] tests: index_langs cpp fixture (incl. out-of-line method name);
+      anchor_golden Cpp hash-properties case; CP949-bytes fallback test
+- [ ] index/mod.rs: split MAX_PARSE_BYTES (512KB, symbol parse cap, degrades
+      to file-level) from MAX_FILE_BYTES (8MB, walk skip): giant legacy
+      translation units stay anchorable (I-N1 applied to size, not just
+      encoding)
+- [ ] README: grammar list + legacy-encoding note + size-bound wording
+- [ ] cargo test --locked green; bench gate holds; dogfood on a CP949 fixture

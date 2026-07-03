@@ -385,6 +385,12 @@ fn hash_properties_hold_per_language() {
             "fn f(a: u32) -> u32 {\n    // c\n    a + 1\n}",
             "fn f(a: u32) -> u32 { a + 2 }",
         ),
+        (
+            Lang::Cpp,
+            "int f(int a) { return a + 1; }",
+            "int f(int a) {\n    // c\n    return a + 1;\n}",
+            "int f(int a) { return a + 2; }",
+        ),
     ];
     for (lang, original, cosmetic, real_edit) in cases {
         let h = |src: &str| {

@@ -83,10 +83,36 @@ fn callee_name(func: Node, src: &[u8]) -> Option<String> {
         "field_expression" => func
             .child_by_field_name("field")
             .map(|n| node_text(n, src)),
-        "scoped_identifier" => func
+        // rust path::func(), c++ Namespace::func()
+        "scoped_identifier" | "qualified_identifier" => func
             .child_by_field_name("name")
             .map(|n| node_text(n, src)),
         _ => None,
+    }
+}
+
+/// C/C++ definition name: descend the declarator chain to the naming node.
+/// Out-of-line `GLGaeaClient::GetSkinChar` anchors as `GetSkinChar`; the
+/// file-scoped FQN plus body hash disambiguate, and true duplicates surface
+/// as `ambiguous_anchor` rather than being guessed.
+fn cpp_declarator_name(node: Node, src: &[u8]) -> Option<String> {
+    let mut cur = node.child_by_field_name("declarator")?;
+    loop {
+        match cur.kind() {
+            "function_declarator" | "pointer_declarator" | "reference_declarator"
+            | "parenthesized_declarator" => {
+                cur = cur.child_by_field_name("declarator")?;
+            }
+            "identifier" | "field_identifier" | "destructor_name" | "operator_name" => {
+                return Some(node_text(cur, src));
+            }
+            "qualified_identifier" => match cur.child_by_field_name("name") {
+                Some(n) if n.kind() == "qualified_identifier" => cur = n,
+                Some(n) => return Some(node_text(n, src)),
+                None => return None,
+            },
+            _ => return None,
+        }
     }
 }
 
@@ -212,6 +238,46 @@ fn walk(
                 }
             }
             "call" => {
+                if let Some(func) = node.child_by_field_name("function") {
+                    if let Some(callee) = callee_name(func, src) {
+                        facts.calls.push((current_scope(parents), callee));
+                    }
+                }
+            }
+            _ => {}
+        },
+        Lang::Cpp => match kind {
+            "function_definition" => {
+                if let Some(name) = cpp_declarator_name(node, src) {
+                    let k = if parents.is_empty() { "function" } else { "method" };
+                    push_sym(facts, node, src, parents, k, name.clone());
+                    parents.push(name);
+                    pushed_parent = true;
+                }
+            }
+            "class_specifier" | "struct_specifier" | "enum_specifier" => {
+                // Named types only; anonymous structs/enums stay unanchored.
+                if let Some(name) = name_of(node, src) {
+                    push_sym(facts, node, src, parents, "class", name.clone());
+                    parents.push(name);
+                    pushed_parent = true;
+                }
+            }
+            "namespace_definition" => {
+                // Scope for FQNs, not a symbol itself (like Rust impl_item).
+                if let Some(name) = name_of(node, src) {
+                    parents.push(name);
+                    pushed_parent = true;
+                }
+            }
+            "preproc_include" => {
+                if let Some(p) = node.child_by_field_name("path") {
+                    facts
+                        .imports
+                        .push(node_text(p, src).trim_matches(['"', '<', '>']).to_string());
+                }
+            }
+            "call_expression" => {
                 if let Some(func) = node.child_by_field_name("function") {
                     if let Some(callee) = callee_name(func, src) {
                         facts.calls.push((current_scope(parents), callee));
