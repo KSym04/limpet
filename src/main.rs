@@ -74,6 +74,7 @@ fn run() -> Result<()> {
         "index" => {
             let root = root_from(&args)?;
             let store = store::Store::open(&store::Store::default_db_path(&root))?;
+            store.version_guard()?;
             let report = index::full_index(&store, &root)?;
             let anchors = memory::anchor::resolve_all(&store)?;
             println!("{}", serde_json::to_string_pretty(&serde_json::json!({

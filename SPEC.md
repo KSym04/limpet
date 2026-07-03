@@ -1,4 +1,47 @@
-# SPEC — C++ grammar + legacy-encoding fallback (v0.6.0)
+# SPEC — store version guard (v0.6.1, issue #9)
+
+`limpet update` swaps the binary on disk; a running `serve` keeps the old
+code image. Two images on one store produced a spurious invalidation
+(old-image hashless writes + mixed-version resolves). Fix: stamp and refuse.
+
+## Core Architecture
+
+```
+Store::version_guard()          called first in tools::dispatch (gates every
+                                MCP call incl. the sweep+resolve writes) and
+                                before CLI `limpet index`
+  no stamp / older stamp   -> kv_set code_version = CARGO_PKG_VERSION, proceed
+  stamp == running         -> proceed
+  stamp NEWER than running -> bail loudly, naming both versions + the fix
+ver_tuple                       malformed stamp parses low, never outranks real
+```
+
+Deviation from issue #9 as filed: reads are NOT exempted. Every tool call
+sweeps and resolves (writes), and a half-current image serving "reads" with
+stale semantics is the same silent-corruption class. All-or-nothing error is
+simpler and honest. Limitation: pre-guard images (<=0.6.0) cannot refuse;
+protection covers all future image mixes.
+
+## INVARIANTS
+
+- I-V1: a process never writes to a store stamped by a newer version.
+- I-V2: the refusal names both versions and the remediation.
+- I-V3: malformed stamps never brick a store (parse low, get restamped).
+
+## Task Implementation Checklist
+
+- [x] store.rs: version_guard + ver_tuple + unit test (stamp, upgrade,
+      refuse-newer, malformed)
+- [x] tools.rs dispatch + main.rs index: guard call
+- [x] update.rs: post-update message mentions old-image write refusal
+- [x] version 0.6.1 (Cargo.toml, server.json, Cargo.lock)
+- [x] live cross-version verify: 0.6.1 CLI and MCP both refuse a
+      99.0.0-stamped store; unit suite 60 green
+- [ ] PR -> CI -> merge -> tag v0.6.1 -> pipeline
+
+---
+
+# SPEC — C++ grammar + legacy-encoding fallback (v0.6.0, shipped)
 
 Driven by a real target: a legacy MMO C++ engine (CP949-encoded source,
 UTF-16 headers mixed in) whose knowledge currently anchors only at file

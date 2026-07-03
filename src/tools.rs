@@ -14,6 +14,11 @@ use std::process::Command;
 
 /// Dispatch a tool call. Returns the full envelope value.
 pub fn dispatch(store: &mut Store, root: &Path, name: &str, args: &Value) -> Result<Value> {
+    // A stale code image must not touch the store at all (issue #9): every
+    // call sweeps and resolves, which are writes, so the guard gates
+    // everything rather than pretending reads from a half-current image
+    // are trustworthy.
+    store.version_guard()?;
     // Freshness first (I6): bounded sweep + anchor resolution on every call.
     let sweep = index::sweep(store, root).unwrap_or_default();
     let _ = anchor::resolve_all(store);

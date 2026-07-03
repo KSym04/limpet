@@ -133,6 +133,7 @@ pub fn run(check_only: bool) -> Result<()> {
 
     println!("updated {current} -> {latest}");
     println!("restart Claude Code to reload the MCP server onto the new binary.");
+    println!("(servers still running the old image will refuse store writes until restarted.)");
     Ok(())
 }
 
