@@ -1,97 +1,109 @@
-# SPEC — `limpet update` self-updater
+# SPEC — whole-repo indexing + honest anchors (v0.5.0)
+
+Field-tested on a Bedrock/Timber WordPress theme (451 tracked files): only
+123 files indexed, memories anchored to `.twig`/`.scss` files died silently,
+`remember` reported phantom `anchored` counts, one dead anchor nuked whole
+multi-anchor memories. This spec fixes all four plus two latent bugs found
+during the audit.
 
 ## Core Architecture
 
-`limpet update` fetches the latest published release binary for the current
-platform, verifies its SHA-256 against the published checksum, and atomically
-replaces the running executable in place. Network is touched **only** on this
-explicit command; index / recall / serve never touch the network.
-
 ```
-limpet update            check -> download -> verify -> self-replace, or "already latest"
-limpet update --check    report only: newer? print target version. exit 0 = up to date, 10 = update available
-```
+discover(root)                       every file passing walk bounds (was: lang-detected only)
+  bounds unchanged: .gitignore, .limpetignore, hidden, dir blocklist,
+                    512KB cap, *.min.* skip
+index_file(rel)
+  lang detected   -> parse, symbols + imports + calls + files row (as today)
+  lang unknown    -> files row only: lang=NULL, parse_ok=1, hash=sha256(bytes)[..16]
+                     (binary-safe: raw bytes, no UTF-8 requirement)
 
-Flow:
+remember(anchors)                    ALL validation before any write, one tx
+  symbol anchor   -> must resolve in symbols table (unchanged) else hard error
+  file anchor     -> must exist in files table else hard error naming the file
+                     and whether it exists on disk (=> excluded by bounds)
+                     stores files.hash into anchors.ast_body_hash
 
-```
-current = env!("CARGO_PKG_VERSION")
-remote  = GET api.github.com/repos/KSym04/limpet/releases/latest -> tag_name (strip leading 'v')
-if remote <= current: print "already on latest (x)"; exit 0
-asset   = resolve_asset(OS, ARCH)            # raw binary, not the archive
-bin     = GET <release>/download/<asset>
-sha     = GET <release>/download/<asset>.sha256
-verify sha256(bin) == sha  (else abort, touch nothing)
-self_replace(bin)                            # atomic; Windows-safe
-print "updated {current} -> {remote}. restart Claude Code to reload the MCP server."
+resolve_all: file-level anchor fate
+  file row gone            -> Invalidated
+  anchor hash NULL (legacy)-> backfill current hash, Fresh
+  hash == files.hash       -> Fresh
+  hash != files.hash       -> Stale{file_edited}
+
+resolve_all: entry status aggregation (was: worst anchor wins)
+  all anchors Invalidated       -> invalidated, 'anchor_deleted'
+  some Invalidated, some alive  -> stale, 'anchor_lost'
+  any Stale                     -> stale, <reason>
+  else                          -> active
 ```
 
 ## State / Data Model
 
-No persistent state. Downloads land in a temp dir and are discarded after the
-atomic replace. The only mutated artifact is the on-disk executable at
-`std::env::current_exe()`.
+No schema change. Existing columns absorb everything:
 
-Asset name map (raw binaries, added to the release workflow):
+| column                 | new use                                            |
+|------------------------|----------------------------------------------------|
+| `files.lang`           | NULL for non-parsed (file-level-only) files        |
+| `files.hash`           | already sha256[..16]; now compared for file anchors|
+| `anchors.ast_body_hash`| file-level anchors: content hash (was always NULL) |
+| `entries.stale_reason` | new values: `file_edited`, `anchor_lost`           |
 
-| OS      | ARCH    | asset                          |
-|---------|---------|--------------------------------|
-| macos   | aarch64 | `limpet-aarch64-apple-darwin`  |
-| macos   | x86_64  | `limpet-x86_64-apple-darwin`   |
-| linux   | x86_64  | `limpet-x86_64-unknown-linux-gnu` |
-| windows | x86_64  | `limpet-x86_64-pc-windows-msvc.exe` |
-
-Each asset ships a sibling `<asset>.sha256` (`<hex>  <name>` format).
+Legacy stores (v0.4.0) migrate lazily: NULL file-anchor hashes are
+backfilled on first `resolve_all`; unindexed files appear on next sweep.
 
 ## INVARIANTS
 
-- I1: never write the executable on checksum mismatch, short read, or HTTP != 200.
-- I2: never downgrade — refuse if `remote <= current` (unless `--force`, not in v1).
-- I3: replace is atomic — no window where the binary on disk is truncated.
-- I4: no network on any command other than `update` / `update --check`.
+- I-A: `remember` is atomic — either the entry and ALL its anchors persist, or
+  nothing does. `anchored` in the result equals anchors written, always.
+- I-B: an anchor never resolves against a file limpet has not indexed;
+  `remember` refuses it loudly at write time instead.
+- I-C: one dead anchor never invalidates an entry that still has a live
+  anchor; entry dies only when every anchor dies.
+- I-D: file-level anchors participate in staleness — editing the file flips
+  attached memories to `stale:file_edited`, deleting it invalidates them.
+- I-E: walk bounds (size cap, ignore files, dir blocklist, minified skip)
+  survive unchanged — indexing all extensions must not reopen the
+  WordPress-tree CPU-peg (see memory 01KWJZ51DV).
 
 ## ATTACK SURFACE
 
-- MITM / tampered asset -> HTTPS (rustls) + published SHA-256 verified before install.
-- Downgrade attack -> I2 refuses non-greater remote.
-- Wrong-arch asset -> `resolve_asset` hard-fails when OS/ARCH has no mapping.
-- Partial download -> read to end, length + checksum checked before replace (I1/I3).
-- Running MCP server stays on the old binary in memory -> POST message tells the
-  user to restart Claude Code (same gotcha seen during the 0.3.0 hang debug).
+- Binary files (images, fonts) now walk into `index_file` -> hash raw bytes,
+  never `read_to_string`; 512KB cap bounds cost.
+- Giant text configs (`package-lock.json` < 512KB) -> file row only, no
+  parse; harmless.
+- Repo with no `.gitignore` -> unchanged risk profile; bounds are the
+  defense, not extension filtering (extension filter never guarded the walk
+  anyway — walk visited every file, filter only dropped them post-stat).
+- Legacy entry invalidated by OLD all-or-nothing rule stays invalidated
+  (status write is one-way for invalidated). Documented: re-`remember` or
+  `admin index` after upgrade will not resurrect; user re-seeds.
+- FTS duplicate surfacing on file anchors unchanged (same `anchors.file`).
 
 ## TECH STACK DEPS
 
-- `ureq` (default-features off, `tls` = rustls) — blocking HTTPS, no tokio/hyper.
-- `self_replace` — cross-platform atomic self-replace.
-- `serde_json` (already present) — parse the releases API response.
-- `sha2` (already present) — checksum verify.
-- Release workflow additionally uploads raw `limpet-<target>` binaries + `.sha256`.
+- No new crates. rusqlite `unchecked_transaction` for atomic remember.
+- tree-sitter grammars untouched; `lang::detect` still gates parsing only.
 
 ## Task Implementation Checklist
 
-- [x] Cargo.toml: add `ureq` (rustls), `self-replace`; bump version 0.3.0 -> 0.4.0
-- [x] `src/update.rs`: `run(check: bool)`, version compare, asset resolve, download, verify, self-replace
-- [x] `src/main.rs`: wire `update` subcommand (+ `--check`), add to HELP
-- [x] `.github/workflows/release.yml`: upload raw binary + `.sha256` per target
-- [x] `src/skill.md`: document `/limpet update`
-- [x] `server.json`: version 0.4.0
-- [x] Build + `cargo test --locked` green
-- [ ] Branch -> PR -> merge -> tag v0.4.0
-
-## Security hardening: no-secret-leak guarantee
-
-Threat: an agent calls `remember` with a credential in the body or evidence.
-It would persist to the local store and later leak through
-`admin export` -> `.limpet/memory.jsonl` -> `git push`.
-
-Control: `src/secrets.rs::detect` runs on the write path in `memory::remember`.
-It refuses (hard error, no write) any body or evidence output containing a
-provider-specific credential: AWS/ASIA keys, GitHub tokens, Slack tokens,
-OpenAI/Stripe secret keys, Google API keys, PEM private-key blocks, and JWTs.
-High-precision (prefix + length + charset) to avoid tripping on prose. No new
-dependency.
-
-Out of scope for v1 (documented, not yet built):
-- Release-binary signing (updater trusts a same-origin GitHub checksum; a
-  release-signing key would defend a compromised release).
-- Entropy-based generic secret detection (higher false-positive rate).
+- [x] `src/index/mod.rs`: `discover` drops lang filter; `index_file` handles
+      unknown-lang path (raw-byte hash, files row, purge symbol rows);
+      hidden(false) so .github/.gitignore are anchorable; `.limpet` dir
+      blocklisted so the export never indexes itself
+- [x] `src/memory/mod.rs`: validate-then-write in one tx; file anchors
+      require files row, store content hash; loud errors
+- [x] `src/memory/anchor.rs`: file-anchor hash compare + legacy backfill;
+      per-anchor aggregation (I-C)
+- [x] `src/memory/recall.rs`: invalidated flag no longer hardcodes
+      `anchor_deleted`; use stored stale_reason
+- [x] tests: golden transitions for file anchors (edit -> stale,
+      delete -> invalidated, legacy NULL hash -> fresh+backfill);
+      multi-anchor partial-death -> stale not invalidated;
+      remember atomicity (failed anchor leaves zero rows);
+      discover picks up .twig/.scss/.md/unknown extensions and hidden paths
+- [x] `README.md`: serve vs ui note; document .limpetignore + whole-repo
+      indexing; `src/skill.md`: anchor-to-any-file guidance + recall-before-read
+- [x] version 0.4.0 -> 0.5.0 (Cargo.toml, Cargo.lock, server.json)
+- [x] `cargo test --locked` green (55 tests); bench gate holds at 4.1x;
+      dogfood verified over MCP stdio: 47/47 anchorable tracked files indexed,
+      file_edited/anchor_lost/anchor_deleted transitions all observed live
+- [ ] Branch feat/whole-repo-index -> PR -> merge -> tag v0.5.0

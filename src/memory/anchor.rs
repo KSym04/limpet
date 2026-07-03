@@ -135,13 +135,15 @@ pub struct ResolveReport {
     pub invalidated: usize,
 }
 
-/// Resolve every anchor of every non-invalidated entry against the symbols
-/// table, applying the spec 4.3 decision table, and update entry statuses.
+/// Resolve every anchor of every non-invalidated entry against the index,
+/// applying the spec 4.3 decision table, and update entry statuses.
 ///
-/// Entry status becomes the worst of its anchors
-/// (active < stale < invalidated). A `verified` entry that goes stale has
-/// its confidence dropped to 0.5 so recall ranks it honestly until
-/// re-verified.
+/// Aggregation is per-anchor, not worst-anchor-wins: an entry is
+/// invalidated only when EVERY anchor is gone. Losing some anchors while
+/// others still resolve marks it `stale:anchor_lost`, because a memory
+/// that is still 80% attached to live code is degraded, not dead
+/// (invariant I-C). A `verified` entry that goes stale has its confidence
+/// dropped to 0.5 so recall ranks it honestly until re-verified.
 pub fn resolve_all(store: &crate::store::Store) -> Result<ResolveReport> {
     let mut report = ResolveReport::default();
 
@@ -170,30 +172,41 @@ pub fn resolve_all(store: &crate::store::Store) -> Result<ResolveReport> {
         .collect::<rusqlite::Result<_>>()?;
 
     use std::collections::HashMap;
-    let mut worst: HashMap<String, u8> = HashMap::new(); // 0 active, 1 stale, 2 invalidated
-    let mut reasons: HashMap<String, &'static str> = HashMap::new();
+    let mut tallies: HashMap<String, EntryTally> = HashMap::new();
 
     for row in rows {
-        // File-level anchor (no symbol): fresh while the file exists.
+        // File-level anchor (no symbol): compare the stored content hash
+        // against the file's current hash so edits surface as stale.
         let Some(ref anchor_fqn) = row.symbol_fqn else {
-            let file_exists: bool = store
+            let current: Option<String> = store
                 .conn
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM files WHERE path = ?1)",
-                    [&row.file],
-                    |r| r.get(0),
-                )
-                .unwrap_or(false);
-            let fate = if file_exists { AnchorFate::Fresh } else { AnchorFate::Invalidated };
+                .query_row("SELECT hash FROM files WHERE path = ?1", [&row.file], |r| {
+                    r.get(0)
+                })
+                .ok();
+            let fate = match (current, &row.hash) {
+                (None, _) => AnchorFate::Invalidated,
+                (Some(cur), None) => {
+                    // Legacy anchor written before file hashes were stored:
+                    // adopt the current content as its baseline.
+                    store.conn.execute(
+                        "UPDATE anchors SET ast_body_hash = ?1 WHERE id = ?2",
+                        params![cur, row.anchor_id],
+                    )?;
+                    AnchorFate::Fresh
+                }
+                (Some(ref cur), Some(h)) if cur == h => AnchorFate::Fresh,
+                (Some(_), Some(_)) => AnchorFate::Stale { reason: "file_edited" },
+            };
             tally(&mut report, &fate);
-            record_worst(&mut worst, &mut reasons, &row.entry_id, &fate);
+            record(&mut tallies, &row.entry_id, &fate);
             continue;
         };
         let Some(ref anchor_hash) = row.hash else {
             // Symbol anchor without a hash cannot be verified; call it stale.
             let fate = AnchorFate::Stale { reason: "missing_hash" };
             tally(&mut report, &fate);
-            record_worst(&mut worst, &mut reasons, &row.entry_id, &fate);
+            record(&mut tallies, &row.entry_id, &fate);
             continue;
         };
 
@@ -235,41 +248,51 @@ pub fn resolve_all(store: &crate::store::Store) -> Result<ResolveReport> {
             )?;
         }
         tally(&mut report, &fate);
-        record_worst(&mut worst, &mut reasons, &row.entry_id, &fate);
+        record(&mut tallies, &row.entry_id, &fate);
     }
 
-    for (entry_id, sev) in &worst {
-        match sev {
-            0 => {
-                store.conn.execute(
-                    "UPDATE entries SET status = 'active', stale_reason = NULL
-                     WHERE id = ?1 AND status IN ('active','stale')",
-                    [entry_id],
-                )?;
-            }
-            1 => {
-                let reason = reasons.get(entry_id).copied().unwrap_or("stale");
-                store.conn.execute(
-                    "UPDATE entries SET status = 'stale', stale_reason = ?2,
-                        confidence = CASE WHEN source = 'verified'
-                                          THEN MIN(confidence, 0.5)
-                                          ELSE confidence * 0.6 END
-                     WHERE id = ?1 AND status IN ('active','stale')",
-                    params![entry_id, reason],
-                )?;
-            }
-            _ => {
-                store.conn.execute(
-                    "UPDATE entries SET status = 'invalidated',
-                        stale_reason = 'anchor_deleted'
-                     WHERE id = ?1 AND status != 'superseded'",
-                    [entry_id],
-                )?;
-            }
+    for (entry_id, t) in &tallies {
+        if t.invalidated == t.total {
+            // Every anchor is gone: the memory has nothing left to describe.
+            store.conn.execute(
+                "UPDATE entries SET status = 'invalidated',
+                    stale_reason = 'anchor_deleted'
+                 WHERE id = ?1 AND status != 'superseded'",
+                [entry_id],
+            )?;
+        } else if t.invalidated > 0 || t.stale > 0 {
+            let reason = if t.invalidated > 0 {
+                "anchor_lost"
+            } else {
+                t.stale_reason.unwrap_or("stale")
+            };
+            store.conn.execute(
+                "UPDATE entries SET status = 'stale', stale_reason = ?2,
+                    confidence = CASE WHEN source = 'verified'
+                                      THEN MIN(confidence, 0.5)
+                                      ELSE confidence * 0.6 END
+                 WHERE id = ?1 AND status IN ('active','stale')",
+                params![entry_id, reason],
+            )?;
+        } else {
+            store.conn.execute(
+                "UPDATE entries SET status = 'active', stale_reason = NULL
+                 WHERE id = ?1 AND status IN ('active','stale')",
+                [entry_id],
+            )?;
         }
     }
 
     Ok(report)
+}
+
+/// Per-entry anchor outcome counts for status aggregation.
+#[derive(Default)]
+struct EntryTally {
+    total: usize,
+    invalidated: usize,
+    stale: usize,
+    stale_reason: Option<&'static str>,
 }
 
 fn tally(report: &mut ResolveReport, fate: &AnchorFate) {
@@ -281,22 +304,19 @@ fn tally(report: &mut ResolveReport, fate: &AnchorFate) {
     }
 }
 
-fn record_worst(
-    worst: &mut std::collections::HashMap<String, u8>,
-    reasons: &mut std::collections::HashMap<String, &'static str>,
+fn record(
+    tallies: &mut std::collections::HashMap<String, EntryTally>,
     entry_id: &str,
     fate: &AnchorFate,
 ) {
-    let sev = match fate {
-        AnchorFate::Fresh | AnchorFate::Followed { .. } => 0u8,
-        AnchorFate::Stale { .. } => 1,
-        AnchorFate::Invalidated => 2,
-    };
-    if let AnchorFate::Stale { reason } = fate {
-        reasons.insert(entry_id.to_string(), reason);
-    }
-    let cur = worst.entry(entry_id.to_string()).or_insert(0);
-    if sev > *cur {
-        *cur = sev;
+    let t = tallies.entry(entry_id.to_string()).or_default();
+    t.total += 1;
+    match fate {
+        AnchorFate::Fresh | AnchorFate::Followed { .. } => {}
+        AnchorFate::Stale { reason } => {
+            t.stale += 1;
+            t.stale_reason.get_or_insert(reason);
+        }
+        AnchorFate::Invalidated => t.invalidated += 1,
     }
 }

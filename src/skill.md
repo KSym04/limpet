@@ -27,6 +27,9 @@ their code changes. Work with it in this order.
 - **Before committing or summarizing changes**, call `affected` to see which
   memories your diff put at risk and which decisions bound the code you
   changed.
+- **Recall before read.** Before grepping or reading a file to answer a
+  question about this project, call `recall` with the question. If an
+  active memory answers it, do not read the file at all.
 - **Remember as you learn.** When you discover something durable, call
   `remember` immediately, anchored to the relevant symbol:
   - `decision`: a choice plus the reason and rejected alternatives
@@ -35,6 +38,12 @@ their code changes. Work with it in this order.
   - `episode`: what was tried and failed, and why it failed
   - `insight`: a gotcha or non-obvious constraint
   - `intent`: what a module is for when the code cannot say
+  Anchor to a symbol when one exists (survives renames and moves, gives
+  precise staleness); anchor to the file (omit `symbol`) for templates,
+  styles, and configs — every file in the repo is indexed and file anchors
+  go stale when the file's content changes. If `remember` rejects an
+  anchor, the path is wrong or the file is excluded by ignore rules; fix
+  it rather than dropping the anchor.
   Write bodies short, specific, and standalone. Do not store anything
   derivable from a quick read of the code, and never store secrets,
   credentials, tokens, or personal data. limpet enforces this: `remember`

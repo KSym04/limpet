@@ -85,6 +85,96 @@ fn unknown_symbol_fails_with_suggestions() {
 }
 
 #[test]
+fn unresolvable_anchor_fails_loud_and_writes_nothing() {
+    let dir = TempDir::new().unwrap();
+    let store = seeded_store(dir.path());
+
+    // File anchor to a file limpet never indexed: loud error, no phantom
+    // "anchored" count, and no orphan entry left behind.
+    let err = memory::remember(
+        &store,
+        "insight",
+        "hero block is 480px",
+        "explicit",
+        None,
+        &[
+            AnchorSpec { file: "cache.py".into(), symbol: Some("cache_get".into()) },
+            AnchorSpec { file: "templates/interior.twig".into(), symbol: None },
+        ],
+        None,
+        &[],
+        None,
+    )
+    .unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("templates/interior.twig"), "error must name the bad anchor: {msg}");
+    assert!(msg.contains("not in the index"), "error must say why: {msg}");
+
+    let entries: i64 = store
+        .conn
+        .query_row("SELECT COUNT(*) FROM entries", [], |r| r.get(0))
+        .unwrap();
+    let anchors: i64 = store
+        .conn
+        .query_row("SELECT COUNT(*) FROM anchors", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!((entries, anchors), (0, 0), "failed remember must persist nothing");
+}
+
+#[test]
+fn failed_symbol_anchor_leaves_no_orphan_entry() {
+    let dir = TempDir::new().unwrap();
+    let store = seeded_store(dir.path());
+    let _ = memory::remember(
+        &store,
+        "fact",
+        "something",
+        "explicit",
+        None,
+        &[AnchorSpec { file: "cache.py".into(), symbol: Some("nonexistent_fn".into()) }],
+        None,
+        &[],
+        None,
+    )
+    .unwrap_err();
+    let entries: i64 = store
+        .conn
+        .query_row("SELECT COUNT(*) FROM entries", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(entries, 0, "failed remember must not leave an orphan entry");
+}
+
+#[test]
+fn file_anchor_stores_content_hash_at_write_time() {
+    let dir = TempDir::new().unwrap();
+    fs::write(dir.path().join("style.scss"), ".a { color: red; }\n").unwrap();
+    let store = seeded_store(dir.path());
+    let r = memory::remember(
+        &store,
+        "insight",
+        "brand red lives here, do not hardcode it elsewhere",
+        "explicit",
+        None,
+        &[AnchorSpec { file: "style.scss".into(), symbol: None }],
+        None,
+        &[],
+        None,
+    )
+    .unwrap();
+    assert_eq!(r.anchored, 1);
+    let (anchor_hash, file_hash): (Option<String>, String) = store
+        .conn
+        .query_row(
+            "SELECT a.ast_body_hash, f.hash FROM anchors a
+             JOIN files f ON f.path = a.file WHERE a.entry_id = ?1",
+            [&r.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(anchor_hash.as_deref(), Some(file_hash.as_str()));
+}
+
+#[test]
 fn kind_and_source_validation() {
     let dir = TempDir::new().unwrap();
     let store = seeded_store(dir.path());
