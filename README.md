@@ -185,13 +185,63 @@ Open http://127.0.0.1:9748 for a live force-directed view of the knowledge graph
 
 ## 📦 Install
 
-**Prebuilt binary** (Apple Silicon macOS, Linux, Windows): download from the [latest release](https://github.com/KSym04/limpet/releases/latest), verify the sha256, put `limpet` on your PATH, then:
+**One line.** The installer downloads the latest release binary for your platform, verifies its sha256, installs it, and registers it with Claude Code:
+
+macOS / Linux:
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/KSym04/limpet/main/install.sh | bash
+```
+
+Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/KSym04/limpet/main/install.ps1 | iex
+```
+
+Then restart Claude Code and type `/limpet` in any project. That is the whole setup. (`LIMPET_INSTALL_DIR` overrides the install location; `LIMPET_VERSION` pins a release tag.)
+
+Prefer not to pipe a script into your shell? Every step below is the manual equivalent. Prebuilt binaries ship for Apple Silicon macOS, x86_64 Linux, and x86_64 Windows on the [latest release](https://github.com/KSym04/limpet/releases/latest); every asset has a published sha256 — verify it before you trust the binary.
+
+**macOS (Apple Silicon)**
+
+```bash
+curl -fsSLO https://github.com/KSym04/limpet/releases/latest/download/limpet-aarch64-apple-darwin.tar.gz
+curl -fsSLO https://github.com/KSym04/limpet/releases/latest/download/limpet-aarch64-apple-darwin.tar.gz.sha256
+shasum -a 256 -c limpet-aarch64-apple-darwin.tar.gz.sha256
+tar xzf limpet-aarch64-apple-darwin.tar.gz          # extracts a single `limpet` binary
+sudo install -m 755 limpet /usr/local/bin/limpet
 limpet install
 ```
 
-**With Rust** ([rustup.rs](https://rustup.rs)) — also the path for Intel macs and any platform without a prebuilt binary:
+macOS may quarantine a downloaded binary; if it refuses to run, clear the flag with `xattr -d com.apple.quarantine /usr/local/bin/limpet`.
+
+**Linux (x86_64)**
+
+```bash
+curl -fsSLO https://github.com/KSym04/limpet/releases/latest/download/limpet-x86_64-unknown-linux-gnu.tar.gz
+curl -fsSLO https://github.com/KSym04/limpet/releases/latest/download/limpet-x86_64-unknown-linux-gnu.tar.gz.sha256
+sha256sum -c limpet-x86_64-unknown-linux-gnu.tar.gz.sha256
+tar xzf limpet-x86_64-unknown-linux-gnu.tar.gz      # extracts a single `limpet` binary
+sudo install -m 755 limpet /usr/local/bin/limpet    # or ~/.local/bin if it is on your PATH
+limpet install
+```
+
+**Windows (x86_64, PowerShell)**
+
+```powershell
+Invoke-WebRequest https://github.com/KSym04/limpet/releases/latest/download/limpet-x86_64-pc-windows-msvc.zip -OutFile limpet.zip
+Invoke-WebRequest https://github.com/KSym04/limpet/releases/latest/download/limpet-x86_64-pc-windows-msvc.zip.sha256 -OutFile limpet.zip.sha256
+# compare the two hashes — they must match
+(Get-FileHash limpet.zip -Algorithm SHA256).Hash
+Get-Content limpet.zip.sha256
+Expand-Archive limpet.zip -DestinationPath "$env:LOCALAPPDATA\limpet"   # extracts limpet.exe
+# add the folder to PATH once, then restart the terminal
+[Environment]::SetEnvironmentVariable('Path', $env:Path + ";$env:LOCALAPPDATA\limpet", 'User')
+limpet install
+```
+
+**With Rust** ([rustup.rs](https://rustup.rs)) — the path for Intel macs, ARM Linux, and any platform without a prebuilt binary:
 
 ```bash
 cargo install limpet
@@ -230,9 +280,19 @@ Everyday commands:
 | `limpet stats` | the token-savings receipt: session + lifetime, methodology included |
 | `limpet doctor` | one-screen setup diagnosis; also runs automatically after install and update |
 | `limpet ui` | knowledge graph at http://127.0.0.1:9748, all projects in one view |
+| `limpet statusline` | the statusline segment (memories + tokens saved), read-only and instant |
 | `limpet update` | self-update to the latest release, checksum-verified (the only networked command) |
 
 Data lives under `~/.local/share/limpet/`, one SQLite store per repository. Teammates run `limpet import` after pulling the JSONL.
+
+**Statusline on any platform.** `limpet statusline --root <project dir>` prints the shell segment (`| 🐚 13 · ↑32k tokens saved`, with the count hyperlinking to the project's graph when the UI is running) or nothing at all — it opens the store strictly read-only, never writes, and always exits 0, so it can sit in a prompt safely. Because the rendering lives in the binary, the same one-liner works from a bash statusline on macOS/Linux and a PowerShell or cmd statusline on Windows — no sqlite3 CLI, no bash required:
+
+```powershell
+# inside a Claude Code statusline.ps1
+$limpetSeg = & limpet statusline --root $projectDir
+```
+
+Toggle it off with `/limpet statusline` (writes `~/.claude/.limpet-statusline-off`; the command honors the flag).
 
 ## 🌳 Whole repo indexed, thin on purpose
 

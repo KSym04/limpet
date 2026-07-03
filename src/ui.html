@@ -81,13 +81,30 @@ const panel = document.getElementById("panel");
 const COLORS = { active: "#3fb96f", stale: "#e0a437", invalidated: "#e05252", superseded: "#6b7885" };
 
 let nodes = [], edges = [], byId = new Map();
+// Visibility is cached here and recomputed only when the data or the
+// filter changes; the per-frame loops never scan the edge list.
+let visNodes = [], visEdges = [];
 let view = { x: 0, y: 0, scale: 1 };
 let selected = null, filter = "all";
+let dpr = 1, cssW = 0, cssH = 0;
+// Settle detection: `calm` counts consecutive low-energy frames; past the
+// threshold the simulation pauses and only `dirty` redraws happen, so an
+// idle tab costs nothing. `wake()` rewarms after data/filter changes.
+let calm = 0, dirty = true;
+const CALM_FRAMES = 30;
+
+function wake() { calm = 0; dirty = true; }
 
 function resize() {
   const rect = canvas.parentElement.getBoundingClientRect();
-  canvas.width = rect.width - (panel.classList.contains("open") ? 340 : 0);
-  canvas.height = rect.height;
+  cssW = rect.width - (panel.classList.contains("open") ? 340 : 0);
+  cssH = rect.height;
+  dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.round(cssW * dpr);
+  canvas.height = Math.round(cssH * dpr);
+  canvas.style.width = cssW + "px";
+  canvas.style.height = cssH + "px";
+  dirty = true;
 }
 window.addEventListener("resize", resize);
 
@@ -126,7 +143,10 @@ async function loadLedger() {
   } catch (e) { /* cosmetic here; admin op=ledger is the source of truth */ }
 }
 
+let loading = false;
 async function load() {
+  if (loading) return; // one poll in flight at a time
+  loading = true;
   try {
     const res = await fetch("/api/graph?project=" + encodeURIComponent(currentProject));
     const data = await res.json();
@@ -139,6 +159,8 @@ async function load() {
     document.getElementById("err").textContent = "";
   } catch (e) {
     document.getElementById("err").textContent = "connection lost, retrying";
+  } finally {
+    loading = false;
   }
 }
 
@@ -151,28 +173,53 @@ function merge(newNodes, newEdges) {
     const node = Object.assign({
       x: old ? old.x : Math.cos(angle) * 260 + (Math.random() - 0.5) * 40,
       y: old ? old.y : Math.sin(angle) * 260 + (Math.random() - 0.5) * 40,
-      vx: 0, vy: 0,
+      vx: old ? old.vx : 0, vy: old ? old.vy : 0,
     }, n);
     byId.set(n.id, node);
     return node;
   });
   edges = newEdges.filter(e => byId.has(e.from) && byId.has(e.to));
-}
-
-function visible(n) {
-  if (filter === "all") return true;
-  if (filter === "stale") {
-    if (n.type !== "memory") return edges.some(e => e.rel === "anchor" && e.to === n.id && visible(byId.get(e.from)));
-    return n.status === "stale" || n.status === "invalidated";
+  // Re-point the selection at the rebuilt node so the highlight ring and
+  // detail panel survive the poll instead of going stale.
+  if (selected) {
+    const again = byId.get(selected.id);
+    if (again) showPanel(again);
+    else { selected = null; panel.classList.remove("open"); resize(); }
   }
-  if (n.type !== "memory") return edges.some(e => e.rel === "anchor" && e.to === n.id && visible(byId.get(e.from)));
-  return n.kind === filter;
+  computeVisible();
 }
 
+// One O(nodes + edges) pass, run only on data or filter change. Memory
+// nodes match the filter directly; a code node is visible iff a visible
+// memory anchors to it.
+function computeVisible() {
+  const memVis = n =>
+    filter === "all" ? true :
+    filter === "stale" ? (n.status === "stale" || n.status === "invalidated") :
+    n.kind === filter;
+  const keep = new Set();
+  for (const n of nodes) {
+    if (filter === "all" || (n.type === "memory" && memVis(n))) keep.add(n.id);
+  }
+  if (filter !== "all") {
+    for (const e of edges) {
+      if (e.rel === "anchor" && keep.has(e.from)) keep.add(e.to);
+    }
+  }
+  visNodes = nodes.filter(n => keep.has(n.id));
+  visEdges = edges.filter(e => keep.has(e.from) && keep.has(e.to));
+  // Rewarm the simulation only when the visible set actually changed;
+  // a steady 5s poll with identical data must not wake a settled layout.
+  const fp = filter + "#" + visNodes.map(n => n.id).join("|") + "#" + visEdges.length;
+  dirty = true; // colors/labels may change even when the set does not
+  if (fp !== computeVisible.fp) { computeVisible.fp = fp; wake(); }
+}
+
+// One simulation step over the cached visible set; returns total kinetic
+// energy so the caller can detect a settled layout and stop ticking.
 function tick() {
-  const vis = nodes.filter(visible);
-  for (const a of vis) {
-    for (const b of vis) {
+  for (const a of visNodes) {
+    for (const b of visNodes) {
       if (a === b) continue;
       const dx = a.x - b.x, dy = a.y - b.y;
       const d2 = Math.max(80, dx * dx + dy * dy);
@@ -182,9 +229,8 @@ function tick() {
     }
     a.vx -= a.x * 0.003; a.vy -= a.y * 0.003;
   }
-  for (const e of edges) {
+  for (const e of visEdges) {
     const a = byId.get(e.from), b = byId.get(e.to);
-    if (!visible(a) || !visible(b)) continue;
     const dx = b.x - a.x, dy = b.y - a.y;
     const d = Math.max(1, Math.hypot(dx, dy));
     const want = e.rel === "anchor" ? 90 : 140;
@@ -192,10 +238,13 @@ function tick() {
     a.vx += (dx / d) * f; a.vy += (dy / d) * f;
     b.vx -= (dx / d) * f; b.vy -= (dy / d) * f;
   }
-  for (const n of vis) {
+  let energy = 0;
+  for (const n of visNodes) {
     n.x += n.vx; n.y += n.vy;
     n.vx *= 0.82; n.vy *= 0.82;
+    energy += Math.abs(n.vx) + Math.abs(n.vy);
   }
+  return energy;
 }
 
 function radius(n) {
@@ -204,14 +253,16 @@ function radius(n) {
 }
 
 function draw() {
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  // Device-pixel-ratio aware: the backing store is dpr-scaled so text and
+  // strokes stay crisp on retina; all coordinates below are CSS pixels.
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cssW, cssH);
   ctx.save();
-  ctx.translate(canvas.width / 2 + view.x, canvas.height / 2 + view.y);
+  ctx.translate(cssW / 2 + view.x, cssH / 2 + view.y);
   ctx.scale(view.scale, view.scale);
 
-  for (const e of edges) {
+  for (const e of visEdges) {
     const a = byId.get(e.from), b = byId.get(e.to);
-    if (!visible(a) || !visible(b)) continue;
     ctx.beginPath();
     ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
     if (e.rel === "contradicts") { ctx.strokeStyle = "#e05252"; ctx.setLineDash([5, 4]); ctx.lineWidth = 1.4; }
@@ -222,8 +273,7 @@ function draw() {
     ctx.setLineDash([]);
   }
 
-  for (const n of nodes) {
-    if (!visible(n)) continue;
+  for (const n of visNodes) {
     const r = radius(n);
     ctx.beginPath();
     if (n.type === "memory") {
@@ -271,7 +321,7 @@ function showPanel(n) {
   panel.innerHTML = `
     <h2>memory</h2>
     <div>
-      <span class="badge ${n.status}">${n.status}</span>
+      <span class="badge ${esc(n.status)}">${esc(n.status)}</span>
       <span class="badge kind">${esc(n.kind)}</span>
       <span class="badge kind">${esc(n.source)}</span>
     </div>
@@ -293,14 +343,14 @@ canvas.addEventListener("mousedown", e => { dragging = true; moved = false; last
 window.addEventListener("mouseup", e => {
   if (dragging && !moved) {
     const rect = canvas.getBoundingClientRect();
-    const gx = (e.clientX - rect.left - canvas.width / 2 - view.x) / view.scale;
-    const gy = (e.clientY - rect.top - canvas.height / 2 - view.y) / view.scale;
+    const gx = (e.clientX - rect.left - cssW / 2 - view.x) / view.scale;
+    const gy = (e.clientY - rect.top - cssH / 2 - view.y) / view.scale;
     let hit = null;
-    for (const n of nodes) {
-      if (!visible(n)) continue;
+    for (const n of visNodes) {
       if (Math.hypot(n.x - gx, n.y - gy) < radius(n) + 6) { hit = n; break; }
     }
     showPanel(hit);
+    dirty = true;
   }
   dragging = false;
 });
@@ -309,11 +359,21 @@ window.addEventListener("mousemove", e => {
   moved = true;
   view.x += e.clientX - last[0]; view.y += e.clientY - last[1];
   last = [e.clientX, e.clientY];
+  dirty = true;
 });
 canvas.addEventListener("wheel", e => {
   e.preventDefault();
+  // Zoom toward the cursor: keep the graph point under the pointer fixed.
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left - cssW / 2;
+  const my = e.clientY - rect.top - cssH / 2;
   const factor = e.deltaY < 0 ? 1.1 : 0.9;
-  view.scale = Math.min(3, Math.max(0.25, view.scale * factor));
+  const next = Math.min(3, Math.max(0.25, view.scale * factor));
+  const k = next / view.scale;
+  view.x = mx - (mx - view.x) * k;
+  view.y = my - (my - view.y) * k;
+  view.scale = next;
+  dirty = true;
 }, { passive: false });
 
 document.getElementById("filters").addEventListener("click", e => {
@@ -321,13 +381,15 @@ document.getElementById("filters").addEventListener("click", e => {
   if (!btn) return;
   filter = btn.dataset.f;
   for (const b of document.querySelectorAll(".filters button")) b.classList.toggle("on", b === btn);
+  computeVisible();
 });
 
 document.getElementById("project-select").addEventListener("change", e => {
   currentProject = e.target.value;
   selected = null;
   panel.classList.remove("open");
-  byId = new Map(); nodes = []; edges = [];
+  byId = new Map(); nodes = []; edges = []; visNodes = []; visEdges = [];
+  resize();
   load();
 });
 
@@ -336,7 +398,18 @@ loadProjects();
 load();
 setInterval(load, 5000);
 setInterval(loadProjects, 15000);
-(function loop() { tick(); draw(); requestAnimationFrame(loop); })();
+// Render loop: simulate only until the layout settles (CALM_FRAMES of low
+// energy), then draw only when something marked the frame dirty. An idle,
+// settled graph does no per-frame work beyond this check.
+(function loop() {
+  if (calm <= CALM_FRAMES) {
+    const energy = tick();
+    if (energy < 0.05 * Math.max(1, visNodes.length)) calm++; else calm = 0;
+    dirty = true;
+  }
+  if (dirty) { draw(); dirty = false; }
+  requestAnimationFrame(loop);
+})();
 </script>
 </body>
 </html>

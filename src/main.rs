@@ -9,6 +9,7 @@
 //!   limpet install [--dry-run]            register with Claude Code
 //!   limpet uninstall                      remove registration
 //!   limpet doctor  [--root <path>]        diagnose install/store health
+//!   limpet statusline [--root <path>]     statusline segment, read-only
 //!   limpet update  [--check]              self-update to the latest release
 
 use anyhow::{bail, Context, Result};
@@ -80,32 +81,41 @@ fn run() -> Result<()> {
             store.version_guard()?;
             let report = index::full_index(&store, &root)?;
             let anchors = memory::anchor::resolve_all(&store)?;
-            println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-                "index": report, "anchors": anchors
-            }))?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "index": report, "anchors": anchors
+                }))?
+            );
             Ok(())
         }
         "status" | "export" | "import" => {
             let root = root_from(&args)?;
             let mut st = store::Store::open(&store::Store::default_db_path(&root))?;
-            let op = match cmd { "status" => "status", "export" => "export", _ => "import" };
-            let out = tools::dispatch(
-                &mut st,
-                &root,
-                "admin",
-                &serde_json::json!({ "op": op }),
-            )?;
+            let op = match cmd {
+                "status" => "status",
+                "export" => "export",
+                _ => "import",
+            };
+            let out = tools::dispatch(&mut st, &root, "admin", &serde_json::json!({ "op": op }))?;
             println!("{}", serde_json::to_string_pretty(&out)?);
             Ok(())
         }
         "doctor" => doctor(&args),
+        "statusline" => {
+            print_statusline(&args);
+            Ok(())
+        }
         "install" => install(args.iter().any(|a| a == "--dry-run")),
         "uninstall" => uninstall(),
         "stats" => {
             let root = root_from(&args)?;
             let store = store::Store::open(&store::Store::default_db_path(&root))?;
             store.version_guard()?;
-            println!("{}", serde_json::to_string_pretty(&tools::ledger_payload(&store))?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&tools::ledger_payload(&store))?
+            );
             Ok(())
         }
         "update" => {
@@ -142,6 +152,7 @@ USAGE:
   limpet status  [--root <path>]   index and memory counts
   limpet stats   [--root <path>]   token-savings ledger (session + lifetime)
   limpet doctor  [--root <path>]   diagnose install/registration/store issues
+  limpet statusline [--root <path>]   render the statusline segment (read-only)
   limpet export  [--root <path>]   write memory to .limpet/memory.jsonl
   limpet import  [--root <path>]   read memory from .limpet/memory.jsonl
   limpet install [--dry-run]       register with Claude Code (user scope)
@@ -150,6 +161,101 @@ USAGE:
 
 Indexing and memory stay fully offline. `limpet update` is the only command
 that reaches the network, and only when you run it.";
+
+/// Statusline segment: `| 🐚 <count> (<n> stale) · ↑<n>k tokens saved`,
+/// with the count linking to the project's UI graph via OSC 8 when the UI
+/// is running. Prints nothing (and always exits 0) when the store is
+/// absent, the memory is empty, or the off-flag exists — a statusline must
+/// never be able to break the prompt. This replaces the bash+sqlite3 block
+/// statusline scripts used to carry, so Windows statuslines (PowerShell,
+/// cmd) render the identical segment by shelling out to one command.
+fn print_statusline(args: &[String]) {
+    if let Ok(seg) = statusline_segment(args) {
+        if !seg.is_empty() {
+            println!("{seg}");
+        }
+    }
+}
+
+fn statusline_segment(args: &[String]) -> Result<String> {
+    // Same off-flag the /limpet statusline skill toggle writes.
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .context("neither HOME nor USERPROFILE is set")?;
+    let claude_dir = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(&home).join(".claude"));
+    if claude_dir.join(".limpet-statusline-off").exists() {
+        return Ok(String::new());
+    }
+    let root = root_from(args)?;
+    let db = store::Store::default_db_path(&root);
+    if !db.is_file() {
+        return Ok(String::new());
+    }
+    // Strictly read-only: the statusline runs on every prompt and must
+    // never create, migrate, or lock the store.
+    let conn = rusqlite::Connection::open_with_flags(
+        &db,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    let (total, stale): (i64, i64) = conn.query_row(
+        "SELECT COUNT(*),
+                COALESCE(SUM(CASE WHEN status = 'stale' THEN 1 ELSE 0 END), 0)
+         FROM entries WHERE status IN ('active', 'stale')",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    if total == 0 {
+        return Ok(String::new());
+    }
+    let ledger = |k: &str| -> i64 {
+        conn.query_row(
+            "SELECT CAST(v AS INTEGER) FROM meta_kv WHERE k = ?1",
+            [k],
+            |r| r.get(0),
+        )
+        .unwrap_or(0)
+    };
+    let saved = ledger("ledger.baseline") - ledger("ledger.served");
+
+    // OSC 8 hyperlink straight to this project's graph when the UI is up;
+    // terminals without OSC 8 support just show the plain text. The 50ms
+    // connect cap keeps the statusline instant when nothing listens.
+    let key = limpet::util::repo_key(&root);
+    let ui_up = std::net::TcpStream::connect_timeout(
+        &std::net::SocketAddr::from(([127, 0, 0, 1], 9748)),
+        std::time::Duration::from_millis(50),
+    )
+    .is_ok();
+    let (link_open, link_close) = if ui_up {
+        (
+            format!("\x1b]8;;http://127.0.0.1:9748/?project={key}\x1b\\"),
+            "\x1b]8;;\x1b\\".to_string(),
+        )
+    } else {
+        (String::new(), String::new())
+    };
+
+    let mut seg = format!("| {link_open}\u{1f41a} \x1b[1;38;5;114m{total}\x1b[0m");
+    if stale > 0 {
+        seg.push_str(&format!(" \x1b[38;5;214m({stale} stale)\x1b[0m"));
+    }
+    seg.push_str(&link_close);
+    if saved >= 1000 {
+        seg.push_str(&format!(
+            " \x1b[38;5;238m\u{b7}\x1b[0m \x1b[1;38;5;84m\u{2191}{}k\x1b[0m \x1b[38;5;244mtokens saved\x1b[0m",
+            saved / 1000
+        ));
+    } else if saved < 0 {
+        // Negative savings are shown, never hidden (same honesty as the ledger).
+        seg.push_str(&format!(
+            " \x1b[38;5;238m\u{b7}\x1b[0m \x1b[1;38;5;203m\u{2193}{}\x1b[0m \x1b[38;5;244mtokens\x1b[0m",
+            -saved
+        ));
+    }
+    Ok(seg)
+}
 
 /// Claude Code user-scope MCP registration: ~/.claude.json `mcpServers`.
 /// Claude Code uses the same dotfile location on every platform, with
@@ -220,7 +326,10 @@ fn doctor_run(args: &[String], post_update: bool) -> Result<bool> {
             Ok(s) => {
                 let cfg: serde_json::Value =
                     serde_json::from_str(&s).unwrap_or(serde_json::Value::Null);
-                match cfg.pointer("/mcpServers/limpet/command").and_then(|v| v.as_str()) {
+                match cfg
+                    .pointer("/mcpServers/limpet/command")
+                    .and_then(|v| v.as_str())
+                {
                     Some(cmd) => {
                         let exists = std::path::Path::new(cmd).exists();
                         check(
@@ -334,11 +443,15 @@ fn doctor_run(args: &[String], post_update: bool) -> Result<bool> {
     }
 
     if ok && post_update {
-        println!("\nall checks passed. Restart Claude Code to load the new binary; \
-                  then `limpet doctor` will show the new version.");
+        println!(
+            "\nall checks passed. Restart Claude Code to load the new binary; \
+                  then `limpet doctor` will show the new version."
+        );
     } else if ok {
-        println!("\nall checks passed. If tools still fail in Claude Code, restart it: \
-                  running servers keep the old binary image until restart.");
+        println!(
+            "\nall checks passed. If tools still fail in Claude Code, restart it: \
+                  running servers keep the old binary image until restart."
+        );
     } else {
         println!("\nfix the FAIL lines above, restart Claude Code, then re-run `limpet doctor`.");
     }
@@ -382,7 +495,9 @@ fn install(dry_run: bool) -> Result<()> {
         println!(
             "would write to {}:\n  limpet: {} -> {}\nwould write skill to {}",
             cfg_path.display(),
-            before.map(|v| v.to_string()).unwrap_or_else(|| "(absent)".into()),
+            before
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "(absent)".into()),
             entry,
             skill.display()
         );
