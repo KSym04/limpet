@@ -1,0 +1,24 @@
+name: mcp-registry
+
+# Publish server.json to the official MCP registry. OIDC proves ownership of
+# the io.github.ksym04/* namespace without any interactive login; runs on
+# every published release and on demand.
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  publish:
+    # macOS runner for homebrew: the publisher's release-asset names vary by
+    # version, so brew is the stable install path.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install mcp-publisher
+      - run: mcp-publisher login github-oidc
+      - run: mcp-publisher publish
