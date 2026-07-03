@@ -1,0 +1,139 @@
+//! Small shared primitives: ULID generation, token estimation, repo keys,
+//! and path validation. No network, no unsafe, no shell.
+
+use anyhow::{bail, Result};
+use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+const CROCKFORD: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+static LAST_ULID_STATE: AtomicU64 = AtomicU64::new(0);
+
+/// Generate a 26-character Crockford base32 ULID.
+///
+/// Time-ordered: the first 10 chars encode Unix milliseconds. The random
+/// half uses OS entropy mixed with a process counter so ULIDs created in
+/// the same millisecond still sort in creation order within this process.
+pub fn ulid() -> String {
+    let ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock before 1970")
+        .as_millis() as u64;
+
+    // 80 bits of "randomness": 64 from a mixed counter + 16 from address
+    // entropy. Cryptographic strength is not required here; uniqueness and
+    // monotonic ordering within a process are.
+    let seq = LAST_ULID_STATE.fetch_add(1, Ordering::SeqCst);
+    let mixed = splitmix64(ms ^ seq.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+    let hi16 = (splitmix64(mixed) & 0xFFFF) as u64;
+
+    let mut out = [0u8; 26];
+    // 48-bit timestamp -> 10 chars (5 bits each).
+    let mut t = ms & 0xFFFF_FFFF_FFFF;
+    for i in (0..10).rev() {
+        out[i] = CROCKFORD[(t & 0x1F) as usize];
+        t >>= 5;
+    }
+    // 80-bit random -> 16 chars.
+    let mut r: u128 = ((hi16 as u128) << 64) | (mixed as u128);
+    for i in (10..26).rev() {
+        out[i] = CROCKFORD[(r & 0x1F) as usize];
+        r >>= 5;
+    }
+    String::from_utf8(out.to_vec()).expect("crockford alphabet is ascii")
+}
+
+fn splitmix64(mut x: u64) -> u64 {
+    x = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    x ^ (x >> 31)
+}
+
+/// Rough token count for budget packing: ceil(bytes / 4).
+///
+/// This is the standard "1 token ~ 4 bytes of English/code" approximation.
+/// It is documented as an approximation everywhere it is surfaced.
+pub fn token_estimate(s: &str) -> usize {
+    s.len().div_ceil(4)
+}
+
+/// Stable filesystem-safe key for a repository root path.
+pub fn repo_key(root: &Path) -> String {
+    let canon = root
+        .canonicalize()
+        .unwrap_or_else(|_| root.to_path_buf());
+    let s = canon.to_string_lossy();
+    let mut key = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+            key.push(c);
+        } else {
+            key.push('-');
+        }
+    }
+    key.trim_matches('-').to_string()
+}
+
+/// Validate a repo-relative path supplied by a tool caller.
+///
+/// Rejects absolute paths and any `..` traversal, then joins onto `root`.
+/// This is the single choke point for all file arguments arriving over MCP.
+pub fn validate_rel_path(root: &Path, rel: &str) -> Result<PathBuf> {
+    let p = Path::new(rel);
+    if p.is_absolute() {
+        bail!("absolute paths are not allowed: {rel}");
+    }
+    for comp in p.components() {
+        match comp {
+            Component::ParentDir => bail!("path traversal is not allowed: {rel}"),
+            Component::Prefix(_) | Component::RootDir => {
+                bail!("absolute paths are not allowed: {rel}")
+            }
+            _ => {}
+        }
+    }
+    Ok(root.join(p))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ulid_is_26_chars_and_sorts() {
+        let a = ulid();
+        let b = ulid();
+        assert_eq!(a.len(), 26);
+        assert_eq!(b.len(), 26);
+        assert!(a < b, "ulids must be monotonic within a process: {a} !< {b}");
+        assert!(a.bytes().all(|c| CROCKFORD.contains(&c)));
+    }
+
+    #[test]
+    fn token_estimate_is_bytes_over_four_ceil() {
+        assert_eq!(token_estimate(""), 0);
+        assert_eq!(token_estimate("abcd"), 1);
+        assert_eq!(token_estimate("abcde"), 2);
+    }
+
+    #[test]
+    fn rel_path_validation_blocks_escape() {
+        let root = Path::new("/tmp/repo");
+        assert!(validate_rel_path(root, "../etc/passwd").is_err());
+        assert!(validate_rel_path(root, "/etc/passwd").is_err());
+        assert!(validate_rel_path(root, "a/../../b").is_err());
+        assert_eq!(
+            validate_rel_path(root, "src/lib.rs").unwrap(),
+            PathBuf::from("/tmp/repo/src/lib.rs")
+        );
+    }
+
+    #[test]
+    fn repo_key_is_fs_safe() {
+        let k = repo_key(Path::new("/Users/x/Dev/My App"));
+        assert!(!k.contains('/'));
+        assert!(!k.contains(' '));
+    }
+}

@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>limpet — visual memory</title>
+<style>
+  :root {
+    --bg: #0f1419; --panel: #171e26; --line: #2a3542; --text: #d8e1ea;
+    --dim: #8296a8; --active: #3fb96f; --stale: #e0a437; --dead: #e05252;
+    --superseded: #6b7885; --anchor-node: #3d4b5c; --accent: #4aa3df;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body { background: var(--bg); color: var(--text); font: 14px/1.45 ui-monospace, "SF Mono", Menlo, monospace; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+  header { display: flex; align-items: baseline; gap: 16px; padding: 10px 16px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  header h1 { font-size: 16px; font-weight: 600; }
+  header h1 span { color: var(--accent); }
+  .stat { color: var(--dim); font-size: 12px; }
+  .stat b { font-size: 14px; }
+  .stat.active b { color: var(--active); } .stat.stale b { color: var(--stale); }
+  .stat.invalidated b { color: var(--dead); } .stat.superseded b { color: var(--superseded); }
+  main { flex: 1; display: flex; min-height: 0; }
+  #graph { flex: 1; display: block; cursor: grab; }
+  aside { width: 340px; border-left: 1px solid var(--line); background: var(--panel); padding: 14px; overflow-y: auto; display: none; }
+  aside.open { display: block; }
+  aside h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: var(--dim); margin-bottom: 8px; }
+  aside .body { white-space: pre-wrap; margin: 8px 0 12px; }
+  aside .row { font-size: 12px; color: var(--dim); margin: 3px 0; }
+  aside .row b { color: var(--text); font-weight: 500; }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 9px; font-size: 11px; margin-right: 6px; }
+  .badge.active { background: var(--active); color: #05230f; }
+  .badge.stale { background: var(--stale); color: #2b1d00; }
+  .badge.invalidated { background: var(--dead); color: #2b0505; }
+  .badge.superseded { background: var(--superseded); color: #10161c; }
+  .badge.kind { background: var(--line); color: var(--text); }
+  .reverify { margin-top: 10px; padding: 8px; background: #241d0d; border: 1px solid var(--stale); border-radius: 4px; font-size: 12px; word-break: break-all; }
+  footer { padding: 6px 16px; border-top: 1px solid var(--line); color: var(--dim); font-size: 11px; display: flex; gap: 18px; }
+  .filters { margin-left: auto; display: flex; gap: 8px; }
+  .filters button { background: none; border: 1px solid var(--line); color: var(--dim); border-radius: 4px; padding: 2px 10px; font: inherit; font-size: 11px; cursor: pointer; }
+  .filters button.on { color: var(--text); border-color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>limpet<span>://</span><span id="project">memory</span></h1>
+  <span class="stat active"><b id="n-active">0</b> active</span>
+  <span class="stat stale"><b id="n-stale">0</b> stale</span>
+  <span class="stat invalidated"><b id="n-invalidated">0</b> invalidated</span>
+  <span class="stat superseded"><b id="n-superseded">0</b> superseded</span>
+  <span class="stat">indexed <b id="indexed-at">never</b></span>
+  <div class="filters" id="filters">
+    <button data-f="all" class="on">all</button>
+    <button data-f="stale">needs attention</button>
+    <button data-f="fact">facts</button>
+    <button data-f="decision">decisions</button>
+  </div>
+</header>
+<main>
+  <canvas id="graph"></canvas>
+  <aside id="panel"></aside>
+</main>
+<footer>
+  <span>memory: circle, sized by confidence</span>
+  <span>code: square</span>
+  <span>red dashes: contradicts</span>
+  <span>blue: supersedes</span>
+  <span>drag to pan, wheel to zoom, click a node</span>
+  <span id="err" style="color: var(--dead)"></span>
+</footer>
+<script>
+"use strict";
+const canvas = document.getElementById("graph");
+const ctx = canvas.getContext("2d");
+const panel = document.getElementById("panel");
+const COLORS = { active: "#3fb96f", stale: "#e0a437", invalidated: "#e05252", superseded: "#6b7885" };
+
+let nodes = [], edges = [], byId = new Map();
+let view = { x: 0, y: 0, scale: 1 };
+let selected = null, filter = "all";
+
+function resize() {
+  const rect = canvas.parentElement.getBoundingClientRect();
+  canvas.width = rect.width - (panel.classList.contains("open") ? 340 : 0);
+  canvas.height = rect.height;
+}
+window.addEventListener("resize", resize);
+
+async function load() {
+  try {
+    const res = await fetch("/api/graph");
+    const data = await res.json();
+    document.getElementById("project").textContent = data.project || "memory";
+    document.getElementById("indexed-at").textContent = data.indexed_at || "never";
+    for (const key of ["active", "stale", "invalidated", "superseded"]) {
+      document.getElementById("n-" + key).textContent = data.stats[key];
+    }
+    merge(data.nodes, data.edges);
+    document.getElementById("err").textContent = "";
+  } catch (e) {
+    document.getElementById("err").textContent = "connection lost, retrying";
+  }
+}
+
+function merge(newNodes, newEdges) {
+  const prev = byId;
+  byId = new Map();
+  nodes = newNodes.map((n, i) => {
+    const old = prev.get(n.id);
+    const angle = (i / Math.max(1, newNodes.length)) * Math.PI * 2;
+    const node = Object.assign({
+      x: old ? old.x : Math.cos(angle) * 260 + (Math.random() - 0.5) * 40,
+      y: old ? old.y : Math.sin(angle) * 260 + (Math.random() - 0.5) * 40,
+      vx: 0, vy: 0,
+    }, n);
+    byId.set(n.id, node);
+    return node;
+  });
+  edges = newEdges.filter(e => byId.has(e.from) && byId.has(e.to));
+}
+
+function visible(n) {
+  if (filter === "all") return true;
+  if (filter === "stale") {
+    if (n.type !== "memory") return edges.some(e => e.rel === "anchor" && e.to === n.id && visible(byId.get(e.from)));
+    return n.status === "stale" || n.status === "invalidated";
+  }
+  if (n.type !== "memory") return edges.some(e => e.rel === "anchor" && e.to === n.id && visible(byId.get(e.from)));
+  return n.kind === filter;
+}
+
+function tick() {
+  const vis = nodes.filter(visible);
+  for (const a of vis) {
+    for (const b of vis) {
+      if (a === b) continue;
+      const dx = a.x - b.x, dy = a.y - b.y;
+      const d2 = Math.max(80, dx * dx + dy * dy);
+      const f = 1900 / d2;
+      a.vx += (dx / Math.sqrt(d2)) * f;
+      a.vy += (dy / Math.sqrt(d2)) * f;
+    }
+    a.vx -= a.x * 0.003; a.vy -= a.y * 0.003;
+  }
+  for (const e of edges) {
+    const a = byId.get(e.from), b = byId.get(e.to);
+    if (!visible(a) || !visible(b)) continue;
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const d = Math.max(1, Math.hypot(dx, dy));
+    const want = e.rel === "anchor" ? 90 : 140;
+    const f = (d - want) * 0.004;
+    a.vx += (dx / d) * f; a.vy += (dy / d) * f;
+    b.vx -= (dx / d) * f; b.vy -= (dy / d) * f;
+  }
+  for (const n of vis) {
+    n.x += n.vx; n.y += n.vy;
+    n.vx *= 0.82; n.vy *= 0.82;
+  }
+}
+
+function radius(n) {
+  if (n.type !== "memory") return 6;
+  return 7 + (n.conf || 0.5) * 8;
+}
+
+function draw() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.save();
+  ctx.translate(canvas.width / 2 + view.x, canvas.height / 2 + view.y);
+  ctx.scale(view.scale, view.scale);
+
+  for (const e of edges) {
+    const a = byId.get(e.from), b = byId.get(e.to);
+    if (!visible(a) || !visible(b)) continue;
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
+    if (e.rel === "contradicts") { ctx.strokeStyle = "#e05252"; ctx.setLineDash([5, 4]); ctx.lineWidth = 1.4; }
+    else if (e.rel === "supersedes") { ctx.strokeStyle = "#4aa3df"; ctx.setLineDash([]); ctx.lineWidth = 1.4; }
+    else if (e.rel === "supports") { ctx.strokeStyle = "#3fb96f"; ctx.setLineDash([]); ctx.lineWidth = 1; }
+    else { ctx.strokeStyle = "#2a3542"; ctx.setLineDash([]); ctx.lineWidth = 1; }
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  for (const n of nodes) {
+    if (!visible(n)) continue;
+    const r = radius(n);
+    ctx.beginPath();
+    if (n.type === "memory") {
+      ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
+      ctx.fillStyle = COLORS[n.status] || "#8296a8";
+      ctx.fill();
+      if (n.source === "verified") {
+        ctx.lineWidth = 2; ctx.strokeStyle = "#d8e1ea"; ctx.stroke();
+      }
+    } else {
+      ctx.fillStyle = "#3d4b5c";
+      ctx.fillRect(n.x - r, n.y - r, r * 2, r * 2);
+    }
+    if (n === selected) {
+      ctx.lineWidth = 2; ctx.strokeStyle = "#4aa3df";
+      ctx.strokeRect(n.x - r - 3, n.y - r - 3, (r + 3) * 2, (r + 3) * 2);
+    }
+    if (n.type !== "memory" || view.scale > 0.8) {
+      ctx.fillStyle = "#8296a8";
+      ctx.font = "10px ui-monospace, monospace";
+      const label = n.type === "memory" ? n.kind : String(n.id).split(".").pop();
+      ctx.fillText(label, n.x + r + 4, n.y + 3);
+    }
+  }
+  ctx.restore();
+}
+
+function showPanel(n) {
+  selected = n;
+  if (!n || n.type !== "memory") {
+    if (n) {
+      panel.innerHTML = `<h2>${n.type}</h2><div class="body">${esc(n.id)}</div>
+        <div class="row">in <b>${esc(n.file || "")}</b></div>`;
+      panel.classList.add("open");
+    } else {
+      panel.classList.remove("open");
+    }
+    resize(); return;
+  }
+  const flags = [];
+  if (n.stale_reason) flags.push(`<div class="row">stale reason: <b>${esc(n.stale_reason)}</b></div>`);
+  const reverify = n.reverify && n.status === "stale"
+    ? `<div class="reverify">reverify: ${esc(n.reverify)}</div>` : "";
+  panel.innerHTML = `
+    <h2>memory</h2>
+    <div>
+      <span class="badge ${n.status}">${n.status}</span>
+      <span class="badge kind">${esc(n.kind)}</span>
+      <span class="badge kind">${esc(n.source)}</span>
+    </div>
+    <div class="body">${esc(n.body)}</div>
+    <div class="row">confidence <b>${n.conf}</b></div>
+    <div class="row">created <b>${esc((n.on || "").slice(0, 10))}</b></div>
+    ${flags.join("")}${reverify}
+    <div class="row" style="margin-top:8px">id <b>${esc(n.id)}</b></div>`;
+  panel.classList.add("open");
+  resize();
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+let dragging = false, moved = false, last = null;
+canvas.addEventListener("mousedown", e => { dragging = true; moved = false; last = [e.clientX, e.clientY]; });
+window.addEventListener("mouseup", e => {
+  if (dragging && !moved) {
+    const rect = canvas.getBoundingClientRect();
+    const gx = (e.clientX - rect.left - canvas.width / 2 - view.x) / view.scale;
+    const gy = (e.clientY - rect.top - canvas.height / 2 - view.y) / view.scale;
+    let hit = null;
+    for (const n of nodes) {
+      if (!visible(n)) continue;
+      if (Math.hypot(n.x - gx, n.y - gy) < radius(n) + 6) { hit = n; break; }
+    }
+    showPanel(hit);
+  }
+  dragging = false;
+});
+window.addEventListener("mousemove", e => {
+  if (!dragging) return;
+  moved = true;
+  view.x += e.clientX - last[0]; view.y += e.clientY - last[1];
+  last = [e.clientX, e.clientY];
+});
+canvas.addEventListener("wheel", e => {
+  e.preventDefault();
+  const factor = e.deltaY < 0 ? 1.1 : 0.9;
+  view.scale = Math.min(3, Math.max(0.25, view.scale * factor));
+}, { passive: false });
+
+document.getElementById("filters").addEventListener("click", e => {
+  const btn = e.target.closest("button");
+  if (!btn) return;
+  filter = btn.dataset.f;
+  for (const b of document.querySelectorAll(".filters button")) b.classList.toggle("on", b === btn);
+});
+
+resize();
+load();
+setInterval(load, 5000);
+(function loop() { tick(); draw(); requestAnimationFrame(loop); })();
+</script>
+</body>
+</html>

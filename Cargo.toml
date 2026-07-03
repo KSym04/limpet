@@ -1,0 +1,29 @@
+[package]
+name = "limpet"
+version = "0.1.0"
+edition = "2021"
+description = "small shell. long memory. Memory-first code intelligence MCP server: AST-anchored memories, auto-invalidation on code change, honesty metadata on every response. 100% local."
+license = "MIT"
+repository = "https://github.com/KSym04/limpet"
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+sha2 = "0.10"
+ignore = "0.4"
+tree-sitter = "0.24"
+tree-sitter-php = "0.23"
+tree-sitter-javascript = "0.23"
+tree-sitter-typescript = "0.23"
+tree-sitter-python = "0.23"
+tree-sitter-rust = "0.23"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
