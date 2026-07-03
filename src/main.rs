@@ -97,6 +97,13 @@ fn run() -> Result<()> {
         }
         "install" => install(args.iter().any(|a| a == "--dry-run")),
         "uninstall" => uninstall(),
+        "stats" => {
+            let root = root_from(&args)?;
+            let store = store::Store::open(&store::Store::default_db_path(&root))?;
+            store.version_guard()?;
+            println!("{}", serde_json::to_string_pretty(&tools::ledger_payload(&store))?);
+            Ok(())
+        }
         "update" => update::run(args.iter().any(|a| a == "--check")),
         "help" | "--help" | "-h" => {
             println!("{}", HELP);
@@ -117,6 +124,7 @@ USAGE:
   limpet ui      [--root <path>] [--port <n>]   visual memory at 127.0.0.1:9748
   limpet index   [--root <path>]   full index of the repository
   limpet status  [--root <path>]   index and memory counts
+  limpet stats   [--root <path>]   token-savings ledger (session + lifetime)
   limpet export  [--root <path>]   write memory to .limpet/memory.jsonl
   limpet import  [--root <path>]   read memory from .limpet/memory.jsonl
   limpet install [--dry-run]       register with Claude Code (user scope)

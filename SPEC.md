@@ -1,3 +1,132 @@
+# SPEC — session savings ledger (v0.7.0)
+
+## Positioning
+
+limpet already saves tokens; it saves them **invisibly**. The user never sees
+the file reads a recall replaced. This ledger turns the benchmark's 4.1x into
+the user's own live receipt, using the SAME honest methodology the README
+publishes (ceil(bytes/4), minimal file set, assumptions labeled). It measures;
+it never inflates. A recall that costs MORE than the source it replaced shows
+as a negative-saving, not a hidden zero.
+
+## Core Architecture
+
+```
+per recall (tool_recall, after the pack is built):
+  served   = sum over returned items of token_estimate(body) + ITEM_OVERHEAD
+             (identical to what the client actually pays — same units as budget)
+  baseline = SEARCH_OVERHEAD                                  # flat search round-trip
+           + sum over DISTINCT files anchored by returned items of
+               ceil(files.size / 4)                           # minimal-file-set read
+  saved    = baseline - served                                # may be negative; not floored
+  reads_avoided = count(distinct anchored files of ACTIVE returned items)
+
+  accumulate into meta_kv (lifetime, string-encoded ints):
+    ledger.recalls, ledger.distinct_queries (by fts_query hash seen this process),
+    ledger.served, ledger.baseline, ledger.reads_avoided, ledger.since (set once)
+
+session view = lifetime snapshot at serve boot (meta_kv ledger_session_*)
+               subtracted from current lifetime. CLI one-shots show lifetime only.
+
+surfacing (humans only, never the recall wire):
+  admin {op:"ledger"}  -> full session + lifetime + method string
+  admin {op:"ledger_reset"} -> zero lifetime, restamp since
+  limpet stats         -> CLI one-shot of the same payload
+  ui /api/ledger + header stat beside the graph
+```
+
+Amendment (found in dogfooding): the spec originally put a 2-int
+meta.ledger block on every recall. The bench regression gate caught it,
+4.1x -> 3.9x, under the 4x floor: even a tiny receipt on the hot path makes
+the product worse at the thing the receipt measures. Removed. The agent
+never pays for the ledger; humans read it where reading is free.
+
+Amendment 2: the session base lives in meta_kv, so "session" = since the
+last server boot on this store (last-boot-wins), not per-process. Simpler,
+and correct for the one-server-per-project norm.
+
+## State / Data Model
+
+No schema change, no SCHEMA_VERSION bump: all counters live in `meta_kv`
+(k TEXT PK, v TEXT), numeric values encoded as decimal strings, missing key
+reads as 0. `since` is an ISO stamp set on first recall. The serve loop stamps
+`ledger_session_*` = current lifetime once at boot; the difference is "this
+session". No new table, no migration, no dispatch signature change beyond
+`tool_recall` doing its own meta_kv accumulation.
+
+Constants (one home, next to token_estimate):
+- ITEM_OVERHEAD_TOKENS = 30 (already exists in recall.rs; reuse, do not fork)
+- SEARCH_OVERHEAD_TOKENS = 300 (matches bench/token_savings.py exactly)
+
+## INVARIANTS
+
+- I-L1: `served` is computed the same way the budget packer counts, so the
+  ledger's "served" can never disagree with what the client was charged.
+- I-L2: `saved` is never floored or clamped. A verbose memory that costs more
+  than its source file shows a real negative; hiding it would be the same
+  dishonesty the anchors refuse (nothing stale is hidden; no anti-saving is
+  hidden either).
+- I-L3: token_estimate is the ONLY sizing function, applied identically to
+  served and baseline (byte-for-byte parity with the published bench).
+- I-L4: anchorless memories (pure decisions/episodes not in any file)
+  contribute 0 baseline bytes. This UNDERSTATES savings on exactly the
+  questions where limpet helps most, the same conservative bias the README
+  already documents. Never estimate a file that does not exist.
+- I-L5: the ledger is observational only. It never changes recall ranking,
+  packing, or any status. A bug in the ledger can misreport a number; it can
+  never corrupt memory.
+- I-L6: every ledger payload carries a `method` string stating its
+  assumptions, so the number is checkable rather than believed.
+
+## ATTACK SURFACE
+
+- Double counting: re-issuing the identical query re-charges `saved`. Real
+  (the agent really would have paid each recall) but re-reads are not new
+  knowledge. Mitigation: track `distinct_queries` by fts_query hash and report
+  BOTH gross and distinct; hide neither.
+- Gaming the ratio by seeding huge files: baseline scales with real file
+  sizes, so a bogus giant file inflates "saved". Accept it: the bench has the
+  same property, and the file has to actually exist and be indexed. The number
+  is a floor-honest estimate, marketed as such, not a guarantee.
+- Ledger write on the hot recall path: two meta_kv upserts per recall, both
+  tiny, inside the existing transaction scope. Negligible next to FTS + pack.
+- Concurrency: two serve processes on one store both accumulate into lifetime.
+  Additive and correct for lifetime; session views are per-process snapshots so
+  they stay independent. No lost-update guard needed (upserts are last-writer,
+  and the counters are monotonic increments computed from read-modify-write
+  under the store's single connection).
+- Version guard interaction: ledger writes are writes, so a stale-image server
+  is already refused before it can mis-accumulate (I-V1 covers this for free).
+
+## TECH STACK DEPS
+
+- None new. Reuses token_estimate, meta_kv, the envelope, the UI route table.
+
+## Task Implementation Checklist
+
+- [x] recall.rs: SEARCH_OVERHEAD_TOKENS + pure `recall_cost` with unit tests
+      (served parity, distinct-file dedup, stale-avoids-nothing, negative
+      survives, anchorless-zero, empty-pack-zero)
+- [x] store.rs: Ledger struct, ledger_add/read/reset/since + session base
+      helpers over meta_kv; unit test incl. distinct-query dedup and
+      negative saving
+- [x] tools.rs tool_recall: compute + accumulate (observational; failure
+      never fails the recall). Wire block REMOVED per amendment: bench gate
+      caught the cost
+- [x] tools.rs tool_admin: `ledger` / `ledger_reset` ops; ledger_payload
+      with method string; admin schema enum updated
+- [x] mcp.rs serve boot: session base stamp
+- [x] main.rs: `limpet stats` (+ HELP), version-guarded
+- [x] ui.rs /api/ledger + header stat with methodology tooltip
+- [x] README: "your own receipt" note with the conservative-floor caveats
+- [x] version 0.7.0; 65 tests green with --locked; bench gate holds at 4.1x
+      AFTER the amendment (and correctly failed at 3.9x before it); dogfood:
+      real recall accumulated saved=456, admin ledger / limpet stats / API
+      all agree
+- [ ] PR -> CI -> merge -> tag v0.7.0 -> pipeline
+
+---
+
 # SPEC — store version guard (v0.6.1, issue #9)
 
 `limpet update` swaps the binary on disk; a running `serve` keeps the old

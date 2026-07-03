@@ -53,6 +53,7 @@
   <span class="stat invalidated"><b id="n-invalidated">0</b> invalidated</span>
   <span class="stat superseded"><b id="n-superseded">0</b> superseded</span>
   <span class="stat">indexed <b id="indexed-at">never</b></span>
+  <span class="stat" id="ledger-stat" title="">saved <b id="n-saved">0</b> tokens</span>
   <div class="filters" id="filters">
     <button data-f="all" class="on">all</button>
     <button data-f="stale">needs attention</button>
@@ -109,6 +110,20 @@ async function loadProjects() {
   } catch (e) { /* projects list is cosmetic; graph errors are surfaced */ }
 }
 
+async function loadLedger() {
+  try {
+    const res = await fetch("/api/ledger?project=" + encodeURIComponent(currentProject));
+    const l = await res.json();
+    if (!l.lifetime) return;
+    document.getElementById("n-saved").textContent = l.lifetime.saved_tokens.toLocaleString();
+    document.getElementById("ledger-stat").title =
+      "recalls: " + l.lifetime.recalls +
+      " (distinct queries: " + l.lifetime.distinct_queries + ")\n" +
+      "reads avoided: " + l.lifetime.reads_avoided + "\n" +
+      "since: " + (l.lifetime.since || "n/a") + "\n\n" + l.method;
+  } catch (e) { /* cosmetic here; admin op=ledger is the source of truth */ }
+}
+
 async function load() {
   try {
     const res = await fetch("/api/graph?project=" + encodeURIComponent(currentProject));
@@ -118,6 +133,7 @@ async function load() {
       document.getElementById("n-" + key).textContent = data.stats[key];
     }
     merge(data.nodes, data.edges);
+    loadLedger();
     document.getElementById("err").textContent = "";
   } catch (e) {
     document.getElementById("err").textContent = "connection lost, retrying";

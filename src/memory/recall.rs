@@ -24,6 +24,10 @@ pub struct RecallItem {
     pub anchors: Vec<String>,
     /// "stale:<reason>", "contradicted-by:<id>", "reverify:<command>"
     pub flags: Vec<String>,
+    /// Repo-relative files this item anchors to; feeds the savings ledger's
+    /// baseline. Not serialized: the wire shape is built in tools.rs.
+    #[serde(skip)]
+    pub anchor_files: Vec<String>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -236,6 +240,7 @@ pub fn recall(
                 .iter()
                 .map(|(f, s)| s.clone().unwrap_or_else(|| f.clone()))
                 .collect(),
+            anchor_files: anchor_rows.iter().map(|(f, _)| f.clone()).collect(),
             flags,
         });
     }
@@ -269,4 +274,112 @@ pub fn recall(
     }
     let returned = packed.len();
     Ok(RecallResult { items: packed, matched, returned })
+}
+
+/// Flat cost of the search round trips the agent skips by recalling.
+/// MUST match bench/token_savings.py, which charges the same constant on
+/// the "without limpet" side (I-L3: identical methodology, both directions).
+pub const SEARCH_OVERHEAD_TOKENS: usize = 300;
+
+#[derive(Debug, Default, PartialEq)]
+pub struct RecallCost {
+    /// What the pack actually costs the client, counted exactly like the
+    /// budget packer above (I-L1): body estimate + per-item overhead.
+    pub served: i64,
+    /// Search overhead + ceil(size/4) over the DISTINCT files the returned
+    /// items anchor to: the minimal file set a memory-less agent reads.
+    pub baseline: i64,
+    /// Distinct anchored files of ACTIVE items: reads recall made unnecessary.
+    /// Flagged items do not count; the agent is told to verify those.
+    pub reads_avoided: i64,
+}
+
+/// Price one recall against its file-reading counterfactual. Pure: file
+/// sizes come from the caller. Anchorless memories contribute zero baseline
+/// (I-L4), deliberately understating savings on not-in-any-file questions.
+pub fn recall_cost(items: &[RecallItem], file_size: impl Fn(&str) -> Option<i64>) -> RecallCost {
+    let mut cost = RecallCost::default();
+    if items.is_empty() {
+        return cost;
+    }
+    let mut files: HashSet<&str> = HashSet::new();
+    let mut active_files: HashSet<&str> = HashSet::new();
+    for item in items {
+        cost.served += (token_estimate(&item.body) + ITEM_OVERHEAD_TOKENS) as i64;
+        for f in &item.anchor_files {
+            files.insert(f);
+            if item.status == "active" {
+                active_files.insert(f);
+            }
+        }
+    }
+    cost.baseline = SEARCH_OVERHEAD_TOKENS as i64
+        + files
+            .iter()
+            .filter_map(|f| file_size(f))
+            .map(|sz| (sz.max(0) + 3) / 4)
+            .sum::<i64>();
+    cost.reads_avoided = active_files.len() as i64;
+    cost
+}
+
+#[cfg(test)]
+mod cost_tests {
+    use super::*;
+
+    fn item(body: &str, status: &str, files: &[&str]) -> RecallItem {
+        RecallItem {
+            id: "01TEST".into(),
+            kind: "fact".into(),
+            body: body.into(),
+            source: "explicit".into(),
+            status: status.into(),
+            confidence: 0.8,
+            score: 1.0,
+            created_at: "2026-07-03T00:00:00Z".into(),
+            anchors: files.iter().map(|f| f.to_string()).collect(),
+            anchor_files: files.iter().map(|f| f.to_string()).collect(),
+            flags: vec![],
+        }
+    }
+
+    #[test]
+    fn served_matches_packer_counting_exactly() {
+        let items = vec![item("abcdefgh", "active", &["a.py"])]; // 8 bytes -> 2 tokens
+        let c = recall_cost(&items, |_| Some(4000));
+        assert_eq!(c.served, (2 + ITEM_OVERHEAD_TOKENS) as i64);
+        assert_eq!(c.baseline, (SEARCH_OVERHEAD_TOKENS + 1000) as i64);
+        assert_eq!(c.reads_avoided, 1);
+    }
+
+    #[test]
+    fn distinct_files_counted_once_and_stale_items_avoid_nothing() {
+        let items = vec![
+            item("x", "active", &["a.py", "b.py"]),
+            item("y", "stale", &["a.py", "c.py"]),
+        ];
+        let c = recall_cost(&items, |_| Some(400)); // 100 tokens each
+        // baseline: 300 + 3 distinct files * 100
+        assert_eq!(c.baseline, 600);
+        // reads_avoided: only the ACTIVE item's files
+        assert_eq!(c.reads_avoided, 2);
+    }
+
+    #[test]
+    fn anchorless_contributes_zero_baseline_and_negatives_are_real() {
+        // A verbose anchorless memory: baseline is just the search overhead,
+        // served exceeds it, saved goes negative and stays negative (I-L2).
+        let long_body = "z".repeat(4000); // 1000 tokens
+        let items = vec![item(&long_body, "active", &[])];
+        let c = recall_cost(&items, |_| None);
+        assert_eq!(c.baseline, SEARCH_OVERHEAD_TOKENS as i64);
+        assert!(c.baseline - c.served < 0, "negative saving must survive");
+        assert_eq!(c.reads_avoided, 0);
+    }
+
+    #[test]
+    fn empty_pack_costs_and_saves_nothing() {
+        let c = recall_cost(&[], |_| Some(1_000_000));
+        assert_eq!(c, RecallCost::default());
+    }
 }

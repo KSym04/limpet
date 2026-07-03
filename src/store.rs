@@ -376,6 +376,127 @@ impl Store {
     }
 }
 
+/// Lifetime savings counters (spec v0.7.0). Purely observational (I-L5):
+/// stored as decimal strings in meta_kv, missing keys read as zero, and a
+/// bug here can misreport a number but never touch memory content.
+#[derive(Debug, Default, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct Ledger {
+    pub recalls: i64,
+    pub distinct_queries: i64,
+    pub served: i64,
+    pub baseline: i64,
+    pub reads_avoided: i64,
+}
+
+impl Ledger {
+    pub fn saved(&self) -> i64 {
+        // Never floored (I-L2): a pack that cost more than the files it
+        // replaced reports a real negative.
+        self.baseline - self.served
+    }
+
+    pub fn diff(&self, base: &Ledger) -> Ledger {
+        Ledger {
+            recalls: self.recalls - base.recalls,
+            distinct_queries: self.distinct_queries - base.distinct_queries,
+            served: self.served - base.served,
+            baseline: self.baseline - base.baseline,
+            reads_avoided: self.reads_avoided - base.reads_avoided,
+        }
+    }
+}
+
+const LEDGER_KEYS: [&str; 5] = [
+    "ledger.recalls",
+    "ledger.distinct_queries",
+    "ledger.served",
+    "ledger.baseline",
+    "ledger.reads_avoided",
+];
+
+impl Store {
+    fn kv_i64(&self, k: &str) -> i64 {
+        self.kv_get(k)
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0)
+    }
+
+    pub fn ledger_read(&self) -> Ledger {
+        Ledger {
+            recalls: self.kv_i64(LEDGER_KEYS[0]),
+            distinct_queries: self.kv_i64(LEDGER_KEYS[1]),
+            served: self.kv_i64(LEDGER_KEYS[2]),
+            baseline: self.kv_i64(LEDGER_KEYS[3]),
+            reads_avoided: self.kv_i64(LEDGER_KEYS[4]),
+        }
+    }
+
+    /// Accumulate one recall's figures. `query_hash` marks the query as
+    /// seen (lifetime): first sighting bumps distinct_queries.
+    pub fn ledger_add(
+        &self,
+        served: i64,
+        baseline: i64,
+        reads_avoided: i64,
+        query_hash: &str,
+    ) -> Result<()> {
+        let cur = self.ledger_read();
+        let seen_key = format!("ledger.q.{query_hash}");
+        let newly_seen = self
+            .conn
+            .execute(
+                "INSERT OR IGNORE INTO meta_kv(k, v) VALUES(?1, '1')",
+                [&seen_key],
+            )?
+            > 0;
+        self.kv_set(LEDGER_KEYS[0], &(cur.recalls + 1).to_string())?;
+        if newly_seen {
+            self.kv_set(LEDGER_KEYS[1], &(cur.distinct_queries + 1).to_string())?;
+        }
+        self.kv_set(LEDGER_KEYS[2], &(cur.served + served).to_string())?;
+        self.kv_set(LEDGER_KEYS[3], &(cur.baseline + baseline).to_string())?;
+        self.kv_set(LEDGER_KEYS[4], &(cur.reads_avoided + reads_avoided).to_string())?;
+        if self.kv_get("ledger.since")?.is_none() {
+            self.kv_set("ledger.since", &crate::index::now_iso())?;
+        }
+        Ok(())
+    }
+
+    pub fn ledger_since(&self) -> Option<String> {
+        self.kv_get("ledger.since").ok().flatten()
+    }
+
+    pub fn ledger_reset(&self) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM meta_kv WHERE k LIKE 'ledger.%'", [])?;
+        Ok(())
+    }
+
+    /// Stamp the current lifetime figures as this process's session base.
+    /// Session view = lifetime - base; independent per process.
+    pub fn ledger_session_start(&self) -> Result<()> {
+        let cur = self.ledger_read();
+        self.kv_set("ledger_session.recalls", &cur.recalls.to_string())?;
+        self.kv_set("ledger_session.distinct_queries", &cur.distinct_queries.to_string())?;
+        self.kv_set("ledger_session.served", &cur.served.to_string())?;
+        self.kv_set("ledger_session.baseline", &cur.baseline.to_string())?;
+        self.kv_set("ledger_session.reads_avoided", &cur.reads_avoided.to_string())?;
+        Ok(())
+    }
+
+    pub fn ledger_session_base(&self) -> Ledger {
+        Ledger {
+            recalls: self.kv_i64("ledger_session.recalls"),
+            distinct_queries: self.kv_i64("ledger_session.distinct_queries"),
+            served: self.kv_i64("ledger_session.served"),
+            baseline: self.kv_i64("ledger_session.baseline"),
+            reads_avoided: self.kv_i64("ledger_session.reads_avoided"),
+        }
+    }
+}
+
 /// Dotted version to a comparable tuple; missing or non-numeric components
 /// sort low, so a malformed stamp can never outrank a real version.
 fn ver_tuple(v: &str) -> (u64, u64, u64) {
@@ -419,6 +540,38 @@ mod tests {
         ] {
             assert!(names.iter().any(|n| n == t), "missing {t}: {names:?}");
         }
+    }
+
+    #[test]
+    fn ledger_accumulates_diffs_and_resets() {
+        let s = Store::open_in_memory().unwrap();
+        assert_eq!(s.ledger_read(), Ledger::default());
+
+        s.ledger_add(100, 700, 2, "q1").unwrap();
+        s.ledger_add(50, 350, 1, "q1").unwrap(); // repeat query
+        s.ledger_add(80, 80, 0, "q2").unwrap(); // zero-saving recall
+        let l = s.ledger_read();
+        assert_eq!(l.recalls, 3);
+        assert_eq!(l.distinct_queries, 2, "repeat query counts once");
+        assert_eq!(l.served, 230);
+        assert_eq!(l.baseline, 1130);
+        assert_eq!(l.saved(), 900);
+        assert_eq!(l.reads_avoided, 3);
+        assert!(s.ledger_since().is_some());
+
+        // Session view = lifetime minus the boot stamp.
+        s.ledger_session_start().unwrap();
+        s.ledger_add(10, 500, 1, "q3").unwrap();
+        let session = s.ledger_read().diff(&s.ledger_session_base());
+        assert_eq!(session.recalls, 1);
+        assert_eq!(session.saved(), 490);
+
+        // Negative savings survive (I-L2).
+        s.ledger_reset().unwrap();
+        assert_eq!(s.ledger_read(), Ledger::default());
+        assert!(s.ledger_since().is_none(), "reset restamps since lazily");
+        s.ledger_add(1000, 300, 0, "q4").unwrap();
+        assert_eq!(s.ledger_read().saved(), -700);
     }
 
     #[test]

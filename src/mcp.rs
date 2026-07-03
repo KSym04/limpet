@@ -16,6 +16,9 @@ pub const PROTOCOL_VERSION: &str = "2025-06-18";
 pub fn serve(root: PathBuf) -> Result<()> {
     let db_path = Store::default_db_path(&root);
     let mut store = Store::open(&db_path)?;
+    // Session baseline for the savings ledger: "this session" = lifetime
+    // minus this stamp. Last server boot owns the session view.
+    let _ = store.ledger_session_start();
 
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
