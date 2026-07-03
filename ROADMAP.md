@@ -71,7 +71,7 @@ followed to the wrong twin.
 
 | Bet | Gate before it ships |
 |---|---|
-| Authority-weighted recall: knowledge earns rank structurally (referenced-by fan-in, refactors survived, verification history), never by self-declaration | Must beat the current confidence+freshness+proximity ranking on the recall_eval precision suite |
+| Authority-weighted recall: knowledge earns rank structurally (fan-in, refactors survived, verification), with `cost_to_learn` as one bounded human input (<=35% of authority); never overrides staleness. Full design in SPEC.md. | recall_eval precision holds or improves AND the token bench gate holds |
 | Semantic recall (embedding rerank behind a feature flag) | Must beat FTS + proximity on the recall_eval precision suite; "only if it earns its size" |
 | Episode mining from session transcripts (SessionEnd hook) | Mined entries are already capped at 0.5 confidence; the miner must show a >50% keep-rate under human review or it is noise |
 | Reverse debugging: given a failing symbol, return every episode and decision attached to it and its callers | The syntactic call graph exists; this is the query that makes it pay for itself |
