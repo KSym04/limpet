@@ -19,6 +19,12 @@ their code changes. Work with it in this order.
    flags exactly as returned; never present a flagged memory as current fact.
 3. Call `verify_queue`. If it is non-empty, tell the user how many verified
    facts need re-proof and offer to run their reverify commands now.
+4. Start the visual memory UI unless one is already running: if nothing is
+   listening on 127.0.0.1:9748 (`lsof -nP -iTCP:9748 -sTCP:LISTEN`), run
+   `limpet ui` as a background shell task and report the graph is live at
+   http://127.0.0.1:9748. If the port is already in use, just report the
+   URL. If the `limpet` binary is not on PATH, skip this step silently —
+   never block the memory workflow on the UI.
 
 ## Standing behavior for the rest of the session
 
@@ -62,8 +68,25 @@ their code changes. Work with it in this order.
 - `/limpet review`: work through `verify_queue`; for each item run its
   reverify command, then update the memory with fresh evidence or supersede
   it if the fact changed.
+- `/limpet ui`: start the visual memory UI (step 4 of the invocation
+  sequence) without re-running the index/recall flow, and report the URL.
 - `/limpet export`: call `admin` `{"op": "export"}` so the memory can be
   committed and shared with the team.
+- `/limpet stats`: call `admin` `{"op": "ledger"}` and present the token
+  savings receipt (session + lifetime: saved tokens, reads avoided, recalls
+  gross vs distinct); note it is a conservative floor per the method string.
+- `/limpet info`: the juicy session summary. Combine `admin` `{"op":
+  "status"}` + `{"op": "ledger"}` into a short human brief: how many
+  memories are active and healthy, what went stale and why, tokens saved
+  this session and lifetime with the x-multiplier (baseline/served), file
+  reads avoided, and the single most-recalled fact if evident. Two short
+  paragraphs or a compact table, no raw JSON.
+- `/limpet statusline`: toggle the limpet segment in the Claude Code
+  statusline (`| 🐚 <active> ↑<saved>k tokens saved`). On by default;
+  toggling creates or removes
+  `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.limpet-statusline-off`, then report
+  the new state. Rendering is `limpet statusline --root <dir>` — read-only,
+  no server, no sweep, no writes, works on macOS/Linux/Windows alike.
 - `/limpet update`: run `limpet update` in the shell to self-update to the
   latest release binary (checksum-verified, atomic). This is the only limpet
   command that uses the network. Report the old and new version, then tell the

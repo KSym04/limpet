@@ -58,15 +58,30 @@ fn list_projects() -> Vec<(String, String, PathBuf)> {
 }
 
 /// Resolve a ?project= query value to a store, strictly by exact match
-/// against the enumerated keys. Anything else is rejected.
+/// against the enumerated keys. Anything else is rejected. Only the
+/// matched store is opened; `list_projects` would open every store just
+/// to validate one key, which this endpoint is polled too often to afford.
 fn resolve_project(query: Option<&str>, default_root: &Path) -> Result<(Store, PathBuf)> {
     match query {
         Some(key) => {
-            let (_, root, db) = list_projects()
+            // The db path is built from the enumerated directory entry, never
+            // from the request string, preserving the no-path-from-input rule.
+            let db = std::fs::read_dir(data_dir())
+                .ok()
                 .into_iter()
-                .find(|(k, _, _)| k == key)
+                .flatten()
+                .flatten()
+                .find(|e| e.file_name().to_string_lossy() == key)
+                .map(|e| e.path().join("store.db"))
+                .filter(|db| db.is_file())
                 .with_context(|| format!("unknown project key '{key}'"))?;
-            Ok((Store::open(&db)?, PathBuf::from(root)))
+            let store = Store::open(&db)?;
+            let root = store
+                .kv_get("project_root")
+                .ok()
+                .flatten()
+                .unwrap_or_else(|| key.to_string());
+            Ok((store, PathBuf::from(root)))
         }
         None => {
             let db = Store::default_db_path(default_root);
@@ -83,132 +98,158 @@ pub fn serve_ui(root: &Path, port: u16) -> Result<()> {
         .with_context(|| format!("binding 127.0.0.1:{port}"))?;
     println!("limpet ui on http://127.0.0.1:{port} (local only, Ctrl-C to stop)");
 
+    // One thread per connection, hard-capped. A single-threaded accept loop
+    // stalls real requests behind browser preconnect sockets: Chrome opens
+    // speculative idle connections that sit silent until the 5s read timeout,
+    // serializing every API call behind them (observed 2026-07). The cap
+    // keeps a hostile local client from spawning unbounded threads; excess
+    // connections are dropped and the browser simply retries.
+    const MAX_CONNS: usize = 32;
+    let live = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     for stream in listener.incoming() {
-        let Ok(mut stream) = stream else { continue };
-        // The accept loop is single-threaded by design (one local user); a
-        // read timeout and hard byte/line caps keep one stuck or hostile
-        // local client from wedging it or growing memory without bound
-        // (audit 2026-07).
-        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
-        const MAX_REQ_LINE: u64 = 8 * 1024;
-        const MAX_HEADER_LINES: usize = 100;
-        let mut reader = BufReader::new(match stream.try_clone() {
-            Ok(s) => s,
-            Err(_) => continue,
-        });
-        let mut request_line = String::new();
-        {
-            let mut limited = std::io::Read::take(std::io::Read::by_ref(&mut reader), MAX_REQ_LINE);
-            let mut lr = BufReader::new(&mut limited);
-            if lr.read_line(&mut request_line).is_err() || request_line.is_empty() {
-                continue;
-            }
+        let Ok(stream) = stream else { continue };
+        if live.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= MAX_CONNS {
+            live.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            continue;
         }
-        // Drain headers (bounded); nothing in them is trusted or used.
-        let mut line = String::new();
-        let mut header_count = 0usize;
-        loop {
-            line.clear();
-            let mut limited = std::io::Read::take(std::io::Read::by_ref(&mut reader), MAX_REQ_LINE);
-            let mut lr = BufReader::new(&mut limited);
-            match lr.read_line(&mut line) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {
-                    if line == "\r\n" || line == "\n" || line.is_empty() {
-                        break;
-                    }
-                    header_count += 1;
-                    if header_count > MAX_HEADER_LINES {
-                        break;
-                    }
+        let live = std::sync::Arc::clone(&live);
+        let root = root.to_path_buf();
+        let default_key = default_key.clone();
+        std::thread::spawn(move || {
+            handle_conn(stream, &root, &default_key);
+            live.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        });
+    }
+    Ok(())
+}
+
+/// Serve one HTTP connection: bounded read, route, respond, close.
+fn handle_conn(mut stream: std::net::TcpStream, root: &Path, default_key: &str) {
+    // Read timeout plus hard byte/line caps keep one stuck or hostile
+    // local client from holding a thread or growing memory without
+    // bound (audit 2026-07).
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+    const MAX_REQ_LINE: u64 = 8 * 1024;
+    const MAX_HEADER_LINES: usize = 100;
+    let mut reader = BufReader::new(match stream.try_clone() {
+        Ok(s) => s,
+        Err(_) => return,
+    });
+    let mut request_line = String::new();
+    {
+        let mut limited = std::io::Read::take(std::io::Read::by_ref(&mut reader), MAX_REQ_LINE);
+        let mut lr = BufReader::new(&mut limited);
+        if lr.read_line(&mut request_line).is_err() || request_line.is_empty() {
+            return;
+        }
+    }
+    // Drain headers (bounded); nothing in them is trusted or used.
+    let mut line = String::new();
+    let mut header_count = 0usize;
+    loop {
+        line.clear();
+        let mut limited = std::io::Read::take(std::io::Read::by_ref(&mut reader), MAX_REQ_LINE);
+        let mut lr = BufReader::new(&mut limited);
+        match lr.read_line(&mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {
+                if line == "\r\n" || line == "\n" || line.is_empty() {
+                    break;
+                }
+                header_count += 1;
+                if header_count > MAX_HEADER_LINES {
+                    break;
                 }
             }
         }
+    }
 
-        let mut parts = request_line.split_whitespace();
-        let method = parts.next().unwrap_or("");
-        let full_path = parts.next().unwrap_or("/");
-        let (path, query) = match full_path.split_once('?') {
-            Some((p, q)) => (p, Some(q)),
-            None => (full_path, None),
-        };
-        let project_param = query.and_then(|q| {
-            q.split('&')
-                .find_map(|kv| kv.strip_prefix("project="))
-                .map(str::to_string)
-        });
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or("");
+    let full_path = parts.next().unwrap_or("/");
+    let (path, query) = match full_path.split_once('?') {
+        Some((p, q)) => (p, Some(q)),
+        None => (full_path, None),
+    };
+    let project_param = query.and_then(|q| {
+        q.split('&')
+            .find_map(|kv| kv.strip_prefix("project="))
+            .map(str::to_string)
+    });
 
-        let (status, ctype, body) = if method != "GET" {
-            ("405 Method Not Allowed", "text/plain", "GET only".to_string())
-        } else {
-            match path {
-                "/" => ("200 OK", "text/html; charset=utf-8", UI_HTML.to_string()),
-                "/api/projects" => {
-                    let projects: Vec<Value> = list_projects()
-                        .into_iter()
-                        .map(|(key, root, _)| {
-                            let name = Path::new(&root)
-                                .file_name()
-                                .map(|s| s.to_string_lossy().into_owned())
-                                .unwrap_or_else(|| key.clone());
-                            json!({
-                                "key": key,
-                                "name": name,
-                                "root": root,
-                                "default": key == default_key,
-                            })
+    let (status, ctype, body) = if method != "GET" {
+        (
+            "405 Method Not Allowed",
+            "text/plain",
+            "GET only".to_string(),
+        )
+    } else {
+        match path {
+            "/" => ("200 OK", "text/html; charset=utf-8", UI_HTML.to_string()),
+            "/api/projects" => {
+                let projects: Vec<Value> = list_projects()
+                    .into_iter()
+                    .map(|(key, root, _)| {
+                        let name = Path::new(&root)
+                            .file_name()
+                            .map(|s| s.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| key.clone());
+                        json!({
+                            "key": key,
+                            "name": name,
+                            "root": root,
+                            "default": key == default_key,
                         })
-                        .collect();
-                    ("200 OK", "application/json", json!(projects).to_string())
-                }
-                "/api/graph" => {
-                    let result = if project_param.as_deref() == Some("all") {
-                        all_projects_graph()
-                    } else {
-                        resolve_project(project_param.as_deref(), root)
-                            .and_then(|(store, proot)| graph_json(&store, &proot))
-                    };
-                    match result {
-                        Ok(v) => ("200 OK", "application/json", v.to_string()),
-                        Err(e) => (
-                            "500 Internal Server Error",
-                            "application/json",
-                            json!({ "error": e.to_string() }).to_string(),
-                        ),
-                    }
-                }
-                "/api/ledger" => {
-                    // "all" has no single store; fall back to the default
-                    // project so the panel always shows something real.
-                    let param = match project_param.as_deref() {
-                        Some("all") | None => None,
-                        p => p,
-                    };
-                    match resolve_project(param, root) {
-                        Ok((store, _)) => (
-                            "200 OK",
-                            "application/json",
-                            crate::tools::ledger_payload(&store).to_string(),
-                        ),
-                        Err(e) => (
-                            "500 Internal Server Error",
-                            "application/json",
-                            json!({ "error": e.to_string() }).to_string(),
-                        ),
-                    }
-                }
-                _ => ("404 Not Found", "text/plain", "not found".to_string()),
+                    })
+                    .collect();
+                ("200 OK", "application/json", json!(projects).to_string())
             }
-        };
+            "/api/graph" => {
+                let result = if project_param.as_deref() == Some("all") {
+                    all_projects_graph()
+                } else {
+                    resolve_project(project_param.as_deref(), root)
+                        .and_then(|(store, proot)| graph_json(&store, &proot))
+                };
+                match result {
+                    Ok(v) => ("200 OK", "application/json", v.to_string()),
+                    Err(e) => (
+                        "500 Internal Server Error",
+                        "application/json",
+                        json!({ "error": e.to_string() }).to_string(),
+                    ),
+                }
+            }
+            "/api/ledger" => {
+                // "all" has no single store; fall back to the default
+                // project so the panel always shows something real.
+                let param = match project_param.as_deref() {
+                    Some("all") | None => None,
+                    p => p,
+                };
+                match resolve_project(param, root) {
+                    Ok((store, _)) => (
+                        "200 OK",
+                        "application/json",
+                        crate::tools::ledger_payload(&store).to_string(),
+                    ),
+                    Err(e) => (
+                        "500 Internal Server Error",
+                        "application/json",
+                        json!({ "error": e.to_string() }).to_string(),
+                    ),
+                }
+            }
+            _ => ("404 Not Found", "text/plain", "not found".to_string()),
+        }
+    };
 
-        let _ = write!(
+    let _ = write!(
             stream,
             "HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n{body}",
             body.len()
         );
-        let _ = stream.flush();
-    }
-    Ok(())
+    let _ = stream.flush();
 }
 
 /// Merged view: every indexed project's memory in one graph. Node ids are
@@ -225,8 +266,12 @@ fn all_projects_graph() -> Result<Value> {
     let mut latest_index: Option<String> = None;
 
     for (key, root, db) in list_projects() {
-        let Ok(store) = Store::open(&db) else { continue };
-        let Ok(g) = graph_json(&store, Path::new(&root)) else { continue };
+        let Ok(store) = Store::open(&db) else {
+            continue;
+        };
+        let Ok(g) = graph_json(&store, Path::new(&root)) else {
+            continue;
+        };
         let project_name = g["project"]
             .as_str()
             .map(str::to_string)
@@ -298,9 +343,9 @@ pub fn graph_json(store: &Store, root: &Path) -> Result<Value> {
     nodes.extend(entries);
 
     let mut seen_targets = std::collections::HashSet::new();
-    let mut astmt = store.conn.prepare(
-        "SELECT entry_id, file, symbol_fqn FROM anchors",
-    )?;
+    let mut astmt = store
+        .conn
+        .prepare("SELECT entry_id, file, symbol_fqn FROM anchors")?;
     let anchor_rows: Vec<(String, String, Option<String>)> = astmt
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
         .collect::<rusqlite::Result<_>>()?;

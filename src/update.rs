@@ -25,9 +25,9 @@ fn asset_name() -> Result<&'static str> {
         ("windows", "x86_64") => "limpet-x86_64-pc-windows-msvc.exe",
         // Intel macOS was dropped from releases: GitHub's macos-13 runners
         // are so scarce the asset never actually shipped.
-        (os, arch) => bail!(
-            "no prebuilt binary for {os}/{arch}; update with `cargo install limpet`"
-        ),
+        (os, arch) => {
+            bail!("no prebuilt binary for {os}/{arch}; update with `cargo install limpet`")
+        }
     })
 }
 
@@ -95,9 +95,12 @@ pub fn run(check_only: bool) -> Result<()> {
     // MITM'd response must not drive OOM before the checksum is even checked.
     const MAX_BINARY_BYTES: u64 = 128 * 1024 * 1024;
     let mut bin = Vec::new();
-    std::io::Read::take(http_get(&format!("{base}/{asset}"))?.into_reader(), MAX_BINARY_BYTES + 1)
-        .read_to_end(&mut bin)
-        .context("downloading binary")?;
+    std::io::Read::take(
+        http_get(&format!("{base}/{asset}"))?.into_reader(),
+        MAX_BINARY_BYTES + 1,
+    )
+    .read_to_end(&mut bin)
+    .context("downloading binary")?;
     if bin.len() as u64 > MAX_BINARY_BYTES {
         bail!("release binary exceeds {MAX_BINARY_BYTES} bytes; refusing (corrupt or hostile response)");
     }
