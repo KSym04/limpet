@@ -1,6 +1,6 @@
 [package]
 name = "limpet"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "small shell. long memory. Memory-first code intelligence MCP server: AST-anchored memories, auto-invalidation on code change, honesty metadata on every response. 100% local."
 license = "MIT"
