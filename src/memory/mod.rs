@@ -18,6 +18,14 @@ pub const SOURCES: [&str; 3] = ["explicit", "mined", "verified"];
 /// allocation and store-growth vector on both the write and import paths.
 pub const MAX_BODY_BYTES: usize = 64 * 1024;
 
+/// Quantize a confidence to 6 decimals. Confidence is a heuristic score, not
+/// a measurement, and f64 chains like `c * 0.6 * 0.6 ...` accumulate last-ULP
+/// noise that then serializes verbatim and breaks export roundtrips. Every
+/// stored confidence passes through this so the stored value is always clean.
+pub fn quantize_confidence(c: f64) -> f64 {
+    (c.clamp(0.0, 1.0) * 1_000_000.0).round() / 1_000_000.0
+}
+
 /// Confidence policy per source (spec section 5).
 fn default_confidence(source: &str, requested: Option<f64>) -> f64 {
     let base = match source {
@@ -194,7 +202,7 @@ pub fn remember(
     let source = if evidence.is_some() { "verified" } else { source };
     let id = ulid();
     let now = now_iso();
-    let conf = default_confidence(source, confidence);
+    let conf = quantize_confidence(default_confidence(source, confidence));
 
     // Resolve every anchor before writing anything: one bad anchor aborts
     // the whole call with a loud error instead of a half-anchored entry.

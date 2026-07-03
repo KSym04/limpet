@@ -438,7 +438,7 @@ impl Store {
                     obj["source"].as_str().unwrap_or("explicit"),
                     // Clamp: an imported 1e300 would pin a hostile memory to
                     // the top of every recall (schema has no CHECK on this).
-                    obj["confidence"].as_f64().unwrap_or(0.5).clamp(0.0, 1.0),
+                    crate::memory::quantize_confidence(obj["confidence"].as_f64().unwrap_or(0.5)),
                     obj["status"].as_str().unwrap_or("active"),
                     obj["stale_reason"].as_str(),
                     obj["branch"].as_str(),

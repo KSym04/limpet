@@ -368,6 +368,37 @@ fn oversize_body_is_refused() {
 }
 
 #[test]
+fn penalized_confidence_stays_clean_and_roundtrips() {
+    use limpet::index;
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    std::fs::write(root.join("s.py"), "def f():\n    return 1\n").unwrap();
+    let store = Store::open_in_memory().unwrap();
+    index::full_index(&store, root).unwrap();
+    let a = memory::remember(
+        &store, "fact", "f body", "explicit", Some(0.8),
+        &[AnchorSpec { file: "s.py".into(), symbol: Some("f".into()) }], None, &[], None,
+    )
+    .unwrap();
+    // Edit the body several times to drive repeated resolution/penalty.
+    for body in ["return 2", "return 3", "return 4"] {
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        std::fs::write(root.join("s.py"), format!("def f():\n    {body}\n")).unwrap();
+        index::sweep(&store, root).unwrap();
+        memory::anchor::resolve_all(&store).unwrap();
+    }
+    let conf: f64 = store
+        .conn
+        .query_row("SELECT confidence FROM entries WHERE id = ?1", [&a.id], |r| r.get(0))
+        .unwrap();
+    // Clean to 6 decimals: no last-ULP tail, so serialize->parse is exact.
+    assert_eq!(conf, (conf * 1e6).round() / 1e6, "stored confidence must be 6-decimal clean: {conf}");
+    let s = serde_json::to_string(&conf).unwrap();
+    let back: f64 = serde_json::from_str(&s).unwrap();
+    assert_eq!(conf, back, "confidence must roundtrip through JSON exactly");
+}
+
+#[test]
 fn jsonl_roundtrip_is_lossless() {
     let dir = TempDir::new().unwrap();
     let store = seeded_store(dir.path());

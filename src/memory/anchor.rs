@@ -349,14 +349,16 @@ pub fn resolve_all(store: &crate::store::Store) -> Result<ResolveReport> {
             // *0.6 each time collapsed stale memories to the floor within a
             // handful of calls (audit 2026-07). The CASE reads the pre-
             // update status, so an already-stale entry keeps its confidence.
+            // ROUND(..., 6): quantize the penalized confidence so f64 chains
+            // stay clean in the store and export roundtrips bit-exactly.
             store.conn.execute(
                 "UPDATE entries SET
-                    confidence = CASE
+                    confidence = ROUND(CASE
                         WHEN status = 'active' AND source = 'verified'
                             THEN MIN(confidence, 0.5)
                         WHEN status = 'active'
                             THEN confidence * 0.6
-                        ELSE confidence END,
+                        ELSE confidence END, 6),
                     status = 'stale', stale_reason = ?2
                  WHERE id = ?1 AND status != 'superseded'",
                 params![entry_id, reason],
