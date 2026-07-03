@@ -57,18 +57,7 @@ detection. The non-UTF-8 file-level fallback (I-N1) already generalizes.
 
 1.0 means one thing: your memory is safe to depend on for years.
 
-## v1.1–1.2 — the team layer
-
-- **Merge-aware import:** per-entry conflicts keep both sides and link them
-  with `contradicts`, surfaced in recall until superseded — the same rule the
-  memory model already enforces locally.
-- **Per-branch memory views.** The `branch` column exists and is unused.
-- **`limpet diff`** between two exports: what a branch learned.
-- **CI gate:** an action that fails a pull request when its diff contradicts
-  an active `decision` memory. Memory becomes a review gate; nobody else has
-  this.
-
-## v1.3–1.5 — the bets (each gated on evals, not vibes)
+## v1.1+ — the bets (each gated on evals, not vibes)
 
 | Bet | Gate before it ships |
 |---|---|

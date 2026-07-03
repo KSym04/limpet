@@ -251,7 +251,7 @@ Freshness model: every tool call runs a bounded incremental sweep (changed files
 
 ## 🧭 Roadmap
 
-See [ROADMAP.md](ROADMAP.md) for the full plan through 1.5 — snippet-by-symbol retrieval, the rework-avoided metric, portable repo identity, grammar wave 2, the 1.0 stability contract, and the team layer. One rule governs all of it: a feature ships only if it feeds a receipt (`limpet stats`, the benchmark, rework-avoided) or the honesty envelope.
+See [ROADMAP.md](ROADMAP.md) for the full plan — snippet-by-symbol retrieval, the rework-avoided metric, portable repo identity, grammar wave 2, and the 1.0 stability contract. One rule governs all of it: a feature ships only if it feeds a receipt (`limpet stats`, the benchmark, rework-avoided) or the honesty envelope.
 
 ## 📄 License
 
