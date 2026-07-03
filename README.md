@@ -49,6 +49,20 @@ That takes three properties nobody else combines:
 2. **Honest.** Every response carries a metadata envelope: how fresh the index is, how many results matched vs how many were returned, and how much of what you got is stale or contradicted. There is no code path that truncates silently.
 3. **Evidenced.** A fact can carry the command that proved it. When its anchor goes stale, limpet hands the agent the exact command to re-verify it.
 
+## 👥 Who is this for
+
+**Solo developers working with an AI agent.** The first session spends tens of thousands of tokens learning your codebase; every session after that, the knowledge is one `recall` away. Survives `/clear`, compaction, and new machines. No re-teaching your own project, and no agent confidently repeating last month's truth about a function you rewrote yesterday.
+
+**Teams.** `admin export` writes `.limpet/memory.jsonl` for git; teammates import after pulling. Onboarding knowledge ("why the batch size is 50", "customers hook these method names, they are frozen") travels with the repo, and unlike a wiki it flags itself when the code moves on. `affected` tells a committer which documented decisions their diff just put at risk.
+
+**Template-heavy web stacks** (WordPress/Timber, Laravel Blade, Rails ERB, Vue). Every file is anchorable, so "the hero block is locked to 480px by the design system" pins to the actual `.twig` or `.scss` file and goes stale when someone edits it. On these stacks that is where most of the knowledge worth keeping lives.
+
+**Open-source maintainers.** `intent` and `decision` memories answer "why is this weird code here" before the PR that "fixes" it lands; `episode` memories stop the third contributor from re-attempting the refactor that already broke things twice.
+
+**Agent builders.** A model-agnostic memory backend behind a standard MCP interface: one binary, zero network calls, inspectable SQLite. Nothing to explain to a security review.
+
+**Who should skip it:** throwaway scripts, repos you touch once, teams that do not use AI agents. Memory pays off only when questions repeat.
+
 ## 🧰 The six tools
 
 | Tool | What it does |
