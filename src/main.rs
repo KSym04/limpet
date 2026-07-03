@@ -8,10 +8,13 @@
 //!   limpet import  [--root <path>]        .limpet/memory.jsonl -> memory
 //!   limpet install [--dry-run]            register with Claude Code
 //!   limpet uninstall                      remove registration
+//!   limpet update  [--check]              self-update to the latest release
 
 use anyhow::{bail, Context, Result};
 use limpet::{index, mcp, memory, store, tools, ui};
 use std::path::PathBuf;
+
+mod update;
 
 fn main() {
     if let Err(e) = run() {
@@ -93,6 +96,7 @@ fn run() -> Result<()> {
         }
         "install" => install(args.iter().any(|a| a == "--dry-run")),
         "uninstall" => uninstall(),
+        "update" => update::run(args.iter().any(|a| a == "--check")),
         "help" | "--help" | "-h" => {
             println!("{}", HELP);
             Ok(())
@@ -116,8 +120,10 @@ USAGE:
   limpet import  [--root <path>]   read memory from .limpet/memory.jsonl
   limpet install [--dry-run]       register with Claude Code (user scope)
   limpet uninstall                 remove the registration
+  limpet update  [--check]         update to the latest release binary
 
-All data stays on this machine. No network access, ever.";
+Indexing and memory stay fully offline. `limpet update` is the only command
+that reaches the network, and only when you run it.";
 
 /// Claude Code user-scope MCP registration: ~/.claude.json `mcpServers`.
 /// Claude Code uses the same dotfile location on every platform, with

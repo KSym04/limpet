@@ -53,3 +53,9 @@ their code changes. Work with it in this order.
   it if the fact changed.
 - `/limpet export`: call `admin` `{"op": "export"}` so the memory can be
   committed and shared with the team.
+- `/limpet update`: run `limpet update` in the shell to self-update to the
+  latest release binary (checksum-verified, atomic). This is the only limpet
+  command that uses the network. Report the old and new version, then tell the
+  user to restart Claude Code so the MCP server reloads onto the new binary.
+  Use `limpet update --check` to report whether a newer version exists without
+  installing it.
