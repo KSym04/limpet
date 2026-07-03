@@ -127,7 +127,13 @@ Open http://127.0.0.1:9748 for a live force-directed view of the knowledge graph
 
 ## 📦 Install
 
-Requires the Rust toolchain ([rustup.rs](https://rustup.rs)) until prebuilt binaries ship.
+**Prebuilt binary** (macOS, Linux, Windows): download from the [latest release](https://github.com/KSym04/limpet/releases/latest), verify the sha256, put `limpet` on your PATH, then:
+
+```bash
+limpet install
+```
+
+**With Rust** ([rustup.rs](https://rustup.rs)):
 
 ```bash
 cargo install --git https://github.com/KSym04/limpet limpet

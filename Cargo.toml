@@ -5,6 +5,9 @@ edition = "2021"
 description = "small shell. long memory. Memory-first code intelligence MCP server: AST-anchored memories, auto-invalidation on code change, honesty metadata on every response. 100% local."
 license = "MIT"
 repository = "https://github.com/KSym04/limpet"
+readme = "README.md"
+keywords = ["mcp", "memory", "code-intelligence", "ai-agents", "tree-sitter"]
+categories = ["development-tools", "command-line-utilities"]
 
 [dependencies]
 anyhow = "1"

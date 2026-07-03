@@ -1,0 +1,10 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
+  "name": "io.github.ksym04/limpet",
+  "description": "Memory-first code intelligence for coding agents: AST-anchored memories that follow renames and go stale when code changes, honesty metadata on every response, 100% local single binary.",
+  "repository": {
+    "url": "https://github.com/KSym04/limpet",
+    "source": "github"
+  },
+  "version": "0.2.0"
+}
