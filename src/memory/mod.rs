@@ -13,6 +13,11 @@ use rusqlite::params;
 pub const KINDS: [&str; 5] = ["fact", "decision", "episode", "insight", "intent"];
 pub const SOURCES: [&str; 3] = ["explicit", "mined", "verified"];
 
+/// Upper bound on a memory body. A memory is a distilled conclusion, not a
+/// document; anything larger is misuse, and an unbounded body is an
+/// allocation and store-growth vector on both the write and import paths.
+pub const MAX_BODY_BYTES: usize = 64 * 1024;
+
 /// Confidence policy per source (spec section 5).
 fn default_confidence(source: &str, requested: Option<f64>) -> f64 {
     let base = match source {
@@ -172,6 +177,9 @@ pub fn remember(
     }
     if body.trim().is_empty() {
         bail!("body must not be empty");
+    }
+    if body.len() > MAX_BODY_BYTES {
+        bail!("body is {} bytes; the limit is {MAX_BODY_BYTES}. A memory is a conclusion, not a document.", body.len());
     }
     // Never persist a credential: it would live in the local store and could
     // later leak through `admin export` -> .limpet/memory.jsonl -> git.

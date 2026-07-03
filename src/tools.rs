@@ -53,7 +53,8 @@ fn tool_recall(store: &Store, sweep: &SweepReport, args: &Value) -> Result<Value
         .map(|a| {
             a.iter()
                 .filter_map(Value::as_str)
-                .map(str::to_string)
+                // The index stores `/`; a Windows agent sends `\`.
+                .map(crate::util::normalize_rel)
                 .collect()
         })
         .unwrap_or_default();
@@ -157,10 +158,15 @@ fn tool_remember(store: &Store, root: &Path, sweep: &SweepReport, args: &Value) 
     let source = args.get("source").and_then(Value::as_str).unwrap_or("explicit");
     let confidence = args.get("confidence").and_then(Value::as_f64);
 
-    let anchors: Vec<memory::AnchorSpec> = match args.get("anchors") {
+    let mut anchors: Vec<memory::AnchorSpec> = match args.get("anchors") {
         Some(v) => serde_json::from_value(v.clone()).context("parsing anchors")?,
         None => Vec::new(),
     };
+    // Store `/` regardless of what separator the caller's OS uses, so the
+    // anchor matches the walker's `/`-keyed rows.
+    for a in &mut anchors {
+        a.file = crate::util::normalize_rel(&a.file);
+    }
     for a in &anchors {
         crate::util::validate_rel_path(root, &a.file)?;
         // A memory must anchor to the file's CURRENT content: under sweep
@@ -201,7 +207,11 @@ fn tool_remember(store: &Store, root: &Path, sweep: &SweepReport, args: &Value) 
 }
 
 fn tool_map(store: &Store, sweep: &SweepReport, args: &Value) -> Result<Value> {
-    let target = str_arg(args, "target")?;
+    let target_raw = str_arg(args, "target")?;
+    // A path target may arrive with `\`; a symbol FQN never contains one, so
+    // normalizing is safe for both and fixes `map src\util.rs` on Windows.
+    let target_norm = crate::util::normalize_rel(target_raw);
+    let target = target_norm.as_str();
 
     // Try file view first, then symbol view.
     let file_symbols: Vec<Value> = {
