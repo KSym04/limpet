@@ -2,7 +2,7 @@
 name = "limpet"
 version = "0.5.0"
 edition = "2021"
-description = "small shell. long memory. Memory-first code intelligence MCP server: AST-anchored memories, auto-invalidation on code change, honesty metadata on every response. 100% local."
+description = "small shell. long memory. Persistent engineering memory for AI coding agents: AST-anchored, evidence-verified, flagged stale the moment the code changes. Local MCP server."
 license = "MIT"
 repository = "https://github.com/KSym04/limpet"
 readme = "README.md"

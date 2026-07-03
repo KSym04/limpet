@@ -8,7 +8,7 @@
 [![Platforms](https://img.shields.io/badge/macOS%20%7C%20Linux%20%7C%20Windows-supported-lightgrey.svg)](https://github.com/KSym04/limpet/actions/workflows/ci.yml)
 [![100% local](https://img.shields.io/badge/network%20calls-zero-blue.svg)](SECURITY.md)
 
-Memory that clamps onto your code. Code moves, memory follows. Code changes, memory says so.
+**Persistent engineering memory for AI coding agents.** AI forgets everything between sessions. limpet remembers what your agent learned about a codebase, and it knows when that knowledge stops being true.
 
 <p align="center">
   <img src="docs/limpet-ui.png" alt="limpet visual memory graph: memories colored by health, clamped to code symbols" width="820">
@@ -16,7 +16,13 @@ Memory that clamps onto your code. Code moves, memory follows. Code changes, mem
   <em>limpet ui: green memories are trustworthy, amber went stale when their code changed, squares are the symbols they clamp onto</em>
 </p>
 
-limpet is a memory-first code intelligence MCP server for AI coding agents. Everything your agent learns about a project (decisions, verified facts, failed approaches, gotchas, intent) is stored as durable memory, anchored to the actual code it describes, and automatically flagged the moment that code changes. One Rust binary, one SQLite file, 100% local.
+Every coding agent runs the same loop: read code, reason, answer, forget. Next session it pays the full price again. And anything it did write down (session notes, markdown memory files) quietly rots, because nothing connects those notes to the code they describe. limpet replaces that loop with a knowledge lifecycle:
+
+```
+read -> reason -> remember -> verify -> flag stale when code changes -> re-verify -> reuse
+```
+
+Everything your agent learns about a project (decisions, verified facts, failed approaches, gotchas, intent) is stored as durable memory, anchored to the actual code it describes, and automatically flagged the moment that code changes. Ships as an MCP server, so any MCP-capable agent can use it: one Rust binary, one SQLite file, 100% local.
 
 The name is the mechanism: a limpet clamps to one spot and returns to it after every tide. Memories here clamp onto AST-hashed symbols, follow them through renames and file moves, and go visibly stale when the code underneath them actually changes.
 
@@ -29,54 +35,19 @@ Code indexers answer "what is where" and answer it well. But the expensive knowl
 - which method names are frozen because customers hook them
 - what that weird cron job actually protects against
 
-Agents re-derive or re-ask this every session, burning tokens, or worse, they guess. Session notes and markdown memory files rot silently because nothing connects them to the code they describe. limpet's answer: make memory a first-class store with three properties nobody else combines:
+Agents re-derive or re-ask this every session, burning tokens, or worse, they guess. And the failure mode that actually kills AI coding assistants is not forgetting; it is remembering something that is no longer true. An agent that still believes last month's version of a function is not unhelpful, it is confidently wrong, and every generic memory store on the market will feed it that lie forever, because in those systems knowledge is written once and trusted forever.
+
+limpet's premise is that a memory about code is only trustworthy while that code still matches it. So knowledge here has a lifecycle, the same one engineers give it:
+
+```
+valid -> code changed -> stale (reason attached, confidence drops) -> re-verified or superseded
+```
+
+That takes three properties nobody else combines:
 
 1. **Anchored.** Memories attach to symbols through normalized AST body hashes, not line numbers or file paths. Rename a function or move a file and the memory follows. Edit the function body and the memory flips to stale with a reason.
 2. **Honest.** Every response carries a metadata envelope: how fresh the index is, how many results matched vs how many were returned, and how much of what you got is stale or contradicted. There is no code path that truncates silently.
 3. **Evidenced.** A fact can carry the command that proved it. When its anchor goes stale, limpet hands the agent the exact command to re-verify it.
-
-## 🪙 Token savings, measured
-
-Where the savings actually come from:
-
-1. **Answers travel as conclusions, not source.** A memory is the 30-token distilled answer; the files it was learned from are thousands of tokens. Reading code to re-derive a known fact pays the full price every single session. Recall pays once per question.
-2. **The worst spend is exploration that cannot succeed.** Why a batch size is 50, which refactor was rolled back, which API is frozen: not in any file. Without memory the agent greps, reads, and still does not know, so the tokens bought nothing. With memory these are the cheapest questions of all.
-3. **Responses are budget-packed and noise-cut.** `recall` takes a token budget, packs best-first, drops the low-relevance tail, and reports what it omitted. You spend what you allowed, never what happened to match.
-4. **No re-teaching after context loss.** Compaction, `/clear`, new session: the knowledge survives outside the context window and comes back at recall prices, not re-derivation prices.
-
-Measured with a reproducible benchmark, seeded with 12 memories over a realistic 9-file fixture plugin, asking 10 questions an agent typically re-answers every session:
-
-```
-question                                                   files+grep   recall   ratio  in code?
-------------------------------------------------------------------------------------------------
-why is the batch size 50 and why is there a queue at all         1929      363    5.3x  no
-why does the scanner skip draft products, is that a bug          1630      373    4.4x  no
-how is the health score computed                                 1630      349    4.7x  yes
-why semicolon delimiter and BOM in the csv export                1327      361    3.7x  no
-where do report files get written and why                        1327      356    3.7x  no
-how long are download tokens valid                               1023      165    6.2x  yes
-has anyone tried streaming the csv export                        1327      369    3.6x  no
-can I rename check_product in the scanner                        1630      373    4.4x  no
-what does the nightly cron actually exist for                     803      313    2.6x  no
-how often does the dashboard poll progress, can I lower it       1072      336    3.2x  no
-------------------------------------------------------------------------------------------------
-TOTAL                                                           13698     3373    4.1x
-```
-
-**4.1x fewer tokens (75.6% saved) across the benchmark.** Reproduce it yourself:
-
-```bash
-cargo build --release
-python3 bench/token_savings.py
-```
-
-Methodology, stated so the number can be checked rather than believed:
-
-- "Without limpet" cost is the **minimal** file set containing the answer plus a flat 300 tokens for search round trips. Real agents read more than the minimal set, so real savings are higher.
-- Tokens are estimated as ceil(bytes/4) on both sides identically.
-- 8 of the 10 questions are marked "no" above: their answers exist in **no file at any token price** (decisions, history, tribal knowledge). File reading gets you the code but not the answer. We still charge limpet full price against the file-reading cost instead of claiming infinite savings.
-- The script is a regression gate: it exits nonzero if savings drop below 4x.
-- Fixture files are 58 to 179 lines. Real plugin files run several times larger, and the "without" side grows with file size while a recall response does not.
 
 ## 🧰 The six tools
 
@@ -121,6 +92,49 @@ lose SOME anchors      others still resolve      stale (anchor_lost), never kill
 A multi-anchor memory dies only when **every** anchor dies. Losing one anchor while others still resolve degrades it to `stale:anchor_lost` so the surviving knowledge stays usable. And `remember` refuses an anchor it cannot resolve, loudly, at write time: no memory is ever born dead.
 
 Contradictions are explicit links: when a new memory contradicts an old one, both stay visible with the conflict flagged until one `supersedes` the other. History is never silently overwritten.
+
+## 🪙 The receipts: token savings, measured
+
+Persistent memory also happens to be dramatically cheaper than re-derivation. Where the savings come from:
+
+1. **Answers travel as conclusions, not source.** A memory is the 30-token distilled answer; the files it was learned from are thousands of tokens. Reading code to re-derive a known fact pays the full price every single session. Recall pays once per question.
+2. **The worst spend is exploration that cannot succeed.** Why a batch size is 50, which refactor was rolled back, which API is frozen: not in any file. Without memory the agent greps, reads, and still does not know, so the tokens bought nothing. With memory these are the cheapest questions of all.
+3. **Responses are budget-packed and noise-cut.** `recall` takes a token budget, packs best-first, drops the low-relevance tail, and reports what it omitted. You spend what you allowed, never what happened to match.
+4. **No re-teaching after context loss.** Compaction, `/clear`, new session: the knowledge survives outside the context window and comes back at recall prices, not re-derivation prices.
+
+Measured with a reproducible benchmark, seeded with 12 memories over a realistic 9-file fixture plugin, asking 10 questions an agent typically re-answers every session:
+
+```
+question                                                   files+grep   recall   ratio  in code?
+------------------------------------------------------------------------------------------------
+why is the batch size 50 and why is there a queue at all         1929      363    5.3x  no
+why does the scanner skip draft products, is that a bug          1630      373    4.4x  no
+how is the health score computed                                 1630      349    4.7x  yes
+why semicolon delimiter and BOM in the csv export                1327      361    3.7x  no
+where do report files get written and why                        1327      356    3.7x  no
+how long are download tokens valid                               1023      165    6.2x  yes
+has anyone tried streaming the csv export                        1327      369    3.6x  no
+can I rename check_product in the scanner                        1630      373    4.4x  no
+what does the nightly cron actually exist for                     803      313    2.6x  no
+how often does the dashboard poll progress, can I lower it       1072      336    3.2x  no
+------------------------------------------------------------------------------------------------
+TOTAL                                                           13698     3373    4.1x
+```
+
+**4.1x fewer tokens (75.6% saved) across the benchmark.** Reproduce it yourself:
+
+```bash
+cargo build --release
+python3 bench/token_savings.py
+```
+
+Methodology, stated so the number can be checked rather than believed:
+
+- "Without limpet" cost is the **minimal** file set containing the answer plus a flat 300 tokens for search round trips. Real agents read more than the minimal set, so real savings are higher.
+- Tokens are estimated as ceil(bytes/4) on both sides identically.
+- 8 of the 10 questions are marked "no" above: their answers exist in **no file at any token price** (decisions, history, tribal knowledge). File reading gets you the code but not the answer. We still charge limpet full price against the file-reading cost instead of claiming infinite savings.
+- The script is a regression gate: it exits nonzero if savings drop below 4x.
+- Fixture files are 58 to 179 lines. Real plugin files run several times larger, and the "without" side grows with file size while a recall response does not.
 
 ## 🗺️ Visual memory
 
@@ -203,6 +217,7 @@ Freshness model: every tool call runs a bounded incremental sweep (changed files
 
 ## 🚫 What limpet is not
 
+- Not a generic AI memory store, vector database, or RAG pipeline. No embeddings, no similarity guesswork: anchors are deterministic AST hashes, and staleness is a fact, not a score. Code-unaware memory stores never notice when the code moves on; noticing is limpet's entire premise.
 - Not a code search engine. Your agent already has grep.
 - Not a call-graph oracle. Call edges are syntactic and labeled as such.
 - Not a cloud memory platform. No account, no sync, no server.
