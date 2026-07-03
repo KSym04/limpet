@@ -32,10 +32,14 @@ jobs:
           targets: ${{ matrix.target }}
       - run: cargo test --locked
       - run: cargo build --release --locked --target ${{ matrix.target }}
+      # Publish both a raw binary (consumed by `limpet update`) and an archive
+      # (for humans), each with a sibling .sha256.
       - name: package (unix)
         if: matrix.archive == 'tar'
         run: |
           cd target/${{ matrix.target }}/release
+          cp limpet limpet-${{ matrix.target }}
+          shasum -a 256 limpet-${{ matrix.target }} > limpet-${{ matrix.target }}.sha256
           tar czf limpet-${{ matrix.target }}.tar.gz limpet
           shasum -a 256 limpet-${{ matrix.target }}.tar.gz > limpet-${{ matrix.target }}.tar.gz.sha256
       - name: package (windows)
@@ -43,12 +47,16 @@ jobs:
         shell: pwsh
         run: |
           cd target/${{ matrix.target }}/release
+          Copy-Item limpet.exe limpet-${{ matrix.target }}.exe
+          (Get-FileHash limpet-${{ matrix.target }}.exe -Algorithm SHA256).Hash + "  limpet-${{ matrix.target }}.exe" | Out-File limpet-${{ matrix.target }}.exe.sha256 -Encoding ascii
           Compress-Archive -Path limpet.exe -DestinationPath limpet-${{ matrix.target }}.zip
           (Get-FileHash limpet-${{ matrix.target }}.zip -Algorithm SHA256).Hash + "  limpet-${{ matrix.target }}.zip" | Out-File limpet-${{ matrix.target }}.zip.sha256 -Encoding ascii
       - uses: actions/upload-artifact@v4
         with:
           name: limpet-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/limpet-${{ matrix.target }}.*
+          path: |
+            target/${{ matrix.target }}/release/limpet-${{ matrix.target }}
+            target/${{ matrix.target }}/release/limpet-${{ matrix.target }}.*
           if-no-files-found: error
 
   # Single job publishes the release once. Generating release notes inside the
