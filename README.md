@@ -57,7 +57,7 @@ That takes three properties nobody else combines:
 
 **Teams.** `admin export` writes `.limpet/memory.jsonl` for git; teammates import after pulling. Onboarding knowledge ("why the batch size is 50", "customers hook these method names, they are frozen") travels with the repo, and unlike a wiki it flags itself when the code moves on. `affected` tells a committer which documented decisions their diff just put at risk.
 
-**Template-heavy web stacks** (WordPress/Timber, Laravel Blade, Rails ERB, Vue). Every file is anchorable, so "the hero block is locked to 480px by the design system" pins to the actual `.twig` or `.scss` file and goes stale when someone edits it. On these stacks that is where most of the knowledge worth keeping lives.
+**Template-heavy and multi-language codebases.** Every file is anchorable, not just symbol-bearing source, so "this layout is locked to 480px by the design system" pins to the actual template or stylesheet and goes stale when someone edits it. On stacks where logic lives in templates, styles, configs, and data files (Rails, Laravel, Django, Vue, any component framework, any CMS theme) that is where most of the knowledge worth keeping lives, and it is exactly what symbol-only indexers cannot reach.
 
 **Open-source maintainers.** `intent` and `decision` memories answer "why is this weird code here" before the PR that "fixes" it lands; `episode` memories stop the third contributor from re-attempting the refactor that already broke things twice.
 
@@ -120,7 +120,7 @@ Persistent memory also happens to be dramatically cheaper than re-derivation. Wh
 3. **Responses are budget-packed and noise-cut.** `recall` takes a token budget, packs best-first, drops the low-relevance tail, and reports what it omitted. You spend what you allowed, never what happened to match.
 4. **No re-teaching after context loss.** Compaction, `/clear`, new session: the knowledge survives outside the context window and comes back at recall prices, not re-derivation prices.
 
-Measured with a reproducible benchmark, seeded with 12 memories over a realistic 9-file fixture plugin, asking 10 questions an agent typically re-answers every session:
+Measured with a reproducible benchmark, seeded with 12 memories over a realistic 9-file fixture service, asking 10 questions an agent typically re-answers every session:
 
 ```
 question                                                   files+grep   recall   ratio  in code?
@@ -160,7 +160,7 @@ Methodology, stated so the number can be checked rather than believed:
 - Tokens are estimated as ceil(bytes/4) on both sides identically.
 - 8 of the 10 questions are marked "no" above: their answers exist in **no file at any token price** (decisions, history, tribal knowledge). File reading gets you the code but not the answer. We still charge limpet full price against the file-reading cost instead of claiming infinite savings.
 - The script is a regression gate: it exits nonzero if savings drop below 4x.
-- Fixture files are 58 to 179 lines. Real plugin files run several times larger, and the "without" side grows with file size while a recall response does not.
+- Fixture files are 58 to 179 lines. Real source files run several times larger, and the "without" side grows with file size while a recall response does not.
 
 ## 🗺️ Visual memory
 
@@ -225,11 +225,11 @@ Data lives under `~/.local/share/limpet/`, one SQLite store per repository. Team
 
 ## 🌳 Whole repo indexed, thin on purpose
 
-**Every file in the repository is indexed and anchorable.** Files with a shipped grammar (PHP, JavaScript, TypeScript, Python, Rust, C/C++) get full symbol extraction: functions, classes, imports, and name-based call references labeled `syntactic`. Every other file (`.twig`, `.scss`, `.vue`, `.blade.php`, `.md`, `.yml`, configs, anything) gets a file-level node with a content hash, so a memory can anchor to it and go `stale:file_edited` the moment it changes. On template-heavy stacks (WordPress/Timber, Rails, Laravel) that is where the knowledge worth remembering actually lives.
+**Every file in the repository is indexed and anchorable.** Files with a shipped grammar (PHP, JavaScript, TypeScript, Python, Rust, C/C++) get full symbol extraction: functions, classes, imports, and name-based call references labeled `syntactic`. Every other file (`.twig`, `.scss`, `.vue`, `.blade.php`, `.erb`, `.md`, `.yml`, configs, anything) gets a file-level node with a content hash, so a memory can anchor to it and go `stale:file_edited` the moment it changes. On template-heavy stacks that is where the knowledge worth remembering actually lives.
 
 Legacy encodings degrade gracefully: a grammar-matched file that is not valid UTF-8 (CP949 or UTF-16 source in an old C++ engine, say) keeps its file-level anchor instead of disappearing from the index. A grammar can only ever upgrade a file, never make it less anchorable.
 
-What the walk skips, deliberately: everything in `.gitignore`, everything in an optional `.limpetignore` (gitignore syntax, works even outside a git repo), `node_modules`/`vendor`/`target`/`dist`/`build`, hidden junk, `*.min.*` assets, and files over 8MB. Source files over 512KB are indexed at file level but never parsed for symbols: the cap protects tree-sitter from generated bundles, and a giant hand-written translation unit stays anchorable instead of vanishing. Those bounds are what keep a full WordPress install from pegging your CPU; use `.limpetignore` to opt out anything else.
+What the walk skips, deliberately: everything in `.gitignore`, everything in an optional `.limpetignore` (gitignore syntax, works even outside a git repo), `node_modules`/`vendor`/`target`/`dist`/`build`, hidden junk, `*.min.*` assets, and files over 8MB. Source files over 512KB are indexed at file level but never parsed for symbols: the cap protects tree-sitter from generated bundles, and a giant hand-written translation unit stays anchorable instead of vanishing. Those bounds are what keep a large vendored dependency tree with no `.gitignore` from pegging your CPU; use `.limpetignore` to opt out anything else.
 
 There is no LSP, no type inference, and no claim of a publishable call graph: the index exists to give memory anchor points, invalidation, and recall locality. Every shipped grammar has fixture coverage in the test suite; languages are added when they can be tested, not when they pad a number.
 

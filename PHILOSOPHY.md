@@ -47,7 +47,7 @@ memory that loses one anchor of several degrades to `anchor_lost` instead
 of dying. Files that disappear in a branch switch resurrect their memories
 when they return; only a deliberate human supersession is final.
 
-*Scar:* v0.4.0 silently skipped 73% of a real WordPress theme and killed
+*Scar:* v0.4.0 silently skipped 73% of a real template-and-styles-heavy web project and killed
 multi-anchor memories over one unresolved anchor. Every "X silently
 disappears" audit finding since has been a violation of this principle.
 
