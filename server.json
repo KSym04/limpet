@@ -1,10 +1,10 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
-  "name": "io.github.ksym04/limpet",
+  "name": "io.github.KSym04/limpet",
   "description": "Persistent engineering memory for AI coding agents. Survives refactors, knows when it is stale.",
   "repository": {
     "url": "https://github.com/KSym04/limpet",
     "source": "github"
   },
-  "version": "0.5.0"
+  "version": "0.5.1"
 }
