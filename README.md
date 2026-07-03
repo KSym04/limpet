@@ -146,6 +146,12 @@ python3 bench/token_savings.py
 
 And the number is not just a benchmark: limpet keeps **your own receipt**. Every recall is priced against its file-reading counterfactual with the same methodology, and `limpet stats` (or `admin {op:"ledger"}`, or the UI header) shows session and lifetime savings: tokens saved, reads avoided, recalls gross and distinct. Negative savings are shown, never floored, and anchorless memories count zero baseline, so the figure is a conservative floor, not marketing.
 
+<p align="center">
+  <img src="docs/statusline-savings.svg" alt="terminal statusline segment showing 9 active memories and 134k tokens saved" width="420">
+  <br>
+  <em>the receipt, live in a Claude Code statusline: active memories and lifetime tokens saved, read straight from the store</em>
+</p>
+
 Methodology, stated so the number can be checked rather than believed:
 
 - "Without limpet" cost is the **minimal** file set containing the answer plus a flat 300 tokens for search round trips. Real agents read more than the minimal set, so real savings are higher.

@@ -91,14 +91,16 @@ function resize() {
 }
 window.addEventListener("resize", resize);
 
-let currentProject = "all";
+// Deep-linkable: /?project=<key> opens straight to that project (used by
+// the statusline's clickable shell segment).
+let currentProject = new URLSearchParams(location.search).get("project") || "all";
 
 async function loadProjects() {
   try {
     const res = await fetch("/api/projects");
     const projects = await res.json();
     const sel = document.getElementById("project-select");
-    const keep = sel.value;
+    const keep = currentProject;
     sel.innerHTML = '<option value="all">all projects</option>';
     for (const p of projects) {
       const opt = document.createElement("option");

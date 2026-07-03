@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="420" height="56" viewBox="0 0 420 56" role="img" aria-label="statusline segment: 9 active memories, 134k tokens saved">
+  <rect width="420" height="56" rx="8" fill="#1e2227"/>
+  <text x="22" y="36" font-family="SF Mono, Menlo, Consolas, monospace" font-size="20">
+    <tspan fill="#e8e8e8">🐚</tspan>
+    <tspan dx="8" fill="#87d787" font-weight="bold">9</tspan>
+    <tspan dx="8" fill="#444444">·</tspan>
+    <tspan dx="8" fill="#5fff87" font-weight="bold">↑134k</tspan>
+    <tspan dx="8" fill="#808080">tokens saved</tspan>
+  </text>
+</svg>
