@@ -300,12 +300,36 @@ impl Store {
     /// Import entries from JSONL produced by `export_jsonl`.
     ///
     /// Reconciles by id: newer `updated_at` wins; identical or older lines
-    /// are skipped. Never deletes existing entries (invariant I4).
+    /// are skipped. Never deletes existing entries (invariant I4). Lines that
+    /// fail a guard are counted in `rejected`, never partially applied.
+    ///
+    /// A `.limpet/memory.jsonl` arrives over `git pull` from a teammate and
+    /// is UNTRUSTED. Import therefore enforces the same guards the live
+    /// `remember` path does, because it is a second write path into the same
+    /// store: secrets are rejected (they must never enter the store, even
+    /// from a peer), bodies are size-capped, confidence is clamped, future
+    /// `updated_at` timestamps cannot win the merge forever, imported anchor
+    /// hashes are re-resolved against the LOCAL index (a forged hash cannot
+    /// fake freshness against code you do not have), and each line is read
+    /// with a hard size cap.
     pub fn import_jsonl(&mut self, r: &mut impl BufRead) -> Result<ImportReport> {
         let mut report = ImportReport::default();
+        let now = crate::index::now_iso();
         let tx = self.conn.transaction()?;
-        for line in r.lines() {
-            let line = line?;
+        // Bounded line reads: one multi-GB line must not exhaust memory.
+        const MAX_IMPORT_LINE: u64 = 1024 * 1024;
+        let mut raw: Vec<u8> = Vec::new();
+        loop {
+            raw.clear();
+            let n = std::io::Read::take(r.by_ref(), MAX_IMPORT_LINE + 1)
+                .read_until(b'\n', &mut raw)?;
+            if n == 0 {
+                break;
+            }
+            if n as u64 > MAX_IMPORT_LINE {
+                bail!("import line exceeds {MAX_IMPORT_LINE} bytes; refusing a malformed or hostile export");
+            }
+            let line = String::from_utf8_lossy(&raw);
             if line.trim().is_empty() {
                 continue;
             }
@@ -313,6 +337,35 @@ impl Store {
                 serde_json::from_str(&line).context("malformed JSONL line")?;
             let id = obj["id"].as_str().context("entry missing id")?.to_string();
             let incoming_updated = obj["updated_at"].as_str().unwrap_or_default();
+
+            // A future timestamp would win the LWW merge against every honest
+            // later update forever (denial-of-correction). Treat future or
+            // unparseable stamps as lowest priority.
+            if let Some(secs) = crate::memory::parse_iso_secs(incoming_updated) {
+                if let Some(now_secs) = crate::memory::parse_iso_secs(&now) {
+                    if secs > now_secs {
+                        report.rejected += 1;
+                        continue;
+                    }
+                }
+            } else {
+                report.rejected += 1;
+                continue;
+            }
+
+            // Secrets must never enter the store, not even from a peer.
+            let body = obj["body"].as_str().unwrap_or_default();
+            let ev_cmd = obj["evidence_cmd"].as_str().unwrap_or_default();
+            if crate::secrets::detect(body).is_some()
+                || crate::secrets::detect(ev_cmd).is_some()
+            {
+                report.rejected += 1;
+                continue;
+            }
+            if body.len() > crate::memory::MAX_BODY_BYTES {
+                report.rejected += 1;
+                continue;
+            }
 
             let existing: Option<String> = match tx.query_row(
                 "SELECT updated_at FROM entries WHERE id = ?1",
@@ -383,7 +436,9 @@ impl Store {
                     obj["created_at"].as_str().unwrap_or_default(),
                     incoming_updated,
                     obj["source"].as_str().unwrap_or("explicit"),
-                    obj["confidence"].as_f64().unwrap_or(0.5),
+                    // Clamp: an imported 1e300 would pin a hostile memory to
+                    // the top of every recall (schema has no CHECK on this).
+                    obj["confidence"].as_f64().unwrap_or(0.5).clamp(0.0, 1.0),
                     obj["status"].as_str().unwrap_or("active"),
                     obj["stale_reason"].as_str(),
                     obj["branch"].as_str(),
@@ -395,16 +450,33 @@ impl Store {
             tx.execute("DELETE FROM anchors WHERE entry_id = ?1", [&id])?;
             if let Some(anchors) = obj["anchors"].as_array() {
                 for a in anchors {
+                    let file = a["file"].as_str().unwrap_or_default();
+                    let symbol_fqn = a["symbol_fqn"].as_str();
+                    // Re-resolve the hash against the LOCAL index rather than
+                    // trusting the imported one: a forged hash must not be
+                    // able to fake "fresh" against code this machine does not
+                    // have. If the anchored symbol/file exists here, adopt the
+                    // local hash (honestly fresh); otherwise keep the imported
+                    // hash so normal follow/invalidate logic applies.
+                    let local_hash: Option<String> = match symbol_fqn {
+                        Some(fqn) => tx
+                            .query_row(
+                                "SELECT body_hash FROM symbols WHERE fqn = ?1 LIMIT 1",
+                                [fqn],
+                                |r| r.get(0),
+                            )
+                            .ok(),
+                        None => tx
+                            .query_row("SELECT hash FROM files WHERE path = ?1", [file], |r| {
+                                r.get(0)
+                            })
+                            .ok(),
+                    };
+                    let hash = local_hash.or_else(|| a["ast_body_hash"].as_str().map(str::to_string));
                     tx.execute(
                         "INSERT INTO anchors(entry_id, file, symbol_fqn, ast_body_hash, context_hint)
                          VALUES (?1,?2,?3,?4,?5)",
-                        rusqlite::params![
-                            id,
-                            a["file"].as_str().unwrap_or_default(),
-                            a["symbol_fqn"].as_str(),
-                            a["ast_body_hash"].as_str(),
-                            a["context_hint"].as_str(),
-                        ],
+                        rusqlite::params![id, file, symbol_fqn, hash, a["context_hint"].as_str()],
                     )?;
                 }
             }
@@ -583,6 +655,9 @@ pub struct ImportReport {
     /// Links whose target entry does not exist locally: reported, not
     /// silently swallowed by INSERT OR IGNORE.
     pub links_dropped: usize,
+    /// Untrusted lines refused: a secret in the body/evidence, an
+    /// over-cap body, or a future-dated timestamp. Reported, never applied.
+    pub rejected: usize,
 }
 
 #[cfg(test)]

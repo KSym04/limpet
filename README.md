@@ -240,6 +240,8 @@ Freshness model: every tool call runs a bounded incremental sweep (changed files
 - **Parameterized SQL only.** No query in the codebase concatenates user input.
 - **Malformed input survives.** The JSON-RPC loop answers parse errors and handler panics with JSON-RPC errors and keeps serving.
 - `install` edits only its own `mcpServers.limpet` entry and refuses to touch config it does not recognize; `uninstall` reverses exactly that.
+- **Import is a guarded path.** A `.limpet/memory.jsonl` pulled from a teammate is untrusted input, so `import` enforces the same rules as `remember`: secrets are rejected (they can never enter the store, even from a peer), bodies are size-capped, confidence is clamped, future-dated entries cannot poison the merge, and imported anchor hashes are re-resolved against your local code so a forged hash cannot fake freshness. Rejected lines are counted, never silently applied.
+- **Broken setup? `limpet doctor`.** It checks the binary, the Claude Code registration (including a moved-binary mismatch), the skill file, the store, its version stamp, and the index, printing ok/FAIL per line. It runs automatically after `install` and `update`.
 
 ## 🚫 What limpet is not
 

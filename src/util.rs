@@ -8,6 +8,52 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const CROCKFORD: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
+/// Canonicalize a path WITHOUT the Windows `\\?\` verbatim prefix.
+///
+/// `std::fs::canonicalize` returns verbatim paths on Windows (`\\?\C:\...`),
+/// and verbatim paths disable the kernel's `/`->`\` translation. Since the
+/// whole index stores repo-relative paths with `/`, a verbatim root makes
+/// every `root.join("src/foo.rs")` unreadable. This is the single reason
+/// limpet was broken for subdirectories on Windows. Callers that feed a
+/// canonicalized root into the index MUST use this instead.
+pub fn canonicalize_plain(path: &Path) -> std::io::Result<PathBuf> {
+    let c = path.canonicalize()?;
+    #[cfg(windows)]
+    {
+        let s = c.as_os_str().to_string_lossy();
+        if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+            return Ok(PathBuf::from(format!(r"\\{rest}")));
+        }
+        if let Some(rest) = s.strip_prefix(r"\\?\") {
+            return Ok(PathBuf::from(rest.to_string()));
+        }
+    }
+    Ok(c)
+}
+
+/// Normalize a caller-supplied repo-relative path to the `/` separator the
+/// index stores. A Windows agent naturally sends `src\util.rs`; without this
+/// it would be stored, anchored, and compared with backslashes and never
+/// match the walker's `/`-keyed rows.
+pub fn normalize_rel(rel: &str) -> String {
+    rel.replace('\\', "/")
+}
+
+/// Windows reserved device names: a component equal to one of these
+/// (ignoring case and extension) resolves to a device, not a file, and would
+/// let `admin export path:"NUL"` silently write to the void once the root is
+/// no longer verbatim.
+#[cfg(windows)]
+fn is_reserved_device(component: &str) -> bool {
+    let stem = component.split('.').next().unwrap_or(component);
+    matches!(
+        stem.to_ascii_uppercase().as_str(),
+        "CON" | "PRN" | "AUX" | "NUL"
+            | "COM1" | "COM2" | "COM3" | "COM4" | "COM5" | "COM6" | "COM7" | "COM8" | "COM9"
+            | "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5" | "LPT6" | "LPT7" | "LPT8" | "LPT9"
+    )
+}
+
 static LAST_ULID_STATE: AtomicU64 = AtomicU64::new(0);
 
 /// Per-process entropy from the OS-seeded std hasher, so two processes
@@ -95,7 +141,9 @@ pub fn repo_key(root: &Path) -> String {
 /// Rejects absolute paths and any `..` traversal, then joins onto `root`.
 /// This is the single choke point for all file arguments arriving over MCP.
 pub fn validate_rel_path(root: &Path, rel: &str) -> Result<PathBuf> {
-    let p = Path::new(rel);
+    // Accept either separator from callers; the index speaks `/`.
+    let rel_norm = normalize_rel(rel);
+    let p = Path::new(&rel_norm);
     if p.as_os_str().is_empty() {
         bail!("empty path is not allowed");
     }
@@ -107,6 +155,13 @@ pub fn validate_rel_path(root: &Path, rel: &str) -> Result<PathBuf> {
             Component::ParentDir => bail!("path traversal is not allowed: {rel}"),
             Component::Prefix(_) | Component::RootDir => {
                 bail!("absolute paths are not allowed: {rel}")
+            }
+            Component::Normal(name) => {
+                #[cfg(windows)]
+                if is_reserved_device(&name.to_string_lossy()) {
+                    bail!("reserved device name is not allowed: {rel}");
+                }
+                let _ = name;
             }
             _ => {}
         }
@@ -155,6 +210,22 @@ mod tests {
         assert_eq!(token_estimate(""), 0);
         assert_eq!(token_estimate("abcd"), 1);
         assert_eq!(token_estimate("abcde"), 2);
+    }
+
+    #[test]
+    fn normalize_rel_converts_backslashes() {
+        assert_eq!(normalize_rel("src\\util.rs"), "src/util.rs");
+        assert_eq!(normalize_rel("a\\b\\c"), "a/b/c");
+        assert_eq!(normalize_rel("already/unix"), "already/unix");
+    }
+
+    #[test]
+    fn validate_accepts_backslash_input_and_normalizes() {
+        // A Windows-style rel must validate and join correctly.
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        let out = validate_rel_path(dir.path(), "src\\lib.rs").unwrap();
+        assert!(out.ends_with("lib.rs"));
     }
 
     #[test]

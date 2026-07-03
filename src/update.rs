@@ -91,12 +91,16 @@ pub fn run(check_only: bool) -> Result<()> {
     let base = format!("https://github.com/{REPO}/releases/download/v{latest}");
     println!("updating {current} -> {latest} ...");
 
-    // Download the binary fully into memory.
+    // Download the binary fully into memory, capped: a compromised or
+    // MITM'd response must not drive OOM before the checksum is even checked.
+    const MAX_BINARY_BYTES: u64 = 128 * 1024 * 1024;
     let mut bin = Vec::new();
-    http_get(&format!("{base}/{asset}"))?
-        .into_reader()
+    std::io::Read::take(http_get(&format!("{base}/{asset}"))?.into_reader(), MAX_BINARY_BYTES + 1)
         .read_to_end(&mut bin)
         .context("downloading binary")?;
+    if bin.len() as u64 > MAX_BINARY_BYTES {
+        bail!("release binary exceeds {MAX_BINARY_BYTES} bytes; refusing (corrupt or hostile response)");
+    }
 
     // Download and parse the published checksum (`<hex>  <name>`).
     let sha_line = http_get(&format!("{base}/{asset}.sha256"))?

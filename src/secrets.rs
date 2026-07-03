@@ -27,7 +27,7 @@ pub fn detect(text: &str) -> Option<&'static str> {
             || matches!(
                 c,
                 '"' | '\'' | '`' | ',' | ';' | '(' | ')' | '<' | '>' | '=' | ':' | '{' | '}'
-                    | '[' | ']' | '|'
+                    | '[' | ']' | '|' | '@' | '/'
             )
     }) {
         if let Some(label) = classify_token(tok) {

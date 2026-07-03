@@ -8,6 +8,7 @@
 //!   limpet import  [--root <path>]        .limpet/memory.jsonl -> memory
 //!   limpet install [--dry-run]            register with Claude Code
 //!   limpet uninstall                      remove registration
+//!   limpet doctor  [--root <path>]        diagnose install/store health
 //!   limpet update  [--check]              self-update to the latest release
 
 use anyhow::{bail, Context, Result};
@@ -34,8 +35,10 @@ fn root_from(args: &[String]) -> Result<PathBuf> {
     let root = arg_value(args, "--root")
         .map(PathBuf::from)
         .unwrap_or(std::env::current_dir()?);
-    let root = root
-        .canonicalize()
+    // canonicalize_plain, not canonicalize: on Windows the latter returns a
+    // `\\?\` verbatim path that disables `/`->`\` translation and breaks
+    // every `root.join("src/foo")` the index performs.
+    let root = limpet::util::canonicalize_plain(&root)
         .with_context(|| format!("root does not exist: {}", root.display()))?;
     Ok(root)
 }
@@ -189,8 +192,12 @@ fn doctor_run(args: &[String]) -> Result<bool> {
         }
     };
 
-    // 1. The running binary.
-    let exe = std::env::current_exe().unwrap_or_default();
+    // 1. The running binary. Canonicalize the same way install does so the
+    // freshness comparison below is separator/verbatim-consistent on Windows.
+    let exe = std::env::current_exe()
+        .ok()
+        .and_then(|e| limpet::util::canonicalize_plain(&e).ok())
+        .unwrap_or_default();
     check(
         "binary",
         true,
@@ -218,7 +225,12 @@ fn doctor_run(args: &[String]) -> Result<bool> {
                                 )
                             },
                         );
-                        if exists && std::path::Path::new(cmd) != exe.as_path() {
+                        // Compare canonically: the registered path and the
+                        // running exe must resolve to the same file, not just
+                        // match byte-for-byte (verbatim/case/separators).
+                        let cmd_canon = limpet::util::canonicalize_plain(std::path::Path::new(cmd))
+                            .unwrap_or_else(|_| std::path::PathBuf::from(cmd));
+                        if exists && cmd_canon != exe {
                             check(
                                 "registration freshness",
                                 false,
@@ -316,8 +328,10 @@ fn doctor_run(args: &[String]) -> Result<bool> {
 }
 
 fn install(dry_run: bool) -> Result<()> {
-    let exe = std::env::current_exe()?
-        .canonicalize()
+    // Register a NON-verbatim path so Claude Code (libuv CreateProcessW) can
+    // spawn it and doctor's freshness check matches; canonicalize_plain
+    // strips the `\\?\` prefix on Windows.
+    let exe = limpet::util::canonicalize_plain(&std::env::current_exe()?)
         .context("resolving own binary path")?;
     let cfg_path = claude_config_path()?;
     let mut cfg: serde_json::Value = match std::fs::read_to_string(&cfg_path) {
@@ -401,6 +415,10 @@ fn uninstall() -> Result<()> {
             println!("removed /limpet skill ({})", skill.display());
         }
     }
-    println!("memory stores under ~/.local/share/limpet are untouched.");
+    // Print the ACTUAL data-dir base (APPDATA\limpet on Windows), not a
+    // hardcoded Unix path.
+    let base = store::Store::default_db_path(std::path::Path::new("."));
+    let data_dir = base.parent().and_then(|p| p.parent()).unwrap_or(&base);
+    println!("memory stores under {} are untouched.", data_dir.display());
     Ok(())
 }

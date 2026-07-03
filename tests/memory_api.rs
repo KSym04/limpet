@@ -300,6 +300,74 @@ fn link_to_missing_target_fails() {
 }
 
 #[test]
+fn import_rejects_secrets_future_dates_and_clamps_confidence() {
+    use std::io::BufReader;
+    let dir = TempDir::new().unwrap();
+    let mut store = seeded_store(dir.path());
+
+    // A hostile export: a secret-bearing body, a future-dated poison entry,
+    // and an out-of-range confidence.
+    let lines = concat!(
+        r#"{"id":"01SECRET0000000000000000AA","kind":"insight","body":"deploy key ghp_1234567890abcdefghijklmnopqrstuvwxyz here","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","source":"explicit","confidence":0.8,"status":"active","anchors":[],"links":[]}"#, "\n",
+        r#"{"id":"01FUTURE0000000000000000BB","kind":"fact","body":"benign but future dated","created_at":"9999-01-01T00:00:00Z","updated_at":"9999-01-01T00:00:00Z","source":"explicit","confidence":0.8,"status":"active","anchors":[],"links":[]}"#, "\n",
+        r#"{"id":"01CLAMP00000000000000000CC","kind":"fact","body":"huge confidence","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","source":"explicit","confidence":1e300,"status":"active","anchors":[],"links":[]}"#, "\n",
+    );
+    let report = store
+        .import_jsonl(&mut BufReader::new(lines.as_bytes()))
+        .unwrap();
+    assert_eq!(report.rejected, 2, "secret and future-date lines rejected");
+    assert_eq!(report.added, 1, "only the clamp line is applied");
+
+    let secret_present: i64 = store
+        .conn
+        .query_row("SELECT COUNT(*) FROM entries WHERE id = '01SECRET0000000000000000AA'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(secret_present, 0, "secret-bearing entry must never enter the store");
+
+    let conf: f64 = store
+        .conn
+        .query_row("SELECT confidence FROM entries WHERE id = '01CLAMP00000000000000000CC'", [], |r| r.get(0))
+        .unwrap();
+    assert!(conf <= 1.0, "confidence must be clamped, got {conf}");
+}
+
+#[test]
+fn import_reresolves_anchor_hash_against_local_index() {
+    use std::io::BufReader;
+    let dir = TempDir::new().unwrap();
+    let mut store = seeded_store(dir.path()); // seeds cache.py with cache_get
+
+    // A forged-fresh anchor: claims a hash the attacker chose. On import it
+    // must be replaced by cache_get's ACTUAL local hash (or left to resolve
+    // honestly), never trusted verbatim.
+    let line = r#"{"id":"01FORGED0000000000000000DD","kind":"fact","body":"cache_get behaviour","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","source":"explicit","confidence":0.8,"status":"active","anchors":[{"file":"cache.py","symbol_fqn":"cache.cache_get","ast_body_hash":"deadbeefdeadbeefdeadbeefdeadbeef","context_hint":null}],"links":[]}"#;
+    store.import_jsonl(&mut BufReader::new(line.as_bytes())).unwrap();
+
+    let (stored_hash, real_hash): (Option<String>, String) = store
+        .conn
+        .query_row(
+            "SELECT a.ast_body_hash, s.body_hash FROM anchors a
+             JOIN symbols s ON s.fqn = a.symbol_fqn
+             WHERE a.entry_id = '01FORGED0000000000000000DD'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(stored_hash.as_deref(), Some(real_hash.as_str()), "imported hash must be re-resolved to local");
+    assert_ne!(stored_hash.as_deref(), Some("deadbeefdeadbeefdeadbeefdeadbeef"), "forged hash must not survive");
+}
+
+#[test]
+fn oversize_body_is_refused() {
+    let dir = TempDir::new().unwrap();
+    let store = seeded_store(dir.path());
+    let huge = "x".repeat(70 * 1024);
+    let err = memory::remember(&store, "fact", &huge, "explicit", None, &[], None, &[], None)
+        .unwrap_err();
+    assert!(err.to_string().contains("limit"), "{err}");
+}
+
+#[test]
 fn jsonl_roundtrip_is_lossless() {
     let dir = TempDir::new().unwrap();
     let store = seeded_store(dir.path());
