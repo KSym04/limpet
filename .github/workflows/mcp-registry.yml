@@ -1,12 +1,15 @@
 name: mcp-registry
 
 # Publish server.json to the official MCP registry. OIDC proves ownership of
-# the io.github.ksym04/* namespace without any interactive login; runs on
-# every published release and on demand.
+# the io.github.KSym04/* namespace without any interactive login. Triggered
+# on tag push, not release-published: releases here are created by the
+# release workflow with GITHUB_TOKEN, and GitHub suppresses events from
+# GITHUB_TOKEN-authored actions to prevent recursion, so a release trigger
+# would never fire.
 on:
   workflow_dispatch:
-  release:
-    types: [published]
+  push:
+    tags: ["v*"]
 
 permissions:
   id-token: write
