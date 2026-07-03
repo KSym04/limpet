@@ -117,7 +117,7 @@ fn run() -> Result<()> {
                 // is still the OLD image; store/registration checks are
                 // image-independent.
                 println!("\n-- post-update doctor --");
-                let _ = doctor_run(&args);
+                let _ = doctor_run(&args, true);
             }
             Ok(())
         }
@@ -174,7 +174,7 @@ fn skill_path() -> Result<PathBuf> {
 /// Diagnose a broken or half-installed setup: the "it works on my other
 /// laptop but not here" command. Read-only except for opening the store.
 fn doctor(args: &[String]) -> Result<()> {
-    if doctor_run(args)? {
+    if doctor_run(args, false)? {
         Ok(())
     } else {
         std::process::exit(1);
@@ -183,7 +183,12 @@ fn doctor(args: &[String]) -> Result<()> {
 
 /// The checks themselves; returns overall health so install/update can run
 /// them automatically without turning a warning into a hard exit.
-fn doctor_run(args: &[String]) -> Result<bool> {
+///
+/// `post_update` is true when invoked right after `limpet update`: the swap
+/// already happened on disk, but THIS process is still the old code image,
+/// so its own version and the just-written store stamp read one behind.
+/// Say so instead of printing a confusingly stale number.
+fn doctor_run(args: &[String], post_update: bool) -> Result<bool> {
     let mut ok = true;
     let mut check = |name: &str, pass: bool, detail: String| {
         println!("{} {name}: {detail}", if pass { "ok  " } else { "FAIL" });
@@ -198,11 +203,16 @@ fn doctor_run(args: &[String]) -> Result<bool> {
         .ok()
         .and_then(|e| limpet::util::canonicalize_plain(&e).ok())
         .unwrap_or_default();
-    check(
-        "binary",
-        true,
-        format!("limpet {} at {}", env!("CARGO_PKG_VERSION"), exe.display()),
-    );
+    let running_ver = env!("CARGO_PKG_VERSION");
+    let binary_detail = if post_update {
+        format!(
+            "limpet {running_ver} at {} (this is the pre-restart image; restart to load the new binary)",
+            exe.display()
+        )
+    } else {
+        format!("limpet {running_ver} at {}", exe.display())
+    };
+    check("binary", true, binary_detail);
 
     // 2. Claude Code MCP registration.
     match claude_config_path() {
@@ -289,7 +299,12 @@ fn doctor_run(args: &[String]) -> Result<bool> {
                         .ok()
                         .flatten()
                         .unwrap_or_else(|| "unset".into());
-                    check("store version", true, format!("stamped {stamp}"));
+                    let detail = if post_update {
+                        format!("stamped {stamp} (updates to the new version on the next restart)")
+                    } else {
+                        format!("stamped {stamp}")
+                    };
+                    check("store version", true, detail);
                 }
                 Err(e) => check("store version", false, format!("{e}")),
             }
@@ -318,7 +333,10 @@ fn doctor_run(args: &[String]) -> Result<bool> {
         Err(e) => check("store", false, format!("cannot open: {e}")),
     }
 
-    if ok {
+    if ok && post_update {
+        println!("\nall checks passed. Restart Claude Code to load the new binary; \
+                  then `limpet doctor` will show the new version.");
+    } else if ok {
         println!("\nall checks passed. If tools still fail in Claude Code, restart it: \
                   running servers keep the old binary image until restart.");
     } else {
@@ -384,7 +402,7 @@ fn install(dry_run: bool) -> Result<()> {
     // Verify the setup that was just written, so a half-broken install is
     // caught here instead of as a mystery on first use.
     println!("\n-- post-install doctor --");
-    let _ = doctor_run(&[]);
+    let _ = doctor_run(&[], false);
     Ok(())
 }
 
