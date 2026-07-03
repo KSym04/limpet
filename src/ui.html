@@ -38,11 +38,15 @@
   .filters { margin-left: auto; display: flex; gap: 8px; }
   .filters button { background: none; border: 1px solid var(--line); color: var(--dim); border-radius: 4px; padding: 2px 10px; font: inherit; font-size: 11px; cursor: pointer; }
   .filters button.on { color: var(--text); border-color: var(--accent); }
+  #project-select { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 4px; padding: 2px 8px; font: inherit; font-size: 12px; }
 </style>
 </head>
 <body>
 <header>
-  <h1>limpet<span>://</span><span id="project">memory</span></h1>
+  <h1>limpet<span>://</span></h1>
+  <select id="project-select" title="project">
+    <option value="all">all projects</option>
+  </select>
   <span class="stat active"><b id="n-active">0</b> active</span>
   <span class="stat stale"><b id="n-stale">0</b> stale</span>
   <span class="stat invalidated"><b id="n-invalidated">0</b> invalidated</span>
@@ -85,11 +89,29 @@ function resize() {
 }
 window.addEventListener("resize", resize);
 
+let currentProject = "all";
+
+async function loadProjects() {
+  try {
+    const res = await fetch("/api/projects");
+    const projects = await res.json();
+    const sel = document.getElementById("project-select");
+    const keep = sel.value;
+    sel.innerHTML = '<option value="all">all projects</option>';
+    for (const p of projects) {
+      const opt = document.createElement("option");
+      opt.value = p.key;
+      opt.textContent = p.name;
+      sel.appendChild(opt);
+    }
+    sel.value = [...sel.options].some(o => o.value === keep) ? keep : "all";
+  } catch (e) { /* projects list is cosmetic; graph errors are surfaced */ }
+}
+
 async function load() {
   try {
-    const res = await fetch("/api/graph");
+    const res = await fetch("/api/graph?project=" + encodeURIComponent(currentProject));
     const data = await res.json();
-    document.getElementById("project").textContent = data.project || "memory";
     document.getElementById("indexed-at").textContent = data.indexed_at || "never";
     for (const key of ["active", "stale", "invalidated", "superseded"]) {
       document.getElementById("n-" + key).textContent = data.stats[key];
@@ -223,6 +245,7 @@ function showPanel(n) {
     resize(); return;
   }
   const flags = [];
+  if (n.project) flags.push(`<div class="row">project: <b>${esc(n.project)}</b></div>`);
   if (n.stale_reason) flags.push(`<div class="row">stale reason: <b>${esc(n.stale_reason)}</b></div>`);
   const reverify = n.reverify && n.status === "stale"
     ? `<div class="reverify">reverify: ${esc(n.reverify)}</div>` : "";
@@ -281,9 +304,19 @@ document.getElementById("filters").addEventListener("click", e => {
   for (const b of document.querySelectorAll(".filters button")) b.classList.toggle("on", b === btn);
 });
 
+document.getElementById("project-select").addEventListener("change", e => {
+  currentProject = e.target.value;
+  selected = null;
+  panel.classList.remove("open");
+  byId = new Map(); nodes = []; edges = [];
+  load();
+});
+
 resize();
+loadProjects();
 load();
 setInterval(load, 5000);
+setInterval(loadProjects, 15000);
 (function loop() { tick(); draw(); requestAnimationFrame(loop); })();
 </script>
 </body>

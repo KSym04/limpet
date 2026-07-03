@@ -6,22 +6,79 @@
 //! glance, plus contradiction and supersession relations.
 //!
 //! Security posture: binds 127.0.0.1 only, GET only, serves exactly one
-//! embedded HTML document and two JSON endpoints built from parameterized
-//! queries. No filesystem paths are ever derived from the request, so
-//! traversal is structurally impossible. No external network access.
+//! embedded HTML document and JSON endpoints built from parameterized
+//! queries. The project selector accepts only keys that exactly match an
+//! enumerated store directory, so no filesystem path is ever derived from
+//! request input. No external network access.
 
 use crate::store::Store;
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const UI_HTML: &str = include_str!("ui.html");
 
+/// Base directory holding one store per indexed repository.
+fn data_dir() -> PathBuf {
+    // default_db_path is <data_dir>/<repo_key>/store.db; peel two levels
+    // off a probe path to recover <data_dir> without duplicating the
+    // resolution logic.
+    let probe = Store::default_db_path(Path::new("."));
+    probe
+        .parent()
+        .and_then(|p| p.parent())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// Every indexed project: (repo_key, project_root, store path).
+/// Enumerated from disk on each call so newly indexed projects appear
+/// without restarting the UI.
+fn list_projects() -> Vec<(String, String, PathBuf)> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(data_dir()) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let db = entry.path().join("store.db");
+        if !db.is_file() {
+            continue;
+        }
+        let key = entry.file_name().to_string_lossy().into_owned();
+        let root = Store::open(&db)
+            .ok()
+            .and_then(|s| s.kv_get("project_root").ok().flatten())
+            .unwrap_or_else(|| key.clone());
+        out.push((key, root, db));
+    }
+    out.sort_by(|a, b| a.1.cmp(&b.1));
+    out
+}
+
+/// Resolve a ?project= query value to a store, strictly by exact match
+/// against the enumerated keys. Anything else is rejected.
+fn resolve_project(query: Option<&str>, default_root: &Path) -> Result<(Store, PathBuf)> {
+    match query {
+        Some(key) => {
+            let (_, root, db) = list_projects()
+                .into_iter()
+                .find(|(k, _, _)| k == key)
+                .with_context(|| format!("unknown project key '{key}'"))?;
+            Ok((Store::open(&db)?, PathBuf::from(root)))
+        }
+        None => {
+            let db = Store::default_db_path(default_root);
+            Ok((Store::open(&db)?, default_root.to_path_buf()))
+        }
+    }
+}
+
 pub fn serve_ui(root: &Path, port: u16) -> Result<()> {
-    let db_path = Store::default_db_path(root);
-    let store = Store::open(&db_path)?;
+    // Fail fast if the default project cannot open at all.
+    let _ = Store::open(&Store::default_db_path(root))?;
+    let default_key = crate::util::repo_key(root);
     let listener = TcpListener::bind(("127.0.0.1", port))
         .with_context(|| format!("binding 127.0.0.1:{port}"))?;
     println!("limpet ui on http://127.0.0.1:{port} (local only, Ctrl-C to stop)");
@@ -47,21 +104,56 @@ pub fn serve_ui(root: &Path, port: u16) -> Result<()> {
 
         let mut parts = request_line.split_whitespace();
         let method = parts.next().unwrap_or("");
-        let path = parts.next().unwrap_or("/");
+        let full_path = parts.next().unwrap_or("/");
+        let (path, query) = match full_path.split_once('?') {
+            Some((p, q)) => (p, Some(q)),
+            None => (full_path, None),
+        };
+        let project_param = query.and_then(|q| {
+            q.split('&')
+                .find_map(|kv| kv.strip_prefix("project="))
+                .map(str::to_string)
+        });
 
         let (status, ctype, body) = if method != "GET" {
             ("405 Method Not Allowed", "text/plain", "GET only".to_string())
         } else {
             match path {
                 "/" => ("200 OK", "text/html; charset=utf-8", UI_HTML.to_string()),
-                "/api/graph" => match graph_json(&store, root) {
-                    Ok(v) => ("200 OK", "application/json", v.to_string()),
-                    Err(e) => (
-                        "500 Internal Server Error",
-                        "application/json",
-                        json!({ "error": e.to_string() }).to_string(),
-                    ),
-                },
+                "/api/projects" => {
+                    let projects: Vec<Value> = list_projects()
+                        .into_iter()
+                        .map(|(key, root, _)| {
+                            let name = Path::new(&root)
+                                .file_name()
+                                .map(|s| s.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| key.clone());
+                            json!({
+                                "key": key,
+                                "name": name,
+                                "root": root,
+                                "default": key == default_key,
+                            })
+                        })
+                        .collect();
+                    ("200 OK", "application/json", json!(projects).to_string())
+                }
+                "/api/graph" => {
+                    let result = if project_param.as_deref() == Some("all") {
+                        all_projects_graph()
+                    } else {
+                        resolve_project(project_param.as_deref(), root)
+                            .and_then(|(store, proot)| graph_json(&store, &proot))
+                    };
+                    match result {
+                        Ok(v) => ("200 OK", "application/json", v.to_string()),
+                        Err(e) => (
+                            "500 Internal Server Error",
+                            "application/json",
+                            json!({ "error": e.to_string() }).to_string(),
+                        ),
+                    }
+                }
                 _ => ("404 Not Found", "text/plain", "not found".to_string()),
             }
         };
@@ -74,6 +166,63 @@ pub fn serve_ui(root: &Path, port: u16) -> Result<()> {
         let _ = stream.flush();
     }
     Ok(())
+}
+
+/// Merged view: every indexed project's memory in one graph. Node ids are
+/// namespaced with the project key so identical symbol names in different
+/// repositories never collide, and every node carries its project name for
+/// the detail panel.
+fn all_projects_graph() -> Result<Value> {
+    let mut nodes: Vec<Value> = Vec::new();
+    let mut edges: Vec<Value> = Vec::new();
+    let mut stats = serde_json::Map::new();
+    for k in ["active", "stale", "invalidated", "superseded"] {
+        stats.insert(k.to_string(), json!(0));
+    }
+    let mut latest_index: Option<String> = None;
+
+    for (key, root, db) in list_projects() {
+        let Ok(store) = Store::open(&db) else { continue };
+        let Ok(g) = graph_json(&store, Path::new(&root)) else { continue };
+        let project_name = g["project"]
+            .as_str()
+            .map(str::to_string)
+            .unwrap_or_else(|| key.clone());
+
+        if let Some(at) = g["indexed_at"].as_str() {
+            if latest_index.as_deref().map(|cur| at > cur).unwrap_or(true) {
+                latest_index = Some(at.to_string());
+            }
+        }
+        for k in ["active", "stale", "invalidated", "superseded"] {
+            let add = g["stats"][k].as_i64().unwrap_or(0);
+            let cur = stats[k].as_i64().unwrap_or(0);
+            stats.insert(k.to_string(), json!(cur + add));
+        }
+        for n in g["nodes"].as_array().into_iter().flatten() {
+            let mut n = n.clone();
+            let raw_id = n["id"].as_str().unwrap_or_default().to_string();
+            n["id"] = json!(format!("{key}:{raw_id}"));
+            n["project"] = json!(project_name);
+            nodes.push(n);
+        }
+        for e in g["edges"].as_array().into_iter().flatten() {
+            let mut e = e.clone();
+            let from = e["from"].as_str().unwrap_or_default().to_string();
+            let to = e["to"].as_str().unwrap_or_default().to_string();
+            e["from"] = json!(format!("{key}:{from}"));
+            e["to"] = json!(format!("{key}:{to}"));
+            edges.push(e);
+        }
+    }
+
+    Ok(json!({
+        "project": "all projects",
+        "indexed_at": latest_index,
+        "stats": Value::Object(stats),
+        "nodes": nodes,
+        "edges": edges,
+    }))
 }
 
 /// Build the graph payload: memory entries, the files/symbols they clamp
