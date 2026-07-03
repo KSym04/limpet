@@ -7,6 +7,8 @@ permissions:
   contents: write
 
 jobs:
+  # Fast, reliable platforms. The release is gated only on these so a scarce
+  # runner can never hold it up.
   build:
     strategy:
       fail-fast: false
@@ -14,9 +16,6 @@ jobs:
         include:
           - os: macos-latest
             target: aarch64-apple-darwin
-            archive: tar
-          - os: macos-13
-            target: x86_64-apple-darwin
             archive: tar
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
@@ -59,9 +58,8 @@ jobs:
             target/${{ matrix.target }}/release/limpet-${{ matrix.target }}.*
           if-no-files-found: error
 
-  # Single job publishes the release once. Generating release notes inside the
-  # build matrix (one run per platform) is what triplicated the notes: each
-  # matrix job re-published the release and re-appended the generated block.
+  # Single job publishes the release once (generating notes inside the build
+  # matrix is what previously triplicated the notes).
   publish:
     needs: build
     runs-on: ubuntu-latest
@@ -74,3 +72,31 @@ jobs:
         with:
           files: dist/*
           generate_release_notes: true
+
+  # Intel macOS runners are scarce and routinely queue for 15+ minutes, which
+  # used to stall the whole release. Build it out of band: it runs after the
+  # release is already published and attaches its asset when the runner frees.
+  # `continue-on-error` means a stuck or failed Intel build never fails the
+  # release.
+  macos-x86:
+    needs: publish
+    runs-on: macos-13
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+      - run: cargo build --release --locked --target x86_64-apple-darwin
+      - name: package and attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd target/x86_64-apple-darwin/release
+          T=x86_64-apple-darwin
+          cp limpet limpet-$T
+          shasum -a 256 limpet-$T > limpet-$T.sha256
+          tar czf limpet-$T.tar.gz limpet
+          shasum -a 256 limpet-$T.tar.gz > limpet-$T.tar.gz.sha256
+          gh release upload ${{ github.ref_name }} \
+            limpet-$T limpet-$T.sha256 limpet-$T.tar.gz limpet-$T.tar.gz.sha256 --clobber

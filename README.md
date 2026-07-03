@@ -142,6 +142,8 @@ limpet install
 
 Restart Claude Code. Done. (`limpet install --dry-run` previews the exact config changes first; `limpet uninstall` reverses them.)
 
+**Update later** with `limpet update`: it fetches the latest release binary for your platform, verifies it against the published sha256, and atomically replaces the running executable. `limpet update --check` reports whether a newer version exists without installing it. This is the only command that touches the network. Restart Claude Code afterward so the MCP server reloads onto the new binary.
+
 ## 🚀 Usage in 60 seconds
 
 **1. In any project, type `/limpet`.** It indexes the code, recalls everything already known (stale items flagged), and switches the session to memory-first mode.
@@ -168,6 +170,7 @@ Everyday commands:
 | `/limpet review` | re-verify stale facts using their stored proof commands |
 | `/limpet export` | write `.limpet/memory.jsonl` to commit and share with the team |
 | `limpet ui` | knowledge graph at http://127.0.0.1:9748, all projects in one view |
+| `limpet update` | self-update to the latest release, checksum-verified (the only networked command) |
 
 Data lives under `~/.local/share/limpet/`, one SQLite store per repository. Teammates run `limpet import` after pulling the JSONL.
 
@@ -179,7 +182,8 @@ Freshness model: every tool call runs a bounded incremental sweep (changed files
 
 ## 🔒 Security posture
 
-- **100% local.** No network calls anywhere in the codebase, no telemetry, no API keys, no cloud. The UI binds 127.0.0.1 and serves one embedded page, GET only.
+- **Local by default.** Indexing, recall, memory, and the UI make no network calls, ever: no telemetry, no API keys, no cloud. The one exception is `limpet update`, which you invoke explicitly; it fetches a checksum-verified release binary over HTTPS and sends nothing but a `limpet/<version>` User-Agent. The UI binds 127.0.0.1 and serves one embedded page, GET only.
+- **Secrets never persist.** `remember` scans every body and evidence output and refuses to store anything shaped like a credential (cloud access keys, provider tokens, PEM private-key blocks, JWTs), so a secret cannot reach the local store or a shared `.limpet/memory.jsonl`.
 - **No shell interpolation.** External commands (git only) run with argument arrays; no string ever reaches a shell.
 - **Path validation.** Every file path arriving over MCP is checked against the repository root; absolute paths and traversal are rejected at a single choke point.
 - **Parameterized SQL only.** No query in the codebase concatenates user input.
@@ -199,6 +203,7 @@ Freshness model: every tool call runs a bounded incremental sweep (changed files
 - More grammars (Go, Java, Ruby, C#, C/C++, Bash), each with fixture coverage before shipping
 - FS-event watcher (notify) to replace the on-call sweep on very large repos
 - Optional embedding reranking behind a feature flag, only if recall evals prove it earns its size
+- Signed release binaries (minisign) so `limpet update` verifies a maintainer signature, not just a same-origin checksum
 
 ## 📄 License
 
