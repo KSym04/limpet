@@ -581,6 +581,99 @@ fn origin_roundtrips_and_import_rejects_forged_origin_collision() {
 }
 
 #[test]
+fn origin_credential_shape_is_refused() {
+    let dir = TempDir::new().unwrap();
+    let store = seeded_store(dir.path());
+    // AWS-key-shaped origin must fire the secret detector and be refused.
+    // Split with concat! so external scanners do not flag this test file.
+    let aws_key = concat!("AKIAIOSFOD", "NN7EXAMPLE");
+    let err = memory::remember(
+        &store, "fact", "some fact", "explicit", None, &[], None, &[], None, false, Some(aws_key),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("origin"), "error must mention origin: {err}");
+
+    // 300-byte origin must also be refused.
+    let long_origin = "x".repeat(300);
+    let err2 = memory::remember(
+        &store, "fact", "some other fact", "explicit", None, &[], None, &[], None,
+        false, Some(long_origin.as_str()),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err2.contains("origin"), "error must mention origin: {err2}");
+}
+
+#[test]
+fn import_rejects_credential_shaped_origin() {
+    use std::io::BufReader;
+    let dir = TempDir::new().unwrap();
+    let mut store = seeded_store(dir.path());
+    // A line whose origin looks like an AWS key must be counted rejected.
+    // Split with concat! so external scanners do not flag this test file.
+    let aws_key = concat!("AKIAIOSFOD", "NN7EXAMPLE");
+    let line = format!(
+        r#"{{"id":"01CREDORG000000000000000AA","kind":"fact","body":"some body","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","source":"explicit","confidence":0.8,"status":"active","stale_reason":null,"branch":null,"evidence_cmd":null,"evidence_digest":null,"evidence_ran_at":null,"origin":"{aws_key}","anchors":[],"links":[]}}"#
+    );
+    let report = store
+        .import_jsonl(&mut BufReader::new(format!("{line}\n").as_bytes()))
+        .unwrap();
+    assert_eq!(report.rejected, 1, "credential-shaped origin must be rejected");
+    assert_eq!(report.added, 0);
+}
+
+#[test]
+fn lww_import_preserves_local_origin() {
+    use std::io::BufReader;
+    let dir = TempDir::new().unwrap();
+    let mut store = seeded_store(dir.path());
+
+    // Store an entry with an origin, then back-date it so the import line
+    // can win with a past timestamp that is still newer than the stored one
+    // without tripping the future-timestamp guard.
+    let r = memory::remember(
+        &store, "fact", "original body", "explicit", None, &[], None, &[], None,
+        false, Some("scan:git:orig"),
+    )
+    .unwrap();
+    store
+        .conn
+        .execute(
+            "UPDATE entries SET created_at='2020-01-01T00:00:00Z', updated_at='2020-01-01T00:00:00Z' WHERE id = ?1",
+            rusqlite::params![r.id],
+        )
+        .unwrap();
+
+    // Craft a JSON line with the same id, NO "origin" field, and a newer
+    // (but still past) updated_at.
+    let no_origin_line = format!(
+        r#"{{"id":"{}","kind":"fact","body":"updated body","created_at":"2020-01-01T00:00:00Z","updated_at":"2021-01-01T00:00:00Z","source":"explicit","confidence":0.8,"status":"active","stale_reason":null,"branch":null,"evidence_cmd":null,"evidence_digest":null,"evidence_ran_at":null,"anchors":[],"links":[]}}"#,
+        r.id
+    );
+    let report = store
+        .import_jsonl(&mut BufReader::new(format!("{no_origin_line}\n").as_bytes()))
+        .unwrap();
+    assert_eq!(report.updated, 1, "newer past timestamp must win the LWW merge");
+
+    // Body must be updated; origin must survive (COALESCE, not overwrite).
+    let (body, origin): (String, Option<String>) = store
+        .conn
+        .query_row(
+            "SELECT body, origin FROM entries WHERE id = ?1",
+            [&r.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(body, "updated body", "body must update on newer timestamp");
+    assert_eq!(
+        origin.as_deref(),
+        Some("scan:git:orig"),
+        "origin must survive LWW import that omits the origin field"
+    );
+}
+
+#[test]
 fn dispatch_remember_passes_private_and_origin() {
     let dir = TempDir::new().unwrap();
     let mut store = seeded_store(dir.path());

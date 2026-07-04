@@ -195,6 +195,12 @@ pub fn remember(
         if o.trim().is_empty() {
             bail!("origin must not be empty when provided");
         }
+        if o.len() > 256 {
+            bail!("origin is {} bytes; the limit is 256. An origin is a dedup key, not a payload.", o.len());
+        }
+        if let Some(kind) = crate::secrets::detect(o) {
+            bail!("refusing to store memory: origin looks like a {kind}. Use a source reference, not a credential.");
+        }
         let existing: Option<String> = store
             .conn
             .query_row("SELECT id FROM entries WHERE origin = ?1", [o], |r| r.get(0))

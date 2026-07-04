@@ -286,6 +286,7 @@ function draw() {
       if (n.private) {
         ctx.save();
         ctx.setLineDash([3, 3]);
+        ctx.lineWidth = 1;
         ctx.strokeStyle = "#7f8ea3";
         ctx.stroke();
         ctx.restore();

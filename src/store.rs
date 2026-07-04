@@ -120,20 +120,23 @@ END;
 /// Schema v2 (lazy migration): `private` marks a memory that must never
 /// leave this machine via export; `origin` is a caller-supplied dedup key
 /// (the scan flow stamps `scan:git:<sha>` etc.) enforced unique so a
-/// re-run cannot double-seed. Both run on every open: fresh databases get
-/// v1 from the batch above, then arrive here like any old store, so there
-/// is exactly one code path.
+/// re-run cannot double-seed. Each column is guarded independently so a
+/// crash between the two ALTER statements leaves the store recoverable on
+/// the next open; fresh databases get v1 from the batch above, then
+/// arrive here like any old store, so there is exactly one code path.
 fn migrate_to_v2(conn: &Connection) -> Result<()> {
-    let has_private: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM pragma_table_info('entries') WHERE name = 'private'",
-        [],
-        |r| r.get(0),
-    )?;
-    if has_private == 0 {
-        conn.execute_batch(
-            "ALTER TABLE entries ADD COLUMN private INTEGER NOT NULL DEFAULT 0;
-             ALTER TABLE entries ADD COLUMN origin TEXT;",
+    for (col, ddl) in [
+        ("private", "ALTER TABLE entries ADD COLUMN private INTEGER NOT NULL DEFAULT 0"),
+        ("origin", "ALTER TABLE entries ADD COLUMN origin TEXT"),
+    ] {
+        let present: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('entries') WHERE name = ?1",
+            [col],
+            |r| r.get(0),
         )?;
+        if present == 0 {
+            conn.execute_batch(ddl)?;
+        }
     }
     conn.execute_batch(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_entries_origin
@@ -402,6 +405,10 @@ impl Store {
             // origin would let a hostile export overwrite the dedup key space.
             let origin = obj["origin"].as_str();
             if let Some(o) = origin {
+                if o.len() > 256 || crate::secrets::detect(o).is_some() {
+                    report.rejected += 1;
+                    continue;
+                }
                 let clash: Option<String> = tx
                     .query_row(
                         "SELECT id FROM entries WHERE origin = ?1 AND id != ?2",
@@ -477,7 +484,7 @@ impl Store {
                    branch=excluded.branch, evidence_cmd=excluded.evidence_cmd,
                    evidence_digest=excluded.evidence_digest,
                    evidence_ran_at=excluded.evidence_ran_at,
-                   origin=excluded.origin",
+                   origin=COALESCE(excluded.origin, origin)",
                 rusqlite::params![
                     id,
                     obj["kind"].as_str().unwrap_or("insight"),
@@ -845,6 +852,35 @@ mod tests {
             [],
         );
         assert!(dup.is_err(), "duplicate origin must violate idx_entries_origin");
+    }
+
+    #[test]
+    fn half_migrated_store_survives_open() {
+        // Simulate a crash that added `private` but not `origin` (the old
+        // single-ALTER-batch failure window). Store::open must recover and
+        // produce a store with both columns present.
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = dir.path().join("store.db");
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(SCHEMA_V1).unwrap();
+            // Only the first ALTER — simulates crash before `origin` was added.
+            conn.execute_batch(
+                "ALTER TABLE entries ADD COLUMN private INTEGER NOT NULL DEFAULT 0",
+            )
+            .unwrap();
+        }
+        let s = Store::open(&db).unwrap();
+        let cols: Vec<String> = s
+            .conn
+            .prepare("SELECT name FROM pragma_table_info('entries')")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(cols.iter().any(|c| c == "private"), "private must be present: {cols:?}");
+        assert!(cols.iter().any(|c| c == "origin"), "origin must be added on recovery: {cols:?}");
     }
 
     #[test]
