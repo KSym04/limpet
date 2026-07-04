@@ -68,7 +68,10 @@ docs, long-body commits, and the assistant's project memory directory.
 
 1. Preflight: `admin` `{"op": "status"}` plus a recall for existing
    coverage. A non-empty store means gap-fill mode: drop any candidate a
-   recall already answers.
+   recall already answers. If the limpet binary was updated during this
+   session, the MCP server may still run the old image and will silently
+   drop `private`/`origin` arguments — restart the session before
+   seeding.
 2. Quality pre-check, before curating: percentage of commits with
    non-empty bodies, merge count, docs present. Thin history gets said
    plainly upfront ("history thin, expect few candidates") and shrinks
@@ -80,6 +83,9 @@ docs, long-body commits, and the assistant's project memory directory.
    (`%b` carries the why), plus docs and, on `deep`, the assistant
    project memory dir (skip silently when absent). Global assistant
    memory only after an explicit in-run confirmation, and always private.
+   Every proposed anchor path must be verified to exist (`ls`) before it
+   enters the candidate table — harvesters guess module names, and
+   `remember` rejects an unresolvable anchor loudly at write time.
 4. Curate to limpet's bar: kind (decision/episode/insight/intent), anchor
    (symbol if identifiable, else file), short standalone body. Reject
    anything derivable from a quick read of the code; keep the why, drop
@@ -90,9 +96,11 @@ docs, long-body commits, and the assistant's project memory directory.
    never bulk. Nothing is written before approval.
 6. Write each approved candidate via `remember` with an `origin` stamp
    (`scan:git:<sha>`, `scan:doc:<path>#<heading>`, `scan:mem:<file>`);
-   private-source items also pass `private: true`. A duplicate-origin
-   rejection means an earlier scan already stored it: count it as
-   skipped and move on.
+   private-source items also pass `private: true`. Origins are unique
+   per candidate: two candidates from the same doc section need
+   disambiguated stamps (`#section-death`, `#section-heal`), never a
+   shared one. A duplicate-origin rejection means an earlier scan
+   already stored it: count it as skipped and move on.
 7. Report honestly: seeded by kind, skipped (including origin dups),
    private count, and the pre-check verdict.
 
