@@ -283,6 +283,13 @@ function draw() {
       if (n.source === "verified") {
         ctx.lineWidth = 2; ctx.strokeStyle = "#d8e1ea"; ctx.stroke();
       }
+      if (n.private) {
+        ctx.save();
+        ctx.setLineDash([3, 3]);
+        ctx.strokeStyle = "#7f8ea3";
+        ctx.stroke();
+        ctx.restore();
+      }
     } else {
       ctx.fillStyle = "#3d4b5c";
       ctx.fillRect(n.x - r, n.y - r, r * 2, r * 2);
@@ -324,6 +331,7 @@ function showPanel(n) {
       <span class="badge ${esc(n.status)}">${esc(n.status)}</span>
       <span class="badge kind">${esc(n.kind)}</span>
       <span class="badge kind">${esc(n.source)}</span>
+      ${n.private ? '<span class="badge kind">private</span>' : ""}
     </div>
     <div class="body">${esc(n.body)}</div>
     <div class="row">confidence <b>${n.conf}</b></div>

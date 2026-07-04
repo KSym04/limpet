@@ -321,7 +321,7 @@ pub fn graph_json(store: &Store, root: &Path) -> Result<Value> {
 
     let mut estmt = store.conn.prepare(
         "SELECT id, kind, body, status, stale_reason, source, confidence,
-                created_at, evidence_cmd
+                created_at, evidence_cmd, private
          FROM entries",
     )?;
     let entries: Vec<Value> = estmt
@@ -337,6 +337,7 @@ pub fn graph_json(store: &Store, root: &Path) -> Result<Value> {
                 "conf": (r.get::<_, f64>(6)? * 100.0).round() / 100.0,
                 "on": r.get::<_, String>(7)?,
                 "reverify": r.get::<_, Option<String>>(8)?,
+                "private": r.get::<_, i64>(9)? != 0,
             }))
         })?
         .collect::<rusqlite::Result<_>>()?;
