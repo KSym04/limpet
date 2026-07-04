@@ -579,3 +579,28 @@ fn origin_roundtrips_and_import_rejects_forged_origin_collision() {
     assert_eq!(rep2.rejected, 1);
     assert_eq!(rep2.added, 0);
 }
+
+#[test]
+fn dispatch_remember_passes_private_and_origin() {
+    let dir = TempDir::new().unwrap();
+    let mut store = seeded_store(dir.path());
+    let args = serde_json::json!({
+        "kind": "insight",
+        "body": "seeded via scan, stays local",
+        "private": true,
+        "origin": "scan:doc:README#setup"
+    });
+    let out = limpet::tools::dispatch(&mut store, dir.path(), "remember", &args).unwrap();
+    let id = out["data"]["id"].as_str().unwrap().to_string();
+    let (private, origin): (i64, Option<String>) = store
+        .conn
+        .query_row("SELECT private, origin FROM entries WHERE id = ?1", [&id], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    assert_eq!(private, 1);
+    assert_eq!(origin.as_deref(), Some("scan:doc:README#setup"));
+
+    let status = limpet::tools::dispatch(&mut store, dir.path(), "admin", &serde_json::json!({"op":"status"})).unwrap();
+    assert_eq!(status["data"]["private"].as_i64(), Some(1));
+}
