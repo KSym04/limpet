@@ -261,12 +261,12 @@ impl Store {
     ///
     /// One entry per line, ULID-sorted, stable field order. Text format so
     /// team sharing via git produces reviewable, mergeable diffs.
-    pub fn export_jsonl(&self, w: &mut impl Write) -> Result<usize> {
+    pub fn export_jsonl(&self, w: &mut impl Write) -> Result<ExportReport> {
         let mut stmt = self.conn.prepare(
             "SELECT id, kind, body, created_at, updated_at, source, confidence,
                     status, stale_reason, branch, evidence_cmd, evidence_digest,
-                    evidence_ran_at
-             FROM entries ORDER BY id",
+                    evidence_ran_at, origin
+             FROM entries WHERE private = 0 ORDER BY id",
         )?;
         let ids: Vec<serde_json::Value> = stmt
             .query_map([], |r| {
@@ -284,6 +284,7 @@ impl Store {
                     "evidence_cmd": r.get::<_, Option<String>>(10)?,
                     "evidence_digest": r.get::<_, Option<String>>(11)?,
                     "evidence_ran_at": r.get::<_, Option<String>>(12)?,
+                    "origin": r.get::<_, Option<String>>(13)?,
                 }))
             })?
             .collect::<rusqlite::Result<_>>()?;
@@ -321,7 +322,10 @@ impl Store {
             writeln!(w, "{}", serde_json::to_string(&obj)?)?;
             count += 1;
         }
-        Ok(count)
+        let private_withheld: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM entries WHERE private = 1", [], |r| r.get(0))?;
+        Ok(ExportReport { exported: count, private_withheld: private_withheld as usize })
     }
 
     /// Import entries from JSONL produced by `export_jsonl`.
@@ -394,6 +398,23 @@ impl Store {
                 continue;
             }
 
+            // An origin names ONE memory. A different id claiming an existing
+            // origin would let a hostile export overwrite the dedup key space.
+            let origin = obj["origin"].as_str();
+            if let Some(o) = origin {
+                let clash: Option<String> = tx
+                    .query_row(
+                        "SELECT id FROM entries WHERE origin = ?1 AND id != ?2",
+                        rusqlite::params![o, id],
+                        |r| r.get(0),
+                    )
+                    .ok();
+                if clash.is_some() {
+                    report.rejected += 1;
+                    continue;
+                }
+            }
+
             let existing: Option<String> = match tx.query_row(
                 "SELECT updated_at FROM entries WHERE id = ?1",
                 [&id],
@@ -446,8 +467,8 @@ impl Store {
             tx.execute(
                 "INSERT INTO entries(id, kind, body, created_at, updated_at, source,
                                      confidence, status, stale_reason, branch,
-                                     evidence_cmd, evidence_digest, evidence_ran_at)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
+                                     evidence_cmd, evidence_digest, evidence_ran_at, origin)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
                  ON CONFLICT(id) DO UPDATE SET
                    kind=excluded.kind, body=excluded.body,
                    created_at=excluded.created_at, updated_at=excluded.updated_at,
@@ -455,7 +476,8 @@ impl Store {
                    status=excluded.status, stale_reason=excluded.stale_reason,
                    branch=excluded.branch, evidence_cmd=excluded.evidence_cmd,
                    evidence_digest=excluded.evidence_digest,
-                   evidence_ran_at=excluded.evidence_ran_at",
+                   evidence_ran_at=excluded.evidence_ran_at,
+                   origin=excluded.origin",
                 rusqlite::params![
                     id,
                     obj["kind"].as_str().unwrap_or("insight"),
@@ -472,6 +494,7 @@ impl Store {
                     obj["evidence_cmd"].as_str(),
                     obj["evidence_digest"].as_str(),
                     obj["evidence_ran_at"].as_str(),
+                    origin,
                 ],
             )?;
             tx.execute("DELETE FROM anchors WHERE entry_id = ?1", [&id])?;
@@ -672,6 +695,14 @@ fn ver_tuple(v: &str) -> (u64, u64, u64) {
         it.next().unwrap_or(0),
         it.next().unwrap_or(0),
     )
+}
+
+#[derive(Debug, Default, PartialEq, serde::Serialize)]
+pub struct ExportReport {
+    pub exported: usize,
+    /// Private memories deliberately withheld from the shared file. Reported
+    /// so "1 exported" next to "12 in the store" is explainable, not spooky.
+    pub private_withheld: usize,
 }
 
 #[derive(Debug, Default, PartialEq, serde::Serialize)]

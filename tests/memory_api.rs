@@ -448,7 +448,7 @@ fn jsonl_roundtrip_is_lossless() {
     .unwrap();
 
     let mut exported = Vec::new();
-    let n = store.export_jsonl(&mut exported).unwrap();
+    let n = store.export_jsonl(&mut exported).unwrap().exported;
     assert_eq!(n, 2);
 
     let dir2 = TempDir::new().unwrap();
@@ -532,4 +532,50 @@ fn private_and_origin_are_stored() {
         .unwrap();
     assert_eq!(private, 1);
     assert_eq!(origin.as_deref(), Some("scan:mem:notes.md"));
+}
+
+#[test]
+fn export_withholds_private_and_reports_count() {
+    let dir = TempDir::new().unwrap();
+    let store = seeded_store(dir.path());
+    memory::remember(&store, "fact", "public knowledge", "explicit", None, &[], None, &[], None, false, None).unwrap();
+    memory::remember(&store, "insight", "machine-local secret sauce", "explicit", None, &[], None, &[], None, true, None).unwrap();
+
+    let mut out = Vec::new();
+    let report = store.export_jsonl(&mut out).unwrap();
+    assert_eq!(report.exported, 1);
+    assert_eq!(report.private_withheld, 1);
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.contains("public knowledge"));
+    assert!(!text.contains("machine-local"), "private body leaked into export");
+}
+
+#[test]
+fn origin_roundtrips_and_import_rejects_forged_origin_collision() {
+    let dir = TempDir::new().unwrap();
+    let store = seeded_store(dir.path());
+    memory::remember(&store, "decision", "seeded from PR 12", "explicit", None, &[], None, &[], None, false, Some("scan:git:pr12")).unwrap();
+
+    let mut out = Vec::new();
+    store.export_jsonl(&mut out).unwrap();
+    assert!(String::from_utf8_lossy(&out).contains("scan:git:pr12"));
+
+    // Import into a fresh store: origin lands, so a scan re-run there dedups.
+    let dir2 = TempDir::new().unwrap();
+    let mut fresh = seeded_store(dir2.path());
+    let rep = fresh.import_jsonl(&mut std::io::BufReader::new(out.as_slice())).unwrap();
+    assert_eq!(rep.added, 1);
+    let origin: Option<String> = fresh
+        .conn
+        .query_row("SELECT origin FROM entries LIMIT 1", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(origin.as_deref(), Some("scan:git:pr12"));
+
+    // A different id claiming the same origin is a forgery; rejected, not applied.
+    let forged = r#"{"id":"01AAAAAAAAAAAAAAAAAAAAAAAA","kind":"fact","body":"impostor","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-02T00:00:00Z","source":"explicit","confidence":0.8,"status":"active","stale_reason":null,"branch":null,"evidence_cmd":null,"evidence_digest":null,"evidence_ran_at":null,"origin":"scan:git:pr12","anchors":[],"links":[]}"#;
+    let rep2 = fresh
+        .import_jsonl(&mut std::io::BufReader::new(format!("{forged}\n").as_bytes()))
+        .unwrap();
+    assert_eq!(rep2.rejected, 1);
+    assert_eq!(rep2.added, 0);
 }

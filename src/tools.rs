@@ -535,8 +535,8 @@ fn tool_admin(store: &mut Store, root: &Path, sweep: &SweepReport, args: &Value)
                 std::fs::create_dir_all(dir)?;
             }
             let mut f = std::fs::File::create(&path)?;
-            let count = store.export_jsonl(&mut f)?;
-            json!({ "exported": count, "path": path.to_string_lossy() })
+            let report = store.export_jsonl(&mut f)?;
+            json!({ "exported": report.exported, "private_withheld": report.private_withheld, "path": path.to_string_lossy() })
         }
         "import" => {
             let default_path = root.join(".limpet/memory.jsonl");
