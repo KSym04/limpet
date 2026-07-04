@@ -52,15 +52,15 @@ plainly. Global assistant memory: explicit in-run confirm, always private.
 
 ## Task Implementation Checklist
 
-- [ ] store: `private` + `origin` columns + schema bump + migration test
-- [ ] store: origin uniqueness check; duplicate rejected naming existing id
-- [ ] tools: remember accepts `private` + `origin`; tool schema updated
-- [ ] export: exclusion + withheld count + test
-- [ ] ui: private badge; status: private count
-- [ ] src/skill.md: /limpet scan Arguments entry + flow section (light/deep,
+- [x] store: `private` + `origin` columns + schema bump + migration test
+- [x] store: origin uniqueness check; duplicate rejected naming existing id
+- [x] tools: remember accepts `private` + `origin`; tool schema updated
+- [x] export: exclusion + withheld count + test
+- [x] ui: private badge; status: private count
+- [x] src/skill.md: /limpet scan Arguments entry + flow section (light/deep,
       pre-check, subagent harvest, two-tier gate, origin stamping)
-- [ ] README: "Seeding from history" + tool param table
-- [ ] tests green incl. remember-private roundtrip + origin dedup
+- [x] README: "Seeding from history" + tool param table
+- [x] tests green incl. remember-private roundtrip + origin dedup
 - [ ] dogfood on fresh repo (not limpet: store warm); NO RELEASE until Ken
       tests
 
