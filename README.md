@@ -315,7 +315,7 @@ Toggle it off with `/limpet statusline` (writes `~/.claude/.limpet-statusline-of
 
 ### Seeding a project
 
-`/limpet scan` cold-starts a repository's memory from what already exists: merge commits, tags, docs, and (on `deep` depth) the assistant's project memory directory. A preflight recall catches any candidates the store already answers, so re-runs only add gaps. The harvest runs in a subagent to keep raw git output and doc dumps out of the main context; only the curated candidate table comes back. You approve candidates in two tiers before anything is written: high-confidence items as a single block (reject-by-exception), borderlines one at a time. Each approved memory is stamped with an `origin` so duplicates are caught on future scans, and private-source items are stored with `private: true` so they are never exported.
+`/limpet scan` cold-starts a repository's memory from what already exists. `light` mode (default) harvests merge commits, tags, and the README; `deep` adds all docs, long-body commits, and the assistant's project memory directory. A preflight recall catches any candidates the store already answers, so re-runs only add gaps. The harvest runs in a subagent to keep raw git output and doc dumps out of the main context; only the curated candidate table comes back. You approve candidates in two tiers before anything is written: high-confidence items as a single block (reject-by-exception), borderlines one at a time. Each approved memory is stamped with an `origin` so duplicates are caught on future scans, and private-source items are stored with `private: true` so they are never exported.
 
 ## 🌳 Whole repo indexed, thin on purpose
 
