@@ -33,6 +33,8 @@ fn remember_anchors_and_reports_duplicates() {
         None,
         &[],
         Some("main"),
+        false,
+        None,
     )
     .unwrap();
     assert_eq!(first.anchored, 1);
@@ -49,6 +51,8 @@ fn remember_anchors_and_reports_duplicates() {
         None,
         &[],
         Some("main"),
+        false,
+        None,
     )
     .unwrap();
     assert!(
@@ -77,6 +81,8 @@ fn unknown_symbol_fails_with_suggestions() {
         None,
         &[],
         None,
+        false,
+        None,
     )
     .unwrap_err();
     let msg = err.to_string();
@@ -103,6 +109,8 @@ fn unresolvable_anchor_fails_loud_and_writes_nothing() {
         ],
         None,
         &[],
+        None,
+        false,
         None,
     )
     .unwrap_err();
@@ -135,6 +143,8 @@ fn failed_symbol_anchor_leaves_no_orphan_entry() {
         None,
         &[],
         None,
+        false,
+        None,
     )
     .unwrap_err();
     let entries: i64 = store
@@ -159,6 +169,8 @@ fn file_anchor_stores_content_hash_at_write_time() {
         None,
         &[],
         None,
+        false,
+        None,
     )
     .unwrap();
     assert_eq!(r.anchored, 1);
@@ -179,7 +191,7 @@ fn verified_without_evidence_is_refused() {
     let dir = TempDir::new().unwrap();
     let store = seeded_store(dir.path());
     let err = memory::remember(
-        &store, "fact", "claims to be proven", "verified", None, &[], None, &[], None,
+        &store, "fact", "claims to be proven", "verified", None, &[], None, &[], None, false, None,
     )
     .unwrap_err();
     assert!(err.to_string().contains("evidence"), "{err}");
@@ -204,6 +216,8 @@ fn ambiguous_bare_name_is_refused_with_candidates() {
         None,
         &[],
         None,
+        false,
+        None,
     )
     .unwrap_err();
     let msg = err.to_string();
@@ -215,16 +229,16 @@ fn ambiguous_bare_name_is_refused_with_candidates() {
 fn kind_and_source_validation() {
     let dir = TempDir::new().unwrap();
     let store = seeded_store(dir.path());
-    assert!(memory::remember(&store, "vibe", "x", "explicit", None, &[], None, &[], None).is_err());
-    assert!(memory::remember(&store, "fact", "", "explicit", None, &[], None, &[], None).is_err());
-    assert!(memory::remember(&store, "fact", "x", "psychic", None, &[], None, &[], None).is_err());
+    assert!(memory::remember(&store, "vibe", "x", "explicit", None, &[], None, &[], None, false, None).is_err());
+    assert!(memory::remember(&store, "fact", "", "explicit", None, &[], None, &[], None, false, None).is_err());
+    assert!(memory::remember(&store, "fact", "x", "psychic", None, &[], None, &[], None, false, None).is_err());
 }
 
 #[test]
 fn mined_confidence_is_capped() {
     let dir = TempDir::new().unwrap();
     let store = seeded_store(dir.path());
-    let r = memory::remember(&store, "episode", "tried X, failed", "mined", Some(0.9), &[], None, &[], None)
+    let r = memory::remember(&store, "episode", "tried X, failed", "mined", Some(0.9), &[], None, &[], None, false, None)
         .unwrap();
     let conf: f64 = store
         .conn
@@ -237,7 +251,7 @@ fn mined_confidence_is_capped() {
 fn contradiction_keeps_both_supersede_resolves() {
     let dir = TempDir::new().unwrap();
     let store = seeded_store(dir.path());
-    let old = memory::remember(&store, "fact", "timeout is 30 seconds", "explicit", None, &[], None, &[], None)
+    let old = memory::remember(&store, "fact", "timeout is 30 seconds", "explicit", None, &[], None, &[], None, false, None)
         .unwrap();
     let new = memory::remember(
         &store,
@@ -248,6 +262,8 @@ fn contradiction_keeps_both_supersede_resolves() {
         &[],
         None,
         &[LinkSpec { target: old.id.clone(), rel: "contradicts".into() }],
+        None,
+        false,
         None,
     )
     .unwrap();
@@ -294,7 +310,7 @@ fn contradiction_keeps_both_supersede_resolves() {
 fn link_to_missing_target_fails() {
     let dir = TempDir::new().unwrap();
     let store = seeded_store(dir.path());
-    let r = memory::remember(&store, "fact", "x", "explicit", None, &[], None, &[], None).unwrap();
+    let r = memory::remember(&store, "fact", "x", "explicit", None, &[], None, &[], None, false, None).unwrap();
     assert!(memory::add_link(&store, &r.id, "01НЕСУЩЕСТВУЕТ", "supports").is_err());
     assert!(memory::add_link(&store, &r.id, &r.id, "invalid_rel").is_err());
 }
@@ -362,7 +378,7 @@ fn oversize_body_is_refused() {
     let dir = TempDir::new().unwrap();
     let store = seeded_store(dir.path());
     let huge = "x".repeat(70 * 1024);
-    let err = memory::remember(&store, "fact", &huge, "explicit", None, &[], None, &[], None)
+    let err = memory::remember(&store, "fact", &huge, "explicit", None, &[], None, &[], None, false, None)
         .unwrap_err();
     assert!(err.to_string().contains("limit"), "{err}");
 }
@@ -377,7 +393,7 @@ fn penalized_confidence_stays_clean_and_roundtrips() {
     index::full_index(&store, root).unwrap();
     let a = memory::remember(
         &store, "fact", "f body", "explicit", Some(0.8),
-        &[AnchorSpec { file: "s.py".into(), symbol: Some("f".into()) }], None, &[], None,
+        &[AnchorSpec { file: "s.py".into(), symbol: Some("f".into()) }], None, &[], None, false, None,
     )
     .unwrap();
     // Edit the body several times to drive repeated resolution/penalty.
@@ -412,6 +428,8 @@ fn jsonl_roundtrip_is_lossless() {
         None,
         &[],
         Some("main"),
+        false,
+        None,
     )
     .unwrap();
     let _b = memory::remember(
@@ -423,6 +441,8 @@ fn jsonl_roundtrip_is_lossless() {
         &[],
         Some(&memory::Evidence { command: "pytest -q".into(), output: "2 passed".into() }),
         &[LinkSpec { target: a.id.clone(), rel: "supports".into() }],
+        None,
+        false,
         None,
     )
     .unwrap();
@@ -455,4 +475,61 @@ fn jsonl_roundtrip_is_lossless() {
         .unwrap();
     assert_eq!(report2.added, 0);
     assert_eq!(report2.skipped, 2);
+}
+
+#[test]
+fn origin_dedup_rejects_second_write_naming_existing_id() {
+    let dir = TempDir::new().unwrap();
+    let store = seeded_store(dir.path());
+    let first = memory::remember(
+        &store, "decision", "auth uses JWT", "explicit", None, &[], None, &[], None,
+        false, Some("scan:git:abc123"),
+    )
+    .unwrap();
+    let err = memory::remember(
+        &store, "decision", "different body, same source commit", "explicit", None, &[], None, &[], None,
+        false, Some("scan:git:abc123"),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("duplicate origin"), "{err}");
+    assert!(err.contains(&first.id), "error must name the existing id: {err}");
+    let count: i64 = store
+        .conn
+        .query_row("SELECT COUNT(*) FROM entries", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 1, "the rejected write must persist nothing");
+}
+
+#[test]
+fn empty_origin_is_refused() {
+    let dir = TempDir::new().unwrap();
+    let store = seeded_store(dir.path());
+    let err = memory::remember(
+        &store, "fact", "x", "explicit", None, &[], None, &[], None, false, Some("  "),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("origin"), "{err}");
+}
+
+#[test]
+fn private_and_origin_are_stored() {
+    let dir = TempDir::new().unwrap();
+    let store = seeded_store(dir.path());
+    let r = memory::remember(
+        &store, "insight", "kept off the shared export", "explicit", None, &[], None, &[], None,
+        true, Some("scan:mem:notes.md"),
+    )
+    .unwrap();
+    let (private, origin): (i64, Option<String>) = store
+        .conn
+        .query_row(
+            "SELECT private, origin FROM entries WHERE id = ?1",
+            [&r.id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(private, 1);
+    assert_eq!(origin.as_deref(), Some("scan:mem:notes.md"));
 }

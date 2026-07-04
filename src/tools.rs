@@ -195,6 +195,8 @@ fn tool_remember(store: &Store, root: &Path, sweep: &SweepReport, args: &Value) 
         evidence.as_ref(),
         &links,
         branch.as_deref(),
+        false,
+        None,
     )?;
     let meta = build_meta(
         store,

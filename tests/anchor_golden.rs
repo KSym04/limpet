@@ -32,6 +32,8 @@ fn seed(root: &std::path::Path) -> (Store, String) {
         None,
         &[],
         None,
+        false,
+        None,
     )
     .unwrap();
     (store, result.id)
@@ -200,6 +202,8 @@ fn verified_fact_gets_reverify_flag_when_stale() {
         }),
         &[],
         None,
+        false,
+        None,
     )
     .unwrap();
 
@@ -243,6 +247,8 @@ fn file_anchor_goes_stale_on_edit_and_invalidated_on_delete() {
         &[AnchorSpec { file: "interior.twig".into(), symbol: None }],
         None,
         &[],
+        None,
+        false,
         None,
     )
     .unwrap();
@@ -288,6 +294,8 @@ fn legacy_file_anchor_without_hash_is_backfilled_not_killed() {
         None,
         &[],
         None,
+        false,
+        None,
     )
     .unwrap();
     // Simulate a v0.4.0 store where file anchors carried no hash.
@@ -329,6 +337,8 @@ fn one_dead_anchor_degrades_multi_anchor_memory_instead_of_killing_it() {
         ],
         None,
         &[],
+        None,
+        false,
         None,
     )
     .unwrap();
@@ -386,6 +396,8 @@ fn superseded_never_resurrects() {
         None,
         &[memory::LinkSpec { target: id.clone(), rel: "supersedes".into() }],
         None,
+        false,
+        None,
     )
     .unwrap();
     let _ = mutate_and_resolve(&store, dir.path());
@@ -442,6 +454,8 @@ fn cpp_rename_is_followed() {
         None,
         &[],
         None,
+        false,
+        None,
     )
     .unwrap();
 
@@ -478,6 +492,8 @@ fn file_anchor_follows_a_move() {
         &[AnchorSpec { file: "hero.twig".into(), symbol: None }],
         None,
         &[],
+        None,
+        false,
         None,
     )
     .unwrap();

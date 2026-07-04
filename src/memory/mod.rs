@@ -171,6 +171,8 @@ pub fn remember(
     evidence: Option<&Evidence>,
     links: &[LinkSpec],
     branch: Option<&str>,
+    private: bool,
+    origin: Option<&str>,
 ) -> Result<RememberResult> {
     if !KINDS.contains(&kind) {
         bail!("unknown kind '{kind}' (expected one of {KINDS:?})");
@@ -182,6 +184,21 @@ pub fn remember(
     // 0.95-confidence fact with nothing to re-verify (audit 2026-07).
     if source == "verified" && evidence.is_none() {
         bail!("source 'verified' requires evidence {{command, output}}; pass the proof or use source 'explicit'");
+    }
+    // Origin is a dedup key, not free text: the scan flow stamps
+    // `scan:git:<sha>` so a re-run is rejected here instead of relying on
+    // the caller to check first (I-SC4).
+    if let Some(o) = origin {
+        if o.trim().is_empty() {
+            bail!("origin must not be empty when provided");
+        }
+        let existing: Option<String> = store
+            .conn
+            .query_row("SELECT id FROM entries WHERE origin = ?1", [o], |r| r.get(0))
+            .ok();
+        if let Some(existing) = existing {
+            bail!("duplicate origin '{o}': already stored as {existing}");
+        }
     }
     if body.trim().is_empty() {
         bail!("body must not be empty");
@@ -225,9 +242,11 @@ pub fn remember(
     store.conn.execute(
         "INSERT INTO entries(id, kind, body, created_at, updated_at, source,
                              confidence, status, branch,
-                             evidence_cmd, evidence_digest, evidence_ran_at)
-         VALUES (?1,?2,?3,?4,?4,?5,?6,'active',?7,?8,?9,?10)",
-        params![id, kind, body, now, source, conf, branch, ev_cmd, ev_digest, ev_at],
+                             evidence_cmd, evidence_digest, evidence_ran_at,
+                             private, origin)
+         VALUES (?1,?2,?3,?4,?4,?5,?6,'active',?7,?8,?9,?10,?11,?12)",
+        params![id, kind, body, now, source, conf, branch, ev_cmd, ev_digest, ev_at,
+                private as i64, origin],
     )?;
 
     let mut anchored = 0usize;
