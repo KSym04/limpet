@@ -10,7 +10,7 @@ use rusqlite::Connection;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 pub struct Store {
     pub conn: Connection,
@@ -117,6 +117,36 @@ CREATE TRIGGER IF NOT EXISTS entries_au AFTER UPDATE OF body ON entries BEGIN
 END;
 "#;
 
+/// Schema v2 (lazy migration): `private` marks a memory that must never
+/// leave this machine via export; `origin` is a caller-supplied dedup key
+/// (the scan flow stamps `scan:git:<sha>` etc.) enforced unique so a
+/// re-run cannot double-seed. Both run on every open: fresh databases get
+/// v1 from the batch above, then arrive here like any old store, so there
+/// is exactly one code path.
+fn migrate_to_v2(conn: &Connection) -> Result<()> {
+    let has_private: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('entries') WHERE name = 'private'",
+        [],
+        |r| r.get(0),
+    )?;
+    if has_private == 0 {
+        conn.execute_batch(
+            "ALTER TABLE entries ADD COLUMN private INTEGER NOT NULL DEFAULT 0;
+             ALTER TABLE entries ADD COLUMN origin TEXT;",
+        )?;
+    }
+    conn.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_entries_origin
+         ON entries(origin) WHERE origin IS NOT NULL;",
+    )?;
+    conn.execute(
+        "INSERT INTO meta_kv(k, v) VALUES('schema_version', ?1)
+         ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+        [SCHEMA_VERSION.to_string()],
+    )?;
+    Ok(())
+}
+
 impl Store {
     /// Open (creating if needed) the store at an explicit database path.
     pub fn open(db_path: &Path) -> Result<Store> {
@@ -130,11 +160,7 @@ impl Store {
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.execute_batch(SCHEMA_V1)?;
-        conn.execute(
-            "INSERT INTO meta_kv(k, v) VALUES('schema_version', ?1)
-             ON CONFLICT(k) DO NOTHING",
-            [SCHEMA_VERSION.to_string()],
-        )?;
+        migrate_to_v2(&conn)?;
         Ok(Store { conn, session_base: std::cell::Cell::new(Ledger::default()) })
     }
 
@@ -143,6 +169,7 @@ impl Store {
         let conn = Connection::open_in_memory()?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.execute_batch(SCHEMA_V1)?;
+        migrate_to_v2(&conn)?;
         Ok(Store { conn, session_base: std::cell::Cell::new(Ledger::default()) })
     }
 
@@ -757,5 +784,62 @@ mod tests {
             Some("2026-07-03T00:00:00Z")
         );
         assert_eq!(s.kv_get("nope").unwrap(), None);
+    }
+
+    #[test]
+    fn schema_v2_adds_private_and_origin() {
+        let s = Store::open_in_memory().unwrap();
+        let cols: Vec<String> = s
+            .conn
+            .prepare("SELECT name FROM pragma_table_info('entries')")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(cols.iter().any(|c| c == "private"), "missing private: {cols:?}");
+        assert!(cols.iter().any(|c| c == "origin"), "missing origin: {cols:?}");
+
+        // Partial unique index: two NULL origins fine, two equal origins refused.
+        s.conn
+            .execute(
+                "INSERT INTO entries(id, kind, body, created_at, updated_at, source, confidence, origin)
+                 VALUES ('a','fact','x','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z','explicit',0.8,'scan:git:abc')",
+                [],
+            )
+            .unwrap();
+        let dup = s.conn.execute(
+            "INSERT INTO entries(id, kind, body, created_at, updated_at, source, confidence, origin)
+             VALUES ('b','fact','y','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z','explicit',0.8,'scan:git:abc')",
+            [],
+        );
+        assert!(dup.is_err(), "duplicate origin must violate idx_entries_origin");
+    }
+
+    #[test]
+    fn v1_store_migrates_in_place() {
+        // Simulate a database created by a 0.7.x binary: raw v1 schema only.
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = dir.path().join("store.db");
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(SCHEMA_V1).unwrap();
+            conn.execute(
+                "INSERT INTO entries(id, kind, body, created_at, updated_at, source, confidence)
+                 VALUES ('old1','fact','pre-migration entry','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z','explicit',0.8)",
+                [],
+            )
+            .unwrap();
+        }
+        let s = Store::open(&db).unwrap();
+        let (private, origin): (i64, Option<String>) = s
+            .conn
+            .query_row("SELECT private, origin FROM entries WHERE id='old1'", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(private, 0, "pre-existing rows default to not-private");
+        assert_eq!(origin, None);
+        assert_eq!(s.kv_get("schema_version").unwrap().as_deref(), Some("2"));
     }
 }
