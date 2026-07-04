@@ -1,5 +1,5 @@
 {
-  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.KSym04/limpet",
   "description": "Persistent engineering memory for AI coding agents. Survives refactors, knows when it is stale.",
   "repository": {
