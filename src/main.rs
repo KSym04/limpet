@@ -10,6 +10,7 @@
 //!   limpet uninstall                      remove registration
 //!   limpet doctor  [--root <path>]        diagnose install/store health
 //!   limpet statusline [--root <path>]     statusline segment, read-only
+//!   limpet hook    [--root <path>]        SessionStart brief, read-only
 //!   limpet update  [--check]              self-update to the latest release
 
 use anyhow::{bail, Context, Result};
@@ -106,6 +107,10 @@ fn run() -> Result<()> {
             print_statusline(&args);
             Ok(())
         }
+        "hook" => {
+            print_hook_brief(&args);
+            Ok(())
+        }
         "install" => install(args.iter().any(|a| a == "--dry-run")),
         "uninstall" => uninstall(),
         "stats" => {
@@ -153,6 +158,7 @@ USAGE:
   limpet stats   [--root <path>]   token-savings ledger (session + lifetime)
   limpet doctor  [--root <path>]   diagnose install/registration/store issues
   limpet statusline [--root <path>]   render the statusline segment (read-only)
+  limpet hook    [--root <path>]   SessionStart brief for Claude Code hooks (read-only)
   limpet export  [--root <path>]   write memory to .limpet/memory.jsonl
   limpet import  [--root <path>]   read memory from .limpet/memory.jsonl
   limpet install [--dry-run]       register with Claude Code (user scope)
@@ -175,6 +181,61 @@ fn print_statusline(args: &[String]) {
             println!("{seg}");
         }
     }
+}
+
+/// SessionStart hook brief: one plain-text line telling the agent this
+/// project already has limpet memory, so it works memory-first without
+/// being asked. Same never-break contract as the statusline: prints
+/// nothing and exits 0 when there is no store, the memory is empty, or
+/// anything goes wrong; strictly read-only. Plain text, no ANSI — the
+/// output is injected into the model's context, not a terminal.
+fn print_hook_brief(args: &[String]) {
+    if let Ok(brief) = hook_brief(args) {
+        if !brief.is_empty() {
+            println!("{brief}");
+        }
+    }
+}
+
+fn hook_brief(args: &[String]) -> Result<String> {
+    let root = root_from(args)?;
+    let db = store::Store::default_db_path(&root);
+    if !db.is_file() {
+        return Ok(String::new());
+    }
+    let conn = rusqlite::Connection::open_with_flags(
+        &db,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    let (active, stale, reverify): (i64, i64, i64) = conn.query_row(
+        "SELECT COALESCE(SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN status = 'stale' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN status = 'stale' AND source = 'verified'
+                              THEN 1 ELSE 0 END), 0)
+         FROM entries",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    if active + stale == 0 {
+        return Ok(String::new());
+    }
+    let mut brief = format!(
+        "This project has limpet memory: {active} active memories"
+    );
+    if stale > 0 {
+        brief.push_str(&format!(", {stale} stale"));
+    }
+    if reverify > 0 {
+        brief.push_str(&format!(
+            " ({reverify} verified fact{} awaiting re-proof)",
+            if reverify == 1 { "" } else { "s" }
+        ));
+    }
+    brief.push_str(
+        ". Work memory-first: invoke the limpet skill (/limpet), or call the \
+         limpet recall tool with your task before reading files.",
+    );
+    Ok(brief)
 }
 
 fn statusline_segment(args: &[String]) -> Result<String> {

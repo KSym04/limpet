@@ -281,6 +281,7 @@ Everyday commands:
 | `limpet doctor` | one-screen setup diagnosis; also runs automatically after install and update |
 | `limpet ui` | knowledge graph at http://127.0.0.1:9748, all projects in one view |
 | `limpet statusline` | the statusline segment (memories + tokens saved), read-only and instant |
+| `limpet hook` | one-line SessionStart brief for Claude Code hooks, read-only |
 | `limpet update` | self-update to the latest release, checksum-verified (the only networked command) |
 
 Data lives under `~/.local/share/limpet/`, one SQLite store per repository. Teammates run `limpet import` after pulling the JSONL.
@@ -293,6 +294,24 @@ $limpetSeg = & limpet statusline --root $projectDir
 ```
 
 Toggle it off with `/limpet statusline` (writes `~/.claude/.limpet-statusline-off`; the command honors the flag).
+
+**Auto-recall at session start.** Without any hook, memory-first behavior depends on the agent remembering to type `/limpet`. With a SessionStart hook, every new session in an already-indexed project opens with a one-line brief injected into context — "This project has limpet memory: 13 active memories, 2 stale…" — and the agent recalls before it reads. Add to `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "PATH=\"$HOME/.local/bin:$HOME/.cargo/bin:$PATH\" limpet hook" }
+        ]
+      }
+    ]
+  }
+}
+```
+
+`limpet hook` prints nothing when the project has no store (sessions outside indexed repos stay clean), opens the store strictly read-only, and always exits 0. The explicit PATH prefix matters: hooks run in a non-login shell that often lacks `~/.local/bin` and `~/.cargo/bin`, and a silently-missing binary is exactly the kind of failure this command is designed never to surface. On Windows use `%USERPROFILE%\AppData\Local\Programs\limpet\limpet.exe hook`.
 
 ## 🌳 Whole repo indexed, thin on purpose
 

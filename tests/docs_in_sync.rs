@@ -61,7 +61,7 @@ fn documented_cli_commands_exist() {
     // command set is a subset of it.
     let help = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs"))
         .expect("main.rs");
-    for cmd in ["serve", "index", "status", "stats", "doctor", "export", "import", "install", "uninstall", "update", "ui", "statusline"] {
+    for cmd in ["serve", "index", "status", "stats", "doctor", "export", "import", "install", "uninstall", "update", "ui", "statusline", "hook"] {
         assert!(
             help.contains(&format!("\"{cmd}\"")),
             "README documents `limpet {cmd}` but main.rs has no such match arm"
