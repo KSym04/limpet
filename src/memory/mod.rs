@@ -161,6 +161,9 @@ fn resolve_anchor(store: &Store, spec: &AnchorSpec) -> Result<ResolvedAnchor> {
 /// Store a memory entry. Anchors are resolved against the live index at
 /// write time so the entry is born with valid hashes; the entry plus all
 /// its anchors and links persist atomically, or not at all.
+/// Positional API kept deliberately; a params struct is staged in
+/// .superpowers/sdd/rememberoptions-refactor.patch for a reviewed follow-up.
+#[allow(clippy::too_many_arguments)]
 pub fn remember(
     store: &Store,
     kind: &str,
@@ -171,6 +174,8 @@ pub fn remember(
     evidence: Option<&Evidence>,
     links: &[LinkSpec],
     branch: Option<&str>,
+    private: bool,
+    origin: Option<&str>,
 ) -> Result<RememberResult> {
     if !KINDS.contains(&kind) {
         bail!("unknown kind '{kind}' (expected one of {KINDS:?})");
@@ -182,6 +187,27 @@ pub fn remember(
     // 0.95-confidence fact with nothing to re-verify (audit 2026-07).
     if source == "verified" && evidence.is_none() {
         bail!("source 'verified' requires evidence {{command, output}}; pass the proof or use source 'explicit'");
+    }
+    // Origin is a dedup key, not free text: the scan flow stamps
+    // `scan:git:<sha>` so a re-run is rejected here instead of relying on
+    // the caller to check first (I-SC4).
+    if let Some(o) = origin {
+        if o.trim().is_empty() {
+            bail!("origin must not be empty when provided");
+        }
+        if o.len() > 256 {
+            bail!("origin is {} bytes; the limit is 256. An origin is a dedup key, not a payload.", o.len());
+        }
+        if let Some(kind) = crate::secrets::detect(o) {
+            bail!("refusing to store memory: origin looks like a {kind}. Use a source reference, not a credential.");
+        }
+        let existing: Option<String> = store
+            .conn
+            .query_row("SELECT id FROM entries WHERE origin = ?1", [o], |r| r.get(0))
+            .ok();
+        if let Some(existing) = existing {
+            bail!("duplicate origin '{o}': already stored as {existing}");
+        }
     }
     if body.trim().is_empty() {
         bail!("body must not be empty");
@@ -225,9 +251,11 @@ pub fn remember(
     store.conn.execute(
         "INSERT INTO entries(id, kind, body, created_at, updated_at, source,
                              confidence, status, branch,
-                             evidence_cmd, evidence_digest, evidence_ran_at)
-         VALUES (?1,?2,?3,?4,?4,?5,?6,'active',?7,?8,?9,?10)",
-        params![id, kind, body, now, source, conf, branch, ev_cmd, ev_digest, ev_at],
+                             evidence_cmd, evidence_digest, evidence_ran_at,
+                             private, origin)
+         VALUES (?1,?2,?3,?4,?4,?5,?6,'active',?7,?8,?9,?10,?11,?12)",
+        params![id, kind, body, now, source, conf, branch, ev_cmd, ev_digest, ev_at,
+                private as i64, origin],
     )?;
 
     let mut anchored = 0usize;

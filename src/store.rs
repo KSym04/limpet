@@ -10,7 +10,7 @@ use rusqlite::Connection;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 pub struct Store {
     pub conn: Connection,
@@ -117,6 +117,39 @@ CREATE TRIGGER IF NOT EXISTS entries_au AFTER UPDATE OF body ON entries BEGIN
 END;
 "#;
 
+/// Schema v2 (lazy migration): `private` marks a memory that must never
+/// leave this machine via export; `origin` is a caller-supplied dedup key
+/// (the scan flow stamps `scan:git:<sha>` etc.) enforced unique so a
+/// re-run cannot double-seed. Each column is guarded independently so a
+/// crash between the two ALTER statements leaves the store recoverable on
+/// the next open; fresh databases get v1 from the batch above, then
+/// arrive here like any old store, so there is exactly one code path.
+fn migrate_to_v2(conn: &Connection) -> Result<()> {
+    for (col, ddl) in [
+        ("private", "ALTER TABLE entries ADD COLUMN private INTEGER NOT NULL DEFAULT 0"),
+        ("origin", "ALTER TABLE entries ADD COLUMN origin TEXT"),
+    ] {
+        let present: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('entries') WHERE name = ?1",
+            [col],
+            |r| r.get(0),
+        )?;
+        if present == 0 {
+            conn.execute_batch(ddl)?;
+        }
+    }
+    conn.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_entries_origin
+         ON entries(origin) WHERE origin IS NOT NULL;",
+    )?;
+    conn.execute(
+        "INSERT INTO meta_kv(k, v) VALUES('schema_version', ?1)
+         ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+        [SCHEMA_VERSION.to_string()],
+    )?;
+    Ok(())
+}
+
 impl Store {
     /// Open (creating if needed) the store at an explicit database path.
     pub fn open(db_path: &Path) -> Result<Store> {
@@ -130,11 +163,7 @@ impl Store {
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.execute_batch(SCHEMA_V1)?;
-        conn.execute(
-            "INSERT INTO meta_kv(k, v) VALUES('schema_version', ?1)
-             ON CONFLICT(k) DO NOTHING",
-            [SCHEMA_VERSION.to_string()],
-        )?;
+        migrate_to_v2(&conn)?;
         Ok(Store { conn, session_base: std::cell::Cell::new(Ledger::default()) })
     }
 
@@ -143,6 +172,7 @@ impl Store {
         let conn = Connection::open_in_memory()?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.execute_batch(SCHEMA_V1)?;
+        migrate_to_v2(&conn)?;
         Ok(Store { conn, session_base: std::cell::Cell::new(Ledger::default()) })
     }
 
@@ -234,12 +264,12 @@ impl Store {
     ///
     /// One entry per line, ULID-sorted, stable field order. Text format so
     /// team sharing via git produces reviewable, mergeable diffs.
-    pub fn export_jsonl(&self, w: &mut impl Write) -> Result<usize> {
+    pub fn export_jsonl(&self, w: &mut impl Write) -> Result<ExportReport> {
         let mut stmt = self.conn.prepare(
             "SELECT id, kind, body, created_at, updated_at, source, confidence,
                     status, stale_reason, branch, evidence_cmd, evidence_digest,
-                    evidence_ran_at
-             FROM entries ORDER BY id",
+                    evidence_ran_at, origin
+             FROM entries WHERE private = 0 ORDER BY id",
         )?;
         let ids: Vec<serde_json::Value> = stmt
             .query_map([], |r| {
@@ -257,6 +287,7 @@ impl Store {
                     "evidence_cmd": r.get::<_, Option<String>>(10)?,
                     "evidence_digest": r.get::<_, Option<String>>(11)?,
                     "evidence_ran_at": r.get::<_, Option<String>>(12)?,
+                    "origin": r.get::<_, Option<String>>(13)?,
                 }))
             })?
             .collect::<rusqlite::Result<_>>()?;
@@ -294,7 +325,10 @@ impl Store {
             writeln!(w, "{}", serde_json::to_string(&obj)?)?;
             count += 1;
         }
-        Ok(count)
+        let private_withheld: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM entries WHERE private = 1", [], |r| r.get(0))?;
+        Ok(ExportReport { exported: count, private_withheld: private_withheld as usize })
     }
 
     /// Import entries from JSONL produced by `export_jsonl`.
@@ -367,6 +401,27 @@ impl Store {
                 continue;
             }
 
+            // An origin names ONE memory. A different id claiming an existing
+            // origin would let a hostile export overwrite the dedup key space.
+            let origin = obj["origin"].as_str();
+            if let Some(o) = origin {
+                if o.len() > 256 || crate::secrets::detect(o).is_some() {
+                    report.rejected += 1;
+                    continue;
+                }
+                let clash: Option<String> = tx
+                    .query_row(
+                        "SELECT id FROM entries WHERE origin = ?1 AND id != ?2",
+                        rusqlite::params![o, id],
+                        |r| r.get(0),
+                    )
+                    .ok();
+                if clash.is_some() {
+                    report.rejected += 1;
+                    continue;
+                }
+            }
+
             let existing: Option<String> = match tx.query_row(
                 "SELECT updated_at FROM entries WHERE id = ?1",
                 [&id],
@@ -419,8 +474,8 @@ impl Store {
             tx.execute(
                 "INSERT INTO entries(id, kind, body, created_at, updated_at, source,
                                      confidence, status, stale_reason, branch,
-                                     evidence_cmd, evidence_digest, evidence_ran_at)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
+                                     evidence_cmd, evidence_digest, evidence_ran_at, origin)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
                  ON CONFLICT(id) DO UPDATE SET
                    kind=excluded.kind, body=excluded.body,
                    created_at=excluded.created_at, updated_at=excluded.updated_at,
@@ -428,7 +483,8 @@ impl Store {
                    status=excluded.status, stale_reason=excluded.stale_reason,
                    branch=excluded.branch, evidence_cmd=excluded.evidence_cmd,
                    evidence_digest=excluded.evidence_digest,
-                   evidence_ran_at=excluded.evidence_ran_at",
+                   evidence_ran_at=excluded.evidence_ran_at,
+                   origin=COALESCE(excluded.origin, origin)",
                 rusqlite::params![
                     id,
                     obj["kind"].as_str().unwrap_or("insight"),
@@ -445,6 +501,7 @@ impl Store {
                     obj["evidence_cmd"].as_str(),
                     obj["evidence_digest"].as_str(),
                     obj["evidence_ran_at"].as_str(),
+                    origin,
                 ],
             )?;
             tx.execute("DELETE FROM anchors WHERE entry_id = ?1", [&id])?;
@@ -648,6 +705,14 @@ fn ver_tuple(v: &str) -> (u64, u64, u64) {
 }
 
 #[derive(Debug, Default, PartialEq, serde::Serialize)]
+pub struct ExportReport {
+    pub exported: usize,
+    /// Private memories deliberately withheld from the shared file. Reported
+    /// so "1 exported" next to "12 in the store" is explainable, not spooky.
+    pub private_withheld: usize,
+}
+
+#[derive(Debug, Default, PartialEq, serde::Serialize)]
 pub struct ImportReport {
     pub added: usize,
     pub updated: usize,
@@ -757,5 +822,91 @@ mod tests {
             Some("2026-07-03T00:00:00Z")
         );
         assert_eq!(s.kv_get("nope").unwrap(), None);
+    }
+
+    #[test]
+    fn schema_v2_adds_private_and_origin() {
+        let s = Store::open_in_memory().unwrap();
+        let cols: Vec<String> = s
+            .conn
+            .prepare("SELECT name FROM pragma_table_info('entries')")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(cols.iter().any(|c| c == "private"), "missing private: {cols:?}");
+        assert!(cols.iter().any(|c| c == "origin"), "missing origin: {cols:?}");
+
+        // Partial unique index: two NULL origins fine, two equal origins refused.
+        s.conn
+            .execute(
+                "INSERT INTO entries(id, kind, body, created_at, updated_at, source, confidence, origin)
+                 VALUES ('a','fact','x','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z','explicit',0.8,'scan:git:abc')",
+                [],
+            )
+            .unwrap();
+        let dup = s.conn.execute(
+            "INSERT INTO entries(id, kind, body, created_at, updated_at, source, confidence, origin)
+             VALUES ('b','fact','y','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z','explicit',0.8,'scan:git:abc')",
+            [],
+        );
+        assert!(dup.is_err(), "duplicate origin must violate idx_entries_origin");
+    }
+
+    #[test]
+    fn half_migrated_store_survives_open() {
+        // Simulate a crash that added `private` but not `origin` (the old
+        // single-ALTER-batch failure window). Store::open must recover and
+        // produce a store with both columns present.
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = dir.path().join("store.db");
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(SCHEMA_V1).unwrap();
+            // Only the first ALTER — simulates crash before `origin` was added.
+            conn.execute_batch(
+                "ALTER TABLE entries ADD COLUMN private INTEGER NOT NULL DEFAULT 0",
+            )
+            .unwrap();
+        }
+        let s = Store::open(&db).unwrap();
+        let cols: Vec<String> = s
+            .conn
+            .prepare("SELECT name FROM pragma_table_info('entries')")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(cols.iter().any(|c| c == "private"), "private must be present: {cols:?}");
+        assert!(cols.iter().any(|c| c == "origin"), "origin must be added on recovery: {cols:?}");
+    }
+
+    #[test]
+    fn v1_store_migrates_in_place() {
+        // Simulate a database created by a 0.7.x binary: raw v1 schema only.
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = dir.path().join("store.db");
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(SCHEMA_V1).unwrap();
+            conn.execute(
+                "INSERT INTO entries(id, kind, body, created_at, updated_at, source, confidence)
+                 VALUES ('old1','fact','pre-migration entry','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z','explicit',0.8)",
+                [],
+            )
+            .unwrap();
+        }
+        let s = Store::open(&db).unwrap();
+        let (private, origin): (i64, Option<String>) = s
+            .conn
+            .query_row("SELECT private, origin FROM entries WHERE id='old1'", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(private, 0, "pre-existing rows default to not-private");
+        assert_eq!(origin, None);
+        assert_eq!(s.kv_get("schema_version").unwrap().as_deref(), Some("2"));
     }
 }

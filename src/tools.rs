@@ -183,6 +183,8 @@ fn tool_remember(store: &Store, root: &Path, sweep: &SweepReport, args: &Value) 
         Some(v) => serde_json::from_value(v.clone()).context("parsing links")?,
         None => Vec::new(),
     };
+    let private = args.get("private").and_then(Value::as_bool).unwrap_or(false);
+    let origin = args.get("origin").and_then(Value::as_str);
     let branch = current_branch(root);
 
     let result = memory::remember(
@@ -195,6 +197,8 @@ fn tool_remember(store: &Store, root: &Path, sweep: &SweepReport, args: &Value) 
         evidence.as_ref(),
         &links,
         branch.as_deref(),
+        private,
+        origin,
     )?;
     let meta = build_meta(
         store,
@@ -498,6 +502,9 @@ fn tool_admin(store: &mut Store, root: &Path, sweep: &SweepReport, args: &Value)
                 store.conn.query_row("SELECT COUNT(*) FROM symbols", [], |r| r.get(0))?;
             let entries: i64 =
                 store.conn.query_row("SELECT COUNT(*) FROM entries", [], |r| r.get(0))?;
+            let private: i64 = store
+                .conn
+                .query_row("SELECT COUNT(*) FROM entries WHERE private = 1", [], |r| r.get(0))?;
             let by_status: Vec<Value> = {
                 let mut stmt = store.conn.prepare(
                     "SELECT status, COUNT(*) FROM entries GROUP BY status",
@@ -514,6 +521,7 @@ fn tool_admin(store: &mut Store, root: &Path, sweep: &SweepReport, args: &Value)
             };
             json!({
                 "files": files, "symbols": symbols, "entries": entries,
+                "private": private,
                 "entries_by_status": by_status,
                 "root": root.to_string_lossy(),
             })
@@ -533,8 +541,8 @@ fn tool_admin(store: &mut Store, root: &Path, sweep: &SweepReport, args: &Value)
                 std::fs::create_dir_all(dir)?;
             }
             let mut f = std::fs::File::create(&path)?;
-            let count = store.export_jsonl(&mut f)?;
-            json!({ "exported": count, "path": path.to_string_lossy() })
+            let report = store.export_jsonl(&mut f)?;
+            json!({ "exported": report.exported, "private_withheld": report.private_withheld, "path": path.to_string_lossy() })
         }
         "import" => {
             let default_path = root.join(".limpet/memory.jsonl");
@@ -676,7 +684,9 @@ pub fn tool_schemas() -> Value {
                         "rel": { "type": "string", "enum": ["supports","contradicts","supersedes"] }
                     }, "required": ["target","rel"] } },
                     "source": { "type": "string", "enum": ["explicit","mined"] },
-                    "confidence": { "type": "number" }
+                    "confidence": { "type": "number" },
+                    "private": { "type": "boolean", "description": "Keep this memory on this machine only: it is recalled locally but withheld from admin export / .limpet/memory.jsonl. Default false." },
+                    "origin": { "type": "string", "description": "Optional dedup key naming the memory's source (e.g. scan:git:<sha>). A second remember with the same origin is rejected, which makes scan re-runs idempotent." }
                 },
                 "required": ["kind", "body"]
             }
@@ -704,7 +714,7 @@ pub fn tool_schemas() -> Value {
         },
         {
             "name": "admin",
-            "description": "Maintenance: op=index (full reindex), status, forget (id), export / import (JSONL at .limpet/memory.jsonl for team sharing via git), ledger (token-savings receipt: session + lifetime + methodology) / ledger_reset.",
+            "description": "Maintenance: op=index (full reindex), status (includes private count), forget (id), export / import (JSONL at .limpet/memory.jsonl for team sharing via git — private memories are withheld from export and counted in private_withheld), ledger (token-savings receipt: session + lifetime + methodology) / ledger_reset.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

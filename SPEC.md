@@ -1,3 +1,71 @@
+# SPEC - /limpet scan: seed memory from history + private flag (approved, next minor)
+
+Status: APPROVED DESIGN. Full spec: docs/superpowers/specs/2026-07-04-limpet-scan-design.md
+
+## Core Architecture
+
+Scan orchestration = skill layer only (src/skill.md). Binary gains ONLY
+private-memory support. No new CLI subcommand, no network.
+
+| Layer | Responsibility |
+|---|---|
+| skill (src/skill.md) | quality pre-check -> harvest in SUBAGENT (raw git/docs never hit main context) -> curate to kinds+anchors -> two-tier review gate -> `remember` -> honest report |
+| remember tool | new optional `private` bool (default false) + `origin` string (scan:git:<sha> etc.); duplicate origin rejected naming existing id |
+| store | additive `private` + `origin` columns (origin indexed), schema bump, version_guard as-is |
+| admin export | withholds private items; reports "N private withheld" |
+| ui / status | private badge; private count |
+
+Depth modes: `light` default (merges+tags+README), `deep` full source set.
+Volume cap 25/scan, value-ranked; input caps 100 merges / 200 subjects /
+bounded doc reads. Idempotency ENFORCED by origin dedup in binary;
+recall-check trims proposals first. Review gate: high-confidence tier =
+one block, reject-by-exception; borderline = item-level; private = ALWAYS
+item-level. Thin history: pre-check flags, scope shrinks, report says so
+plainly. Global assistant memory: explicit in-run confirm, always private.
+
+## INVARIANTS
+
+- I-SC1: nothing written to store before user approves its batch.
+- I-SC2: a private memory never appears in memory.jsonl output.
+- I-SC3: credential filter applies to seeded bodies unchanged; `private` is
+  not a bypass.
+- I-SC4: re-running scan on a warm store adds only gaps, never duplicates;
+  enforced by binary-side origin uniqueness, not prompt discipline.
+- I-SC5: skill degrades silently when a source is absent (shallow clone,
+  no docs, no memory dir); never blocks on a missing source.
+- I-SC6: private candidates never enter a bulk approval; item-level only.
+- I-SC7: scan report never overstates yield; thin harvest reported as thin.
+
+## ATTACK SURFACE
+
+- Junk flood: heuristic-free curation bar (reject anything derivable from a
+  quick code read) + 25 cap + review gate.
+- Private leak: export exclusion tested; import path unaffected (exports
+  never carry private items).
+- Prompt-injectable source content (commit bodies, docs): review gate is the
+  human checkpoint before any write; harvest subagent output is candidates
+  only, never executed instructions.
+- Origin forgery via import: origin column is local-store metadata; export
+  never carries private items and import re-validates as today.
+- Rubber-stamp fatigue: two-tier gate keeps decisions ~2 blocks + borderline
+  handful; private exempt from bulk.
+
+## Task Implementation Checklist
+
+- [x] store: `private` + `origin` columns + schema bump + migration test
+- [x] store: origin uniqueness check; duplicate rejected naming existing id
+- [x] tools: remember accepts `private` + `origin`; tool schema updated
+- [x] export: exclusion + withheld count + test
+- [x] ui: private badge; status: private count
+- [x] src/skill.md: /limpet scan Arguments entry + flow section (light/deep,
+      pre-check, subagent harvest, two-tier gate, origin stamping)
+- [x] README: "Seeding from history" + tool param table
+- [x] tests green incl. remember-private roundtrip + origin dedup
+- [ ] dogfood on fresh repo (not limpet: store warm); NO RELEASE until Ken
+      tests
+
+---
+
 # SPEC — cost_to_learn + authority-weighted recall (proposed, ~v0.9)
 
 Status: DESIGN. Gated on the recall_eval precision suite and the bench like
