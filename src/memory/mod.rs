@@ -161,6 +161,9 @@ fn resolve_anchor(store: &Store, spec: &AnchorSpec) -> Result<ResolvedAnchor> {
 /// Store a memory entry. Anchors are resolved against the live index at
 /// write time so the entry is born with valid hashes; the entry plus all
 /// its anchors and links persist atomically, or not at all.
+/// Positional API kept deliberately; a params struct is staged in
+/// .superpowers/sdd/rememberoptions-refactor.patch for a reviewed follow-up.
+#[allow(clippy::too_many_arguments)]
 pub fn remember(
     store: &Store,
     kind: &str,
