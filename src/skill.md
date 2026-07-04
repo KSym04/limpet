@@ -60,6 +60,42 @@ their code changes. Work with it in this order.
   memory is flagged stale, verify against the code first, then update it:
   store the corrected entry with a `supersedes` link to the old one.
 
+## Seeding a project: /limpet scan
+
+Cold-start a repo's memory from what already exists. Depth: `light`
+(default) harvests merge commits, tags, and the README; `deep` adds all
+docs, long-body commits, and the assistant's project memory directory.
+
+1. Preflight: `admin` `{"op": "status"}` plus a recall for existing
+   coverage. A non-empty store means gap-fill mode: drop any candidate a
+   recall already answers.
+2. Quality pre-check, before curating: percentage of commits with
+   non-empty bodies, merge count, docs present. Thin history gets said
+   plainly upfront ("history thin, expect few candidates") and shrinks
+   the harvest; never pad the yield to look useful.
+3. Harvest in a subagent so raw git output and doc dumps never enter the
+   main context; only the candidate table comes back. Bounded commands:
+   `git log --merges -n 100 --format='%h|%s|%b'`, `git tag -l
+   --sort=-creatordate` with messages, commits with non-empty bodies
+   (`%b` carries the why), plus docs and, on `deep`, the assistant
+   project memory dir (skip silently when absent). Global assistant
+   memory only after an explicit in-run confirmation, and always private.
+4. Curate to limpet's bar: kind (decision/episode/insight/intent), anchor
+   (symbol if identifiable, else file), short standalone body. Reject
+   anything derivable from a quick read of the code; keep the why, drop
+   the what-changed. Cap: 25 per scan, ranked by durable value.
+5. Review gate, two tiers: high-confidence candidates as ONE block
+   approved with reject-by-exception ("untick any to drop"); borderline
+   candidates item by item. Private candidates are always item-level,
+   never bulk. Nothing is written before approval.
+6. Write each approved candidate via `remember` with an `origin` stamp
+   (`scan:git:<sha>`, `scan:doc:<path>#<heading>`, `scan:mem:<file>`);
+   private-source items also pass `private: true`. A duplicate-origin
+   rejection means an earlier scan already stored it: count it as
+   skipped and move on.
+7. Report honestly: seeded by kind, skipped (including origin dups),
+   private count, and the pre-check verdict.
+
 ## Arguments
 
 - `/limpet` or `/limpet index`: run the invocation sequence above.
@@ -93,3 +129,6 @@ their code changes. Work with it in this order.
   user to restart Claude Code so the MCP server reloads onto the new binary.
   Use `limpet update --check` to report whether a newer version exists without
   installing it.
+- `/limpet scan` or `/limpet scan light|deep`: seed memory from git
+  history, docs, and (deep) assistant memory, per the seeding section
+  above. Idempotent: re-runs add only gaps.

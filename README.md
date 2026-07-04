@@ -81,11 +81,11 @@ That takes three properties nobody else combines:
 | Tool | What it does |
 |---|---|
 | `recall` | Task description in, token-budgeted ranked memory pack out. Stale and contradicted items are always flagged, never hidden. |
-| `remember` | Store a memory: `fact`, `decision`, `episode`, `insight`, or `intent`. Anchor it to code. Attach evidence to make it verified. |
+| `remember` | Store a memory: `fact`, `decision`, `episode`, `insight`, or `intent`. Anchor it to code. Attach evidence to make it verified. `private: true` keeps a memory local (recalled here, withheld from export); `origin` makes writes idempotent for seeding flows. |
 | `map` | Structural outline of a file or symbol plus every memory attached to it. Code and knowledge in one answer. |
 | `affected` | What does my uncommitted diff touch: symbols, memories now at risk, and decisions constraining the code being edited. |
 | `verify_queue` | Verified facts whose anchored code changed, each with the exact command that originally proved it. |
-| `admin` | index, status, forget, export / import (guarded), ledger / ledger_reset (the savings receipt). |
+| `admin` | index, status, forget, export / import (guarded), ledger / ledger_reset (the savings receipt). Export reports `private_withheld` so callers know how many memories stayed local. |
 
 Every response is wrapped in the honesty envelope:
 
@@ -313,6 +313,10 @@ Toggle it off with `/limpet statusline` (writes `~/.claude/.limpet-statusline-of
 
 `limpet hook` prints nothing when the project has no store (sessions outside indexed repos stay clean), opens the store strictly read-only, and always exits 0. The explicit PATH prefix matters: hooks run in a non-login shell that often lacks `~/.local/bin` and `~/.cargo/bin`, and a silently-missing binary is exactly the kind of failure this command is designed never to surface. On Windows use `%USERPROFILE%\AppData\Local\Programs\limpet\limpet.exe hook`.
 
+### Seeding a project
+
+`/limpet scan` cold-starts a repository's memory from what already exists: merge commits, tags, docs, and (on `deep` depth) the assistant's project memory directory. A preflight recall catches any candidates the store already answers, so re-runs only add gaps. The harvest runs in a subagent to keep raw git output and doc dumps out of the main context; only the curated candidate table comes back. You approve candidates in two tiers before anything is written: high-confidence items as a single block (reject-by-exception), borderlines one at a time. Each approved memory is stamped with an `origin` so duplicates are caught on future scans, and private-source items are stored with `private: true` so they are never exported.
+
 ## 🌳 Whole repo indexed, thin on purpose
 
 **Every file in the repository is indexed and anchorable.** Files with a shipped grammar (PHP, JavaScript, TypeScript, Python, Rust, C/C++) get full symbol extraction: functions, classes, imports, and name-based call references labeled `syntactic`. Every other file (`.twig`, `.scss`, `.vue`, `.blade.php`, `.erb`, `.md`, `.yml`, configs, anything) gets a file-level node with a content hash, so a memory can anchor to it and go `stale:file_edited` the moment it changes. On template-heavy stacks that is where the knowledge worth remembering actually lives.
@@ -329,6 +333,7 @@ Freshness model: every tool call runs a bounded incremental sweep (changed files
 
 - **Local by default.** Indexing, recall, memory, and the UI make no network calls, ever: no telemetry, no API keys, no cloud. The one exception is `limpet update`, which you invoke explicitly; it fetches a checksum-verified release binary over HTTPS and sends nothing but a `limpet/<version>` User-Agent. The UI binds 127.0.0.1 and serves one embedded page, GET only.
 - **Secrets never persist.** `remember` scans every body and evidence output and refuses to store anything shaped like a credential (cloud access keys, provider tokens, PEM private-key blocks, JWTs), so a secret cannot reach the local store or a shared `.limpet/memory.jsonl`.
+- **Private memories stay local.** A memory stored with `private: true` is recalled normally within the project but is never included in `export` output, so sensitive context cannot reach a shared `.limpet/memory.jsonl`.
 - **No shell interpolation.** External commands (git only) run with argument arrays; no string ever reaches a shell.
 - **Path validation.** Every file path arriving over MCP is checked against the repository root; absolute paths and traversal are rejected at a single choke point.
 - **Parameterized SQL only.** No query in the codebase concatenates user input.
