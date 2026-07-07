@@ -433,10 +433,17 @@ fn walk(
                     (node.child_by_field_name("trait"), ty.as_ref())
                 {
                     // `impl Trait for Type` -> Type impl_trait Trait. Skip
-                    // generic/complex trait names (contain '<' or "::").
+                    // only generic trait names (angle brackets). A qualified
+                    // path like `fmt::Display` is captured on its LAST segment,
+                    // matching how the read-time resolver matches bare symbol names.
                     let trait_name = node_text(tf, src);
-                    if !trait_name.contains('<') && !trait_name.contains("::") {
-                        push_inherit(facts, parents, ty_name, trait_name, "impl_trait");
+                    if !trait_name.contains('<') {
+                        let bare = trait_name
+                            .rsplit("::")
+                            .next()
+                            .unwrap_or(&trait_name)
+                            .to_string();
+                        push_inherit(facts, parents, ty_name, bare, "impl_trait");
                     }
                 }
                 if let Some(t) = node.child_by_field_name("type") {
@@ -536,5 +543,17 @@ mod inherit_tests {
         // Generic/templated bases are skipped, never panic.
         let _ = extract(Lang::Rust, "impl<T> Foo<T> for Bar<T> {}").unwrap();
         let _ = extract(Lang::Cpp, "template<class T> class X : public Y<T> {};").unwrap();
+    }
+
+    #[test]
+    fn rust_impl_qualified_trait_path() {
+        let e = edges(Lang::Rust, "impl fmt::Display for Dog { }");
+        assert_eq!(e, vec![(String::new(), "Dog".into(), "Display".into(), "impl_trait")]);
+    }
+
+    #[test]
+    fn rust_trait_supertrait_captured() {
+        let e = edges(Lang::Rust, "trait Working: Animal { }");
+        assert!(e.contains(&(String::new(), "Working".into(), "Animal".into(), "extends")));
     }
 }
