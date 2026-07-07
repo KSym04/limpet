@@ -2,6 +2,7 @@
 //! and path validation. No network, no unsafe, no shell.
 
 use anyhow::{bail, Result};
+use sha2::{Digest, Sha256};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -119,11 +120,63 @@ pub fn token_estimate(s: &str) -> usize {
     s.len().div_ceil(4)
 }
 
-/// Stable filesystem-safe key for a repository root path.
+/// Filesystem-safe, INJECTIVE key for a repository, derived from a stable
+/// identity (git origin when available, else the canonical path). A short
+/// content hash of the exact identity string is appended to a readable slug,
+/// so two identities that once slugged alike (`/a/b` vs `/a-b`) now differ.
 pub fn repo_key(root: &Path) -> String {
-    let canon = root
-        .canonicalize()
-        .unwrap_or_else(|_| root.to_path_buf());
+    key_from_identity(&repo_identity(root))
+}
+
+/// Stable identity string for a repository: the normalized git `origin`
+/// remote when the root is a git repo with one, otherwise the canonical
+/// filesystem path. The `git:`/`path:` prefix keeps a path that happens to
+/// look like a remote from colliding with an actual remote, and makes the
+/// identity source legible in `doctor`.
+pub fn repo_identity(root: &Path) -> String {
+    if let Some(url) = git_remote_origin(root) {
+        if let Some(norm) = normalize_git_remote(&url) {
+            return format!("git:{norm}");
+        }
+    }
+    let canon = canonicalize_plain(root).unwrap_or_else(|_| root.to_path_buf());
+    format!("path:{}", canon.to_string_lossy())
+}
+
+/// Readable slug of an identity plus an 8-hex disambiguating hash, so the
+/// key is both human-recognizable in the data dir and collision-free.
+fn key_from_identity(identity: &str) -> String {
+    let mut slug = String::with_capacity(48);
+    for c in identity.chars() {
+        if slug.len() >= 40 {
+            break;
+        }
+        if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+            slug.push(c.to_ascii_lowercase());
+        } else {
+            slug.push('-');
+        }
+    }
+    let slug = slug.trim_matches('-').to_string();
+    let hash = identity_hash8(identity);
+    if slug.is_empty() {
+        hash
+    } else {
+        format!("{slug}-{hash}")
+    }
+}
+
+/// First 32 bits of SHA-256 as hex: enough to disambiguate the handful of
+/// repositories one machine keys, with negligible collision odds.
+fn identity_hash8(s: &str) -> String {
+    let d = Sha256::digest(s.as_bytes());
+    d[..4].iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The pre-0.9 key algorithm, retained ONLY so migration can locate a store
+/// created under the old lossy path-slug scheme. Never use for new stores.
+pub fn legacy_repo_key(root: &Path) -> String {
+    let canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let s = canon.to_string_lossy();
     let mut key = String::with_capacity(s.len());
     for c in s.chars() {
@@ -134,6 +187,64 @@ pub fn repo_key(root: &Path) -> String {
         }
     }
     key.trim_matches('-').to_string()
+}
+
+/// The normalized `origin` remote URL for a git repository root, or None if
+/// the root is not a git repo, has no `origin`, or git is unavailable. Runs
+/// git with an argument array (never a shell) and treats any failure as "no
+/// remote", so a missing git degrades cleanly to the path key.
+pub fn git_remote_origin(root: &Path) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["remote", "get-url", "origin"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let url = String::from_utf8(out.stdout).ok()?;
+    let url = url.trim();
+    if url.is_empty() {
+        None
+    } else {
+        Some(url.to_string())
+    }
+}
+
+/// Canonicalize a git remote URL to `host/path` (lowercased, no scheme, no
+/// credentials, no port, no trailing `.git`), so ssh, https, and scp-style
+/// spellings of the same repository collapse to one identity.
+pub fn normalize_git_remote(url: &str) -> Option<String> {
+    let s = url.trim();
+    if s.is_empty() {
+        return None;
+    }
+    // Strip scheme:// , or interpret an scp-style `user@host:path`.
+    let after_scheme = match s.split_once("://") {
+        Some((_scheme, rest)) => rest.to_string(),
+        None => {
+            let (userhost, path) = s.split_once(':')?;
+            if userhost.contains('/') {
+                return None;
+            }
+            format!("{userhost}/{path}")
+        }
+    };
+    // Drop credentials before an '@'.
+    let after_creds = match after_scheme.split_once('@') {
+        Some((_creds, rest)) => rest,
+        None => after_scheme.as_str(),
+    };
+    let (host, path) = after_creds.trim_start_matches('/').split_once('/')?;
+    let host = host.split(':').next().unwrap_or(host).to_ascii_lowercase();
+    let path = path.trim_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let path = path.trim_matches('/');
+    if host.is_empty() || path.is_empty() {
+        return None;
+    }
+    Some(format!("{host}/{}", path.to_ascii_lowercase()))
 }
 
 /// Validate a repo-relative path supplied by a tool caller.
@@ -263,5 +374,35 @@ mod tests {
         let k = repo_key(Path::new("/Users/x/Dev/My App"));
         assert!(!k.contains('/'));
         assert!(!k.contains(' '));
+    }
+
+    #[test]
+    fn repo_key_is_injective_across_slug_collisions() {
+        // The pre-0.9 slug mapped /a/b and /a-b onto the same key, silently
+        // sharing one store between two repos. The new key must not collide.
+        let k1 = repo_key(Path::new("/a/b"));
+        let k2 = repo_key(Path::new("/a-b"));
+        assert_ne!(k1, k2, "distinct roots must get distinct keys");
+    }
+
+    #[test]
+    fn legacy_repo_key_reproduces_old_algorithm() {
+        // Migration depends on reproducing the pre-0.9 key byte-for-byte to
+        // find an existing store's directory.
+        assert_eq!(legacy_repo_key(Path::new("/a/b")), "a-b");
+        assert_eq!(legacy_repo_key(Path::new("/tmp/x y")), "tmp-x-y");
+    }
+
+    #[test]
+    fn normalize_git_remote_collapses_url_forms() {
+        let want = Some("github.com/ksym04/limpet".to_string());
+        assert_eq!(normalize_git_remote("git@github.com:KSym04/limpet.git"), want);
+        assert_eq!(normalize_git_remote("https://github.com/KSym04/limpet.git"), want);
+        assert_eq!(normalize_git_remote("https://github.com/KSym04/limpet"), want);
+        assert_eq!(normalize_git_remote("ssh://git@github.com/KSym04/limpet.git"), want);
+        assert_eq!(normalize_git_remote("https://user:pass@github.com/KSym04/limpet.git"), want);
+        assert_eq!(normalize_git_remote("git@github.com:KSym04/limpet.git/"), want);
+        assert_eq!(normalize_git_remote("not a url"), None);
+        assert_eq!(normalize_git_remote(""), None);
     }
 }

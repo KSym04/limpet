@@ -78,14 +78,14 @@ fn run() -> Result<()> {
         }
         "index" => {
             let root = root_from(&args)?;
-            let store = store::Store::open(&store::Store::default_db_path(&root))?;
+            let mut store = store::Store::open(&store::Store::default_db_path(&root))?;
             store.version_guard()?;
-            let report = index::full_index(&store, &root)?;
+            let (report, imported) = index::index_and_bootstrap(&mut store, &root)?;
             let anchors = memory::anchor::resolve_all(&store)?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
-                    "index": report, "anchors": anchors
+                    "index": report, "anchors": anchors, "imported": imported
                 }))?
             );
             Ok(())
@@ -199,7 +199,8 @@ fn print_hook_brief(args: &[String]) {
 
 fn hook_brief(args: &[String]) -> Result<String> {
     let root = root_from(args)?;
-    let db = store::Store::default_db_path(&root);
+    // Read-only locate: the hook must never create or migrate a store.
+    let db = store::Store::locate_db_path(&root);
     if !db.is_file() {
         return Ok(String::new());
     }
@@ -250,7 +251,10 @@ fn statusline_segment(args: &[String]) -> Result<String> {
         return Ok(String::new());
     }
     let root = root_from(args)?;
-    let db = store::Store::default_db_path(&root);
+    // Read-only locate (never migrates), and the single git spawn per
+    // render: the OSC 8 link key below is derived from the located path
+    // instead of recomputing the repo key.
+    let db = store::Store::locate_db_path(&root);
     if !db.is_file() {
         return Ok(String::new());
     }
@@ -283,7 +287,11 @@ fn statusline_segment(args: &[String]) -> Result<String> {
     // OSC 8 hyperlink straight to this project's graph when the UI is up;
     // terminals without OSC 8 support just show the plain text. The 50ms
     // connect cap keeps the statusline instant when nothing listens.
-    let key = limpet::util::repo_key(&root);
+    let key = db
+        .parent()
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let ui_up = std::net::TcpStream::connect_timeout(
         &std::net::SocketAddr::from(([127, 0, 0, 1], 9748)),
         std::time::Duration::from_millis(50),

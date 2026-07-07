@@ -19,10 +19,16 @@ pub fn dispatch(store: &mut Store, root: &Path, name: &str, args: &Value) -> Res
     // everything rather than pretending reads from a half-current image
     // are trustworthy.
     store.version_guard()?;
+    // Repo config loads ONCE per dispatch and threads into every index
+    // touch below, so one call cannot index files under two different
+    // rule sets. Hot-path policy: a broken .limpet.json degrades to the
+    // built-in grammar table here; the explicit `index` command
+    // (full_index) is where it fails loudly.
+    let ext = crate::config::RepoConfig::load(root).unwrap_or_default().extensions;
     // Freshness first (I6): bounded sweep + anchor resolution on every call.
     // A failed sweep must not be reported as "dirty: 0" — that asserts a
     // freshness that was never checked (audit 2026-07).
-    let sweep = match index::sweep(store, root) {
+    let sweep = match index::sweep(store, root, &ext) {
         Ok(s) => s,
         Err(_) => SweepReport { sweep_failed: true, ..SweepReport::default() },
     };
@@ -30,7 +36,7 @@ pub fn dispatch(store: &mut Store, root: &Path, name: &str, args: &Value) -> Res
 
     match name {
         "recall" => tool_recall(store, &sweep, args),
-        "remember" => tool_remember(store, root, &sweep, args),
+        "remember" => tool_remember(store, root, &sweep, args, &ext),
         "map" => tool_map(store, &sweep, args),
         "affected" => tool_affected(store, root, &sweep),
         "verify_queue" => tool_verify_queue(store, &sweep),
@@ -152,7 +158,13 @@ fn tool_recall(store: &Store, sweep: &SweepReport, args: &Value) -> Result<Value
     Ok(envelope(Value::Array(items), meta))
 }
 
-fn tool_remember(store: &Store, root: &Path, sweep: &SweepReport, args: &Value) -> Result<Value> {
+fn tool_remember(
+    store: &Store,
+    root: &Path,
+    sweep: &SweepReport,
+    args: &Value,
+    ext: &std::collections::HashMap<String, crate::index::lang::Lang>,
+) -> Result<Value> {
     let kind = str_arg(args, "kind")?;
     let body = str_arg(args, "body")?;
     let source = args.get("source").and_then(Value::as_str).unwrap_or("explicit");
@@ -173,7 +185,7 @@ fn tool_remember(store: &Store, root: &Path, sweep: &SweepReport, args: &Value) 
         // budget starvation the target could still be dirty, minting an
         // anchor with the pre-edit hash that flips stale on the very next
         // sweep (audit 2026-07). Anchors are few, so this is cheap.
-        let _ = index::index_file(store, root, &a.file);
+        let _ = index::index_file(store, root, &a.file, ext);
     }
     let evidence: Option<memory::Evidence> = match args.get("evidence") {
         Some(v) if !v.is_null() => Some(serde_json::from_value(v.clone()).context("parsing evidence")?),
@@ -491,9 +503,9 @@ fn tool_admin(store: &mut Store, root: &Path, sweep: &SweepReport, args: &Value)
     let op = str_arg(args, "op")?;
     let data = match op {
         "index" => {
-            let report = index::full_index(store, root)?;
+            let (report, imported) = index::index_and_bootstrap(store, root)?;
             let resolved = anchor::resolve_all(store)?;
-            json!({ "index": report, "anchors": resolved })
+            json!({ "index": report, "anchors": resolved, "imported": imported })
         }
         "status" => {
             let files: i64 =

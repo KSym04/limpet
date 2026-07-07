@@ -5,6 +5,7 @@
 //! coverage in `tests/index_langs.rs` (invariant I7); adding a language
 //! without a fixture is a review-blocking change.
 
+use std::collections::HashMap;
 use tree_sitter::Language;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -45,6 +46,47 @@ pub fn detect(path: &std::path::Path) -> Option<Lang> {
         "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" | "h" | "c" | "inl" => Some(Lang::Cpp),
         _ => None,
     }
+}
+
+/// Parse a grammar name from a `.limpet.json` extension-map value. Accepts
+/// short and long spellings so config authors need not know the internal
+/// `as_str` form.
+pub fn from_config_str(s: &str) -> Option<Lang> {
+    match s.to_ascii_lowercase().as_str() {
+        "php" => Some(Lang::Php),
+        "js" | "javascript" => Some(Lang::Js),
+        "ts" | "typescript" => Some(Lang::Ts),
+        "py" | "python" => Some(Lang::Py),
+        "rs" | "rust" => Some(Lang::Rust),
+        "cpp" | "c" | "c++" => Some(Lang::Cpp),
+        _ => None,
+    }
+}
+
+/// Map a file path to a language, consulting a user-supplied extension
+/// override map before the built-in table. Keys are name suffixes without a
+/// leading dot (`inc`, `blade.php`); the longest matching suffix wins, so a
+/// specific `blade.php` beats a generic `php`. A match requires a `.` before
+/// the suffix so `inc` never matches `zinc`. When no user key matches, the
+/// built-in `detect` decides.
+pub fn detect_with(path: &std::path::Path, ext_map: &HashMap<String, Lang>) -> Option<Lang> {
+    if !ext_map.is_empty() {
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            let mut best: Option<(usize, Lang)> = None;
+            for (suffix, lang) in ext_map {
+                let matches = name.len() > suffix.len()
+                    && name.as_bytes()[name.len() - suffix.len() - 1] == b'.'
+                    && name.ends_with(suffix.as_str());
+                if matches && best.map_or(true, |(len, _)| suffix.len() > len) {
+                    best = Some((suffix.len(), *lang));
+                }
+            }
+            if let Some((_, lang)) = best {
+                return Some(lang);
+            }
+        }
+    }
+    detect(path)
 }
 
 /// The tree-sitter grammar for a language.

@@ -1,3 +1,81 @@
+# SPEC — lineage graph + live ledger + local event hook (design, next minors)
+
+Status: APPROVED (M0 closed 2026-07-07). Full spec:
+docs/superpowers/specs/2026-07-07-limpet-lineage-ledger-hook-design.md
+
+Three free-core features. v0.9.0 stays portability; the lineage graph lands
+v0.10.0 (the live ledger rides along); the event hook is a gated v1.1+ bet. Each
+ships only if it feeds the honest receipt or the honesty envelope.
+
+| # | Feature | Target | Summary |
+|---|---|---|---|
+| M1 | AST lineage graph | v0.10.0 | inheritance + resolved call edges -> bounded up/down lineage in `map` |
+| M2 | Live token ledger | v0.10.0 rider | per-call + per-session savings surfaced in the recall envelope |
+| M3 | Local event hook | v1.1+ bet | opt-in exec hook on memory transitions; local `check` gate |
+
+## Core Architecture
+
+| Layer | Responsibility |
+|---|---|
+| index (extract.rs) | new inheritance extraction, all 6 grammars (extends / implements / impl-trait); bare-name parents, resolved read-time |
+| store | additive `inherits` table (child_fqn, parent_name, rel, file), schema bump 2->3, per-file reindex lifecycle mirrors `calls` |
+| index/graph.rs | read-time name resolver + bounded BFS lineage (depth + node caps, visited-set); ancestors / descendants / callers, each edge labeled unique/ambiguous/unresolved |
+| map tool | additive `lineage` field for symbol targets only (file targets unchanged); existing `symbols`/`calls`/`memories` unchanged |
+| ledger | existing meta_kv ledger surfaced per-call in the envelope + per-session delta; sink unchanged, estimate-labeled |
+| event hook | opt-in local exec hook (`.limpet/hooks.toml`), event JSON on stdin, no network; fires post-commit, cannot corrupt memory |
+
+Interplay: M1's resolved call edges strengthen the `fan_in` signal the
+cost_to_learn spec (below) reads from the `calls` table.
+
+## INVARIANTS
+
+- I-G1: call/inherit edges store bare names; endpoints resolve against the
+  current symbol table at query time. No stored resolution to rot.
+- I-G2: lineage traversal is bounded (depth cap + node cap + visited-set);
+  truncation disclosed via `meta.completeness`. No silent clip.
+- I-G3: every edge endpoint labeled unique / ambiguous / unresolved; ambiguity
+  never collapsed to a guess.
+- I-Z1: zero baked-in network anywhere in the core; `serve` stays stdio-only;
+  the event hook shells out to a local command, opens no connection itself.
+- I-L2 (carried): negative savings shown, never floored.
+- I-L5 (carried): ledger/hook bugs cannot corrupt memory; fired outside the
+  content transaction, after commit.
+- Ledger sink stays `meta_kv`; never `.limpet/memory.jsonl`, never the network.
+
+## ATTACK SURFACE
+
+- Cyclic / diamond inheritance -> visited-set + depth cap.
+- Deep or wide call fan-out -> node cap + disclosed truncation.
+- Ambiguous name resolution -> all candidates labeled, none guessed.
+- Malformed supertype syntax -> extractor skips the edge, no panic.
+- Large legacy repos -> reuses the existing 512KB/8MB degradation ladder;
+  traversal is read-only over indexed rows, O(log n) per hop.
+
+## Task Implementation Checklist
+
+M1 — lineage graph (v0.9.0):
+- [ ] store: `inherits` table + indexes + schema bump 2->3 + migration test
+- [ ] index: per-file `inherits` delete/reinsert at the 3 reindex sites
+- [ ] extract.rs: inheritance capture for php/js/ts/py/rs/cpp (+ unit tests each)
+- [ ] index/graph.rs: read-time resolver (0/1/N labeled) + bounded BFS lineage
+- [ ] tools: `map` returns additive `lineage`; tool schema + README + docs_in_sync
+- [ ] bench: fixture inheritance chain + lineage questions; ratio >= 4x sub-gate
+- [ ] tests green; dogfood; NO RELEASE until Ken tests
+
+M2 — live ledger (v0.9.1):
+- [ ] serve: per-session `SessionLedger`, reset at serve start
+- [ ] recall envelope: additive `meta.ledger` {served,baseline,saved,reads_avoided,cumulative_saved,estimate}
+- [ ] assert sink is meta_kv; memory.jsonl untouched; negative not floored
+- [ ] tests green; dogfood
+
+M3 — local event hook (v0.10.0, gate ruling at kickoff):
+- [ ] event emitter (memory.remembered/stale/contradicted, index.completed), post-commit
+- [ ] opt-in `.limpet/hooks.toml` exec hook; event JSON on stdin; bounded timeout
+- [ ] local `limpet check` exit codes; no network opened (assert stdio-only)
+- [ ] tests green; dogfood
+
+---
+
 # SPEC - /limpet scan: seed memory from history + private flag (approved, next minor)
 
 Status: APPROVED DESIGN. Full spec: docs/superpowers/specs/2026-07-04-limpet-scan-design.md
