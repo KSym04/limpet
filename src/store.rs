@@ -10,7 +10,7 @@ use rusqlite::Connection;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 pub struct Store {
     pub conn: Connection,
@@ -115,6 +115,16 @@ CREATE TRIGGER IF NOT EXISTS entries_au AFTER UPDATE OF body ON entries BEGIN
   INSERT INTO entries_fts(entries_fts, rowid, body) VALUES('delete', old.rowid, old.body);
   INSERT INTO entries_fts(rowid, body) VALUES (new.rowid, new.body);
 END;
+
+CREATE TABLE IF NOT EXISTS inherits (
+  child_fqn   TEXT NOT NULL,
+  parent_name TEXT NOT NULL,
+  rel         TEXT NOT NULL CHECK(rel IN ('extends','implements','impl_trait')),
+  file        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_inherits_child  ON inherits(child_fqn);
+CREATE INDEX IF NOT EXISTS idx_inherits_parent ON inherits(parent_name);
+CREATE INDEX IF NOT EXISTS idx_inherits_file   ON inherits(file);
 "#;
 
 /// Schema v2 (lazy migration): `private` marks a memory that must never
@@ -150,6 +160,30 @@ fn migrate_to_v2(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Schema v3 (lazy migration): the additive `inherits` table for the lineage
+/// graph. `CREATE TABLE IF NOT EXISTS` is idempotent, so a fresh store (which
+/// got the table from SCHEMA_V1 above) and an old v2 store take one code path.
+/// No data is touched; the table fills on the next `index`.
+fn migrate_to_v3(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS inherits (
+           child_fqn   TEXT NOT NULL,
+           parent_name TEXT NOT NULL,
+           rel         TEXT NOT NULL CHECK(rel IN ('extends','implements','impl_trait')),
+           file        TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS idx_inherits_child  ON inherits(child_fqn);
+         CREATE INDEX IF NOT EXISTS idx_inherits_parent ON inherits(parent_name);
+         CREATE INDEX IF NOT EXISTS idx_inherits_file   ON inherits(file);",
+    )?;
+    conn.execute(
+        "INSERT INTO meta_kv(k, v) VALUES('schema_version', ?1)
+         ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+        [SCHEMA_VERSION.to_string()],
+    )?;
+    Ok(())
+}
+
 impl Store {
     /// Open (creating if needed) the store at an explicit database path.
     pub fn open(db_path: &Path) -> Result<Store> {
@@ -164,6 +198,7 @@ impl Store {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.execute_batch(SCHEMA_V1)?;
         migrate_to_v2(&conn)?;
+        migrate_to_v3(&conn)?;
         Ok(Store { conn, session_base: std::cell::Cell::new(Ledger::default()) })
     }
 
@@ -173,6 +208,7 @@ impl Store {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.execute_batch(SCHEMA_V1)?;
         migrate_to_v2(&conn)?;
+        migrate_to_v3(&conn)?;
         Ok(Store { conn, session_base: std::cell::Cell::new(Ledger::default()) })
     }
 
@@ -1011,7 +1047,7 @@ mod tests {
             .unwrap();
         assert_eq!(private, 0, "pre-existing rows default to not-private");
         assert_eq!(origin, None);
-        assert_eq!(s.kv_get("schema_version").unwrap().as_deref(), Some("2"));
+        assert_eq!(s.kv_get("schema_version").unwrap().as_deref(), Some("3"));
     }
 
     #[test]
@@ -1087,6 +1123,47 @@ mod tests {
         let db = Store::locate_db_path_in(base.path(), root.path());
         assert_eq!(db, legacy_dir.join("store.db"), "locate must find the legacy store in place");
         assert!(legacy_dir.exists(), "locate must never rename or migrate");
+    }
+
+    #[test]
+    fn v2_store_migrates_to_v3_inherits() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("store.db");
+        // Build a v1+v2 store WITHOUT the inherits table, like an old on-disk store.
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute_batch(SCHEMA_V1).unwrap();
+            migrate_to_v2(&conn).unwrap();
+        }
+        // Opening through Store must add inherits and stamp schema_version=3.
+        let store = Store::open(&db).unwrap();
+        let cols: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('inherits')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(cols, 4, "inherits has child_fqn, parent_name, rel, file");
+        let ver: String = store
+            .conn
+            .query_row("SELECT v FROM meta_kv WHERE k='schema_version'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ver, "3");
+        // Insert + read back an edge (CHECK constraint honored).
+        store
+            .conn
+            .execute(
+                "INSERT INTO inherits(child_fqn,parent_name,rel,file) VALUES('a.B','Base','extends','a.rs')",
+                [],
+            )
+            .unwrap();
+        let n: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM inherits WHERE parent_name='Base'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
     }
 
     #[test]
