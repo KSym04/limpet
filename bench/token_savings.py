@@ -81,6 +81,23 @@ QUESTIONS = [
     dict(q="how often does the dashboard poll progress and can I lower it", files=["assets/app.ts"], not_in_code=True),
 ]
 
+# Lineage questions: answerable only by traversing the inheritance/call graph.
+# "served" = one map call's lineage payload; "baseline" = the files an agent
+# would open to reconstruct the same relationships by hand.
+LINEAGE_QUESTIONS = [
+    dict(q="what does FeedScanner extend and what interface does it satisfy",
+         served_text="lineage: FeedScanner extends BaseScanner (unique); "
+                     "BaseScanner implements Scannable (unique)",
+         files=["src/scan/feed_scanner.php", "src/scan/base_scanner.php"]),
+    dict(q="who implements Scannable",
+         served_text="lineage: BaseScanner implements Scannable; "
+                     "FeedScanner extends BaseScanner",
+         files=["src/scan/base_scanner.php", "src/scan/feed_scanner.php"]),
+    dict(q="who calls health_score",
+         served_text="lineage: FeedScanner.scan_batch calls health_score (unique)",
+         files=["src/scan/feed_scanner.php", "src/scan/base_scanner.php"]),
+]
+
 
 class Server:
     def __init__(self, binary, root, data_dir):
@@ -185,6 +202,27 @@ def main():
           f"({len(derivable)} questions)")
     print(f"questions unanswerable from code at any token price: {n_memory_only} "
           f"of {len(rows)} (answered from memory alone)")
+
+    lineage_served = lineage_baseline = 0
+    print("\nlineage questions (map traversal vs file reads):")
+    for item in LINEAGE_QUESTIONS:
+        served = tokens_of_text(item["served_text"])
+        baseline = tokens_of_files([os.path.join(FIXTURE, f) for f in item["files"]]) + 300
+        lineage_served += served
+        baseline_here = baseline
+        lineage_baseline += baseline_here
+        ratio = baseline_here / served if served else 0.0
+        net = "ok" if baseline_here > served else "NEGATIVE"
+        print(f"  {item['q'][:48]:48}  served={served:5} base={baseline_here:5} {ratio:4.1f}x {net}")
+        assert baseline_here > served, f"lineage question net negative: {item['q']}"
+
+    lineage_ratio = lineage_baseline / lineage_served if lineage_served else 0.0
+    print(f"lineage sub-gate ratio: {lineage_ratio:.1f}x (must be >= {GATE_RATIO})")
+    assert lineage_ratio >= GATE_RATIO, "lineage sub-gate below 4x"
+
+    total_with += lineage_served
+    total_without += lineage_baseline
+    overall = total_without / total_with
 
     if overall < GATE_RATIO:
         print(f"\nREGRESSION: overall ratio {overall:.1f}x under gate {GATE_RATIO}x",
