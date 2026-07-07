@@ -346,6 +346,21 @@ fn skill_path() -> Result<PathBuf> {
     Ok(PathBuf::from(home).join(".claude/skills/limpet/SKILL.md"))
 }
 
+/// Claude Code user config dir: `$CLAUDE_CONFIG_DIR` or `~/.claude`. Home to
+/// `settings.json` (where the `statusLine` command lives) and the
+/// `.limpet-statusline-off` toggle — distinct from the `~/.claude.json` MCP
+/// registration handled by [`claude_config_path`].
+fn claude_dir() -> Result<PathBuf> {
+    std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .map(|h| PathBuf::from(h).join(".claude"))
+        })
+        .context("neither CLAUDE_CONFIG_DIR, HOME, nor USERPROFILE is set")
+}
+
 /// Diagnose a broken or half-installed setup: the "it works on my other
 /// laptop but not here" command. Read-only except for opening the store.
 fn doctor(args: &[String]) -> Result<()> {
@@ -462,6 +477,89 @@ fn doctor_run(args: &[String], post_update: bool) -> Result<bool> {
             },
         ),
         Err(e) => check("skill", false, format!("{e}")),
+    }
+
+    // 3b. Statusline segment wiring. Advisory only — an unwired statusline is a
+    // missing convenience, not a broken install, so this never flips `ok`. Its
+    // purpose is to end the silent-vanish failure mode: a statusline that
+    // hand-rolls a sqlite3 query against the store drifts the instant the store
+    // key scheme changes (as it did in v0.9.0), and the segment just disappears
+    // with no error. Detect that and hand back the one stable line to use.
+    match claude_dir() {
+        Ok(dir) => {
+            let settings = dir.join("settings.json");
+            let off_flag = dir.join(".limpet-statusline-off");
+            // Classify a command or script body: Some(true) delegates to the
+            // binary, Some(false) hand-rolls a store query (the drift trap),
+            // None has no limpet reference at all.
+            let classify = |hay: &str| -> Option<bool> {
+                if hay.contains("limpet statusline") {
+                    Some(true)
+                } else if hay.contains("store.db")
+                    || (hay.contains("limpet") && hay.contains("sqlite3"))
+                {
+                    Some(false)
+                } else {
+                    None
+                }
+            };
+            if off_flag.exists() {
+                println!("note statusline: toggled off via {}", off_flag.display());
+            } else {
+                let cmd = std::fs::read_to_string(&settings).ok().and_then(|s| {
+                    serde_json::from_str::<serde_json::Value>(&s).ok().and_then(|v| {
+                        v.pointer("/statusLine/command")
+                            .and_then(|c| c.as_str())
+                            .map(str::to_owned)
+                    })
+                });
+                // A statusLine that shells out to a wrapper script (e.g.
+                // `bash ~/.claude/statusline.sh`) hides its limpet call from a
+                // plain string check. If the command itself has no verdict,
+                // follow the first existing script path it names and classify
+                // the script body too, so the wrapper case is not a false note.
+                let verdict = cmd.as_deref().and_then(|c| {
+                    classify(c).or_else(|| {
+                        c.split_whitespace()
+                            .map(|t| t.trim_matches(|ch| ch == '"' || ch == '\'' || ch == '`'))
+                            .filter(|t| {
+                                let lt = t.to_ascii_lowercase();
+                                [".sh", ".bash", ".zsh", ".ps1", ".bat", ".cmd"]
+                                    .iter()
+                                    .any(|e| lt.ends_with(e))
+                            })
+                            .filter_map(|p| std::fs::read_to_string(p).ok())
+                            .find_map(|body| classify(&body))
+                    })
+                });
+                match (cmd.is_some(), verdict) {
+                    (_, Some(true)) => println!(
+                        "ok   statusline: wired to `limpet statusline` ({})",
+                        settings.display()
+                    ),
+                    // Reads store.db (or drives sqlite3 against limpet) instead
+                    // of the binary — leave it wired and it silently breaks on
+                    // the next store key-scheme change.
+                    (_, Some(false)) => println!(
+                        "warn statusline: {} hand-rolls a store query; the store key \
+                         scheme changes across versions, so this segment will silently \
+                         break. Replace the limpet part with: limpet statusline --root <dir>",
+                        settings.display()
+                    ),
+                    (true, None) => println!(
+                        "note statusline: a statusLine is set but has no limpet segment; \
+                         append `limpet statusline --root \"$CLAUDE_PROJECT_DIR\"` to it"
+                    ),
+                    (false, None) => println!(
+                        "note statusline: not wired -- add to {}: \"statusLine\": {{ \
+                         \"type\": \"command\", \"command\": \"limpet statusline --root \
+                         \\\"$CLAUDE_PROJECT_DIR\\\"\" }}",
+                        settings.display()
+                    ),
+                }
+            }
+        }
+        Err(e) => println!("note statusline: cannot locate Claude config dir: {e}"),
     }
 
     // 4. This repo's store.
