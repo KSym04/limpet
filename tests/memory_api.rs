@@ -400,7 +400,7 @@ fn penalized_confidence_stays_clean_and_roundtrips() {
     for body in ["return 2", "return 3", "return 4"] {
         std::thread::sleep(std::time::Duration::from_millis(15));
         std::fs::write(root.join("s.py"), format!("def f():\n    {body}\n")).unwrap();
-        index::sweep(&store, root).unwrap();
+        index::sweep(&store, root, &Default::default()).unwrap();
         memory::anchor::resolve_all(&store).unwrap();
     }
     let conf: f64 = store

@@ -52,7 +52,7 @@ fn status_of(store: &Store, id: &str) -> (String, Option<String>) {
 
 fn mutate_and_resolve(store: &Store, root: &std::path::Path) -> anchor::ResolveReport {
     std::thread::sleep(std::time::Duration::from_millis(20));
-    index::sweep(store, root).unwrap();
+    index::sweep(store, root, &Default::default()).unwrap();
     anchor::resolve_all(store).unwrap()
 }
 

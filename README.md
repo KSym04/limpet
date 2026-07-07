@@ -329,6 +329,22 @@ There is no LSP, no type inference, and no claim of a publishable call graph: th
 
 Freshness model: every tool call runs a bounded incremental sweep (changed files reparse in milliseconds via tree-sitter). Queries never block on indexing; anything still dirty is listed in the envelope.
 
+## ⚙️ Per-repo config (`.limpet.json`)
+
+An optional `.limpet.json` at the repository root tunes two things. It is a plain, size-bounded lookup table validated against the shipped grammars; a malformed file fails an explicit `index` loudly instead of being silently ignored.
+
+```json
+{
+  "extensions": { "inc": "cpp", "module": "php" },
+  "auto_import": true
+}
+```
+
+- **`extensions`** maps a filename suffix to one of the shipped grammars (`php`, `js`, `ts`, `py`, `rust`, `cpp`), so template-heavy and legacy stacks get full symbol extraction on extensions the built-in table does not know. The longest matching suffix wins, so a specific `blade.php` overrides a generic `php`.
+- **`auto_import`** (default `true`) seeds a brand-new store from a committed `.limpet/memory.jsonl` on the first index, so a teammate who clones the repo gets the shared memory with no extra step. It runs once, only on a fresh store, through the same guarded path as `limpet import`.
+
+**Portable identity.** A repository's store is keyed by its git `origin` remote when it has one, falling back to the canonical path. Move a checkout or re-clone it and the memory follows; two different repositories can no longer collide onto one store. Existing stores migrate automatically on first open, and a store is never mis-claimed: an ambiguous legacy store is left in place rather than reassigned.
+
 ## 🔒 Security posture
 
 - **Local by default.** Indexing, recall, memory, and the UI make no network calls, ever: no telemetry, no API keys, no cloud. The one exception is `limpet update`, which you invoke explicitly; it fetches a checksum-verified release binary over HTTPS and sends nothing but a `limpet/<version>` User-Agent. The UI binds 127.0.0.1 and serves one embedded page, GET only.
@@ -352,7 +368,7 @@ Freshness model: every tool call runs a bounded incremental sweep (changed files
 
 ## 🧭 Roadmap
 
-See [ROADMAP.md](ROADMAP.md) for the full plan — snippet-by-symbol retrieval, the rework-avoided metric, portable repo identity, grammar wave 2, and the 1.0 stability contract. One rule governs all of it: a feature ships only if it feeds a receipt (`limpet stats`, the benchmark, rework-avoided) or the honesty envelope.
+See [ROADMAP.md](ROADMAP.md) for the full plan: portable repo identity, the structural lineage graph, grammar wave 2, and the 1.0 stability contract. One rule governs all of it: a feature ships only if it feeds a receipt (`limpet stats`, the benchmark, rework-avoided) or the honesty envelope.
 
 ## ⚖️ Reliance and license
 

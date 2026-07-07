@@ -243,18 +243,18 @@ fn full_index_and_sweep_reindexes_only_changed() {
     assert_eq!(fqn, "a.alpha");
 
     // No changes: sweep does nothing.
-    let s0 = index::sweep(&store, root).unwrap();
+    let s0 = index::sweep(&store, root, &Default::default()).unwrap();
     assert!(s0.reindexed.is_empty() && s0.dirty.is_empty() && s0.removed.is_empty());
 
     // Touch one file with new content and a bumped mtime.
     std::thread::sleep(std::time::Duration::from_millis(20));
     fs::write(root.join("a.py"), "def alpha():\n    return 42\n").unwrap();
-    let s1 = index::sweep(&store, root).unwrap();
+    let s1 = index::sweep(&store, root, &Default::default()).unwrap();
     assert_eq!(s1.reindexed, vec!["a.py"]);
 
     // Delete the other: sweep purges it.
     fs::remove_file(root.join("b.py")).unwrap();
-    let s2 = index::sweep(&store, root).unwrap();
+    let s2 = index::sweep(&store, root, &Default::default()).unwrap();
     assert_eq!(s2.removed, vec!["b.py"]);
     let n: i64 = store
         .conn

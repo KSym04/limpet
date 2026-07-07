@@ -10,11 +10,13 @@ pub mod extract;
 pub mod fqn;
 pub mod lang;
 
+use crate::config::RepoConfig;
 use crate::memory::anchor;
-use crate::store::Store;
+use crate::store::{ImportReport, Store};
 use anyhow::Result;
 use rusqlite::params;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::Instant;
 
@@ -87,7 +89,12 @@ fn short_hash(bytes: &[u8]) -> String {
 /// `files` row with a raw-byte content hash and no symbols. That is what
 /// lets memories anchor to templates, styles, and configs (.twig, .scss,
 /// .md, ...) and go stale when those files change.
-pub(crate) fn index_file(store: &Store, root: &Path, rel: &str) -> Result<(usize, bool)> {
+pub(crate) fn index_file(
+    store: &Store,
+    root: &Path,
+    rel: &str,
+    ext: &HashMap<String, lang::Lang>,
+) -> Result<(usize, bool)> {
     let abs = root.join(rel);
     let Some((mtime_ns, size)) = file_meta(&abs) else {
         return Ok((0, false));
@@ -106,7 +113,7 @@ pub(crate) fn index_file(store: &Store, root: &Path, rel: &str) -> Result<(usize
         FileLevel(Vec<u8>),
         Parsed(lang::Lang, String),
     }
-    let plan = match lang::detect(&abs) {
+    let plan = match lang::detect_with(&abs, ext) {
         Some(_) if size > MAX_PARSE_BYTES as i64 => Plan::FileLevel(bytes),
         Some(lang_id) => match String::from_utf8(bytes) {
             Ok(s) => Plan::Parsed(lang_id, s),
@@ -305,9 +312,13 @@ fn discover(root: &Path, exclude: Option<&Path>) -> Vec<String> {
 pub fn full_index(store: &Store, root: &Path) -> Result<IndexReport> {
     let start = Instant::now();
     let mut report = IndexReport::default();
+    // An explicit index surfaces a broken `.limpet.json` as a hard error, so
+    // the user learns their config is wrong instead of silently falling back
+    // to the built-in grammar table.
+    let ext = RepoConfig::load(root)?.extensions;
     let exclude = store_exclude_dir(store);
     for rel in discover(root, exclude.as_deref()) {
-        match index_file(store, root, &rel) {
+        match index_file(store, root, &rel, &ext) {
             Ok((syms, parse_ok)) => {
                 report.files += 1;
                 report.symbols += syms;
@@ -324,9 +335,48 @@ pub fn full_index(store: &Store, root: &Path) -> Result<IndexReport> {
     Ok(report)
 }
 
+/// Full index plus first-run bootstrap: on a brand-new store (never indexed)
+/// with auto-import enabled and a committed `.limpet/memory.jsonl`, seed the
+/// store from that file so a teammate who clones the repo gets the shared
+/// memory immediately. Index runs FIRST so import re-resolves anchor hashes
+/// against the freshly built index. Returns the index report and, when a
+/// bootstrap import ran, its report.
+pub fn index_and_bootstrap(
+    store: &mut Store,
+    root: &Path,
+) -> Result<(IndexReport, Option<ImportReport>)> {
+    let was_fresh = store.kv_get("indexed_at")?.is_none();
+    let report = full_index(store, root)?;
+    let import = if was_fresh { maybe_auto_import(store, root)? } else { None };
+    Ok((report, import))
+}
+
+/// Import a committed `.limpet/memory.jsonl` when auto-import is enabled and
+/// the file exists. Every existing import guard applies (secrets, size caps,
+/// LWW, anchor re-resolution); this only decides whether to invoke them.
+fn maybe_auto_import(store: &mut Store, root: &Path) -> Result<Option<ImportReport>> {
+    if !RepoConfig::load(root).unwrap_or_default().auto_import {
+        return Ok(None);
+    }
+    let path = root.join(".limpet").join("memory.jsonl");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let f = std::fs::File::open(&path)?;
+    let mut reader = std::io::BufReader::new(f);
+    Ok(Some(store.import_jsonl(&mut reader)?))
+}
+
 /// Bounded incremental sweep: detect changed/new/removed files, reindex up
 /// to the budget inline, report the rest dirty.
-pub fn sweep(store: &Store, root: &Path) -> Result<SweepReport> {
+/// `ext` is the extension override map from `.limpet.json`, loaded ONCE per
+/// tool dispatch and threaded in, so every index touch within one call
+/// indexes under the same rules (and the hot path never re-reads the file).
+pub fn sweep(
+    store: &Store,
+    root: &Path,
+    ext: &HashMap<String, lang::Lang>,
+) -> Result<SweepReport> {
     let mut report = SweepReport::default();
 
     let mut stmt = store
@@ -363,7 +413,7 @@ pub fn sweep(store: &Store, root: &Path) -> Result<SweepReport> {
     }
 
     for rel in changed.iter().take(SWEEP_REINDEX_BUDGET) {
-        match index_file(store, root, rel) {
+        match index_file(store, root, rel, ext) {
             Ok((_, true)) => report.reindexed.push(rel.clone()),
             Ok((_, false)) => report.failed.push(rel.clone()),
             Err(_) => report.failed.push(rel.clone()),
@@ -539,7 +589,7 @@ mod tests {
         assert_eq!(rows, 0, "no files row may point into the data dir");
 
         // Sweep must not rediscover it either.
-        let sweep_report = sweep(&store, root).unwrap();
+        let sweep_report = sweep(&store, root, &Default::default()).unwrap();
         assert!(
             sweep_report.reindexed.iter().all(|p| !p.starts_with(".data/")),
             "sweep leaked store artifacts: {:?}",
@@ -567,7 +617,7 @@ mod tests {
 
         std::thread::sleep(std::time::Duration::from_millis(20));
         fs::write(root.join("page.twig"), "{% block b %}{% endblock %}\n").unwrap();
-        sweep(&store, root).unwrap();
+        sweep(&store, root, &Default::default()).unwrap();
         let hash2: String = store
             .conn
             .query_row("SELECT hash FROM files WHERE path = 'page.twig'", [], |r| r.get(0))

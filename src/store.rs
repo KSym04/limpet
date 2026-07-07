@@ -182,7 +182,15 @@ impl Store {
     /// conventional app-data location (APPDATA on Windows, ~/.local/share
     /// elsewhere), falling back to USERPROFILE when HOME is unset.
     pub fn default_db_path(root: &Path) -> PathBuf {
-        let base = std::env::var_os("LIMPET_DATA_DIR")
+        Self::resolve_db_path(&Self::data_base(), root)
+    }
+
+    /// The base data directory holding every project's keyed store dir.
+    /// Resolution order: LIMPET_DATA_DIR override, then the platform app-data
+    /// location (APPDATA on Windows, ~/.local/share elsewhere), falling back
+    /// to USERPROFILE when HOME is unset.
+    pub(crate) fn data_base() -> PathBuf {
+        std::env::var_os("LIMPET_DATA_DIR")
             .map(PathBuf::from)
             .or_else(|| {
                 if cfg!(windows) {
@@ -197,8 +205,104 @@ impl Store {
                     .map(PathBuf::from)
                     .unwrap_or_else(|| PathBuf::from("."));
                 home.join(".local").join("share").join("limpet")
-            });
-        base.join(crate::util::repo_key(root)).join("store.db")
+            })
+    }
+
+    /// Read-only store location for display surfaces (statusline, hook):
+    /// prefer an existing store at the new key, fall back to one at the
+    /// legacy key, and NEVER migrate, rename, create, or open anything.
+    /// Callers treat a missing file as "no store yet".
+    pub fn locate_db_path(root: &Path) -> PathBuf {
+        Self::locate_db_path_in(&Self::data_base(), root)
+    }
+
+    /// `locate_db_path` against an explicit base (tests).
+    fn locate_db_path_in(base: &Path, root: &Path) -> PathBuf {
+        let new_db = base.join(crate::util::repo_key(root)).join("store.db");
+        if new_db.is_file() {
+            return new_db;
+        }
+        let legacy_db = base.join(crate::util::legacy_repo_key(root)).join("store.db");
+        if legacy_db.is_file() {
+            return legacy_db;
+        }
+        new_db
+    }
+
+    /// Resolve the store db path under `base` for `root`, performing a
+    /// one-time migration from the pre-0.9 lossy path-slug key when a legacy
+    /// store is found and unambiguously owned by this root.
+    fn resolve_db_path(base: &Path, root: &Path) -> PathBuf {
+        let new_dir = base.join(crate::util::repo_key(root));
+        if !new_dir.exists() {
+            Self::migrate_legacy_store(base, root, &new_dir);
+        }
+        new_dir.join("store.db")
+    }
+
+    /// Best-effort migration: if a store exists under the legacy key and its
+    /// recorded `project_root` matches this root exactly, atomically rename
+    /// its directory to the new key and stamp provenance. A legacy store with
+    /// a mismatched or absent owner (a slug collision, or one never indexed)
+    /// is left untouched so it is never mis-claimed or lost (invariant I-P1).
+    fn migrate_legacy_store(base: &Path, root: &Path, new_dir: &Path) {
+        let legacy_dir = base.join(crate::util::legacy_repo_key(root));
+        if legacy_dir == *new_dir {
+            return;
+        }
+        let legacy_db = legacy_dir.join("store.db");
+        if !legacy_db.exists() || !Self::legacy_store_owns_root(&legacy_db, root) {
+            return;
+        }
+        if std::fs::rename(&legacy_dir, new_dir).is_ok() {
+            // The rename succeeded, so this store is ours: reuse the normal
+            // open + kv_set path instead of hand-rolling the meta_kv upsert.
+            if let Ok(s) = Store::open(&new_dir.join("store.db")) {
+                let _ = s.kv_set("legacy_repo_key", &crate::util::legacy_repo_key(root));
+                let _ = s.kv_set("identity", &crate::util::repo_identity(root));
+            }
+        }
+    }
+
+    /// True only when the legacy store's recorded `project_root` canonically
+    /// equals `root`. Absent ownership returns false: an un-indexed legacy
+    /// store is never auto-claimed. The open is `immutable=1`: this is a
+    /// probe of a possibly-foreign store, and even a READ_ONLY open of a
+    /// WAL database materializes -shm/-wal files in a directory the
+    /// migration contract promises never to touch. If the foreign store is
+    /// being written at this exact moment an immutable read can misread,
+    /// but every failure mode of this probe degrades to "not owned", which
+    /// only means no migration happens; it can never mis-claim.
+    fn legacy_store_owns_root(legacy_db: &Path, root: &Path) -> bool {
+        // SQLite URI: percent-encode the characters that would terminate or
+        // corrupt the URI, and use `/` separators on Windows.
+        let uri_path = legacy_db
+            .to_string_lossy()
+            .replace('%', "%25")
+            .replace('?', "%3F")
+            .replace('#', "%23")
+            .replace('\\', "/");
+        let Ok(conn) = Connection::open_with_flags(
+            format!("file:{uri_path}?immutable=1"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                | rusqlite::OpenFlags::SQLITE_OPEN_URI
+                | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        ) else {
+            return false;
+        };
+        let stored: Option<String> = conn
+            .query_row("SELECT v FROM meta_kv WHERE k='project_root'", [], |r| r.get(0))
+            .ok();
+        match stored {
+            Some(p) => {
+                let a = crate::util::canonicalize_plain(Path::new(&p))
+                    .unwrap_or_else(|_| PathBuf::from(&p));
+                let b =
+                    crate::util::canonicalize_plain(root).unwrap_or_else(|_| root.to_path_buf());
+                a == b
+            }
+            None => false,
+        }
     }
 
     /// Refuse to serve a store that a NEWER limpet has already touched.
@@ -908,5 +1012,103 @@ mod tests {
         assert_eq!(private, 0, "pre-existing rows default to not-private");
         assert_eq!(origin, None);
         assert_eq!(s.kv_get("schema_version").unwrap().as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn migrates_legacy_store_when_project_root_matches() {
+        let base = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        // A legacy-key store that was indexed for `root`.
+        let legacy_dir = base.path().join(crate::util::legacy_repo_key(root.path()));
+        std::fs::create_dir_all(&legacy_dir).unwrap();
+        {
+            let s = Store::open(&legacy_dir.join("store.db")).unwrap();
+            s.kv_set("project_root", &root.path().to_string_lossy()).unwrap();
+            s.kv_set("marker", "legacy-data").unwrap();
+        }
+        let db = Store::resolve_db_path(base.path(), root.path());
+        let new_dir = base.path().join(crate::util::repo_key(root.path()));
+        assert_eq!(db, new_dir.join("store.db"));
+        assert!(db.exists(), "migrated store must exist at the new key");
+        assert!(!legacy_dir.exists(), "legacy dir must be renamed away");
+        let s = Store::open(&db).unwrap();
+        assert_eq!(s.kv_get("marker").unwrap().as_deref(), Some("legacy-data"));
+        assert_eq!(
+            s.kv_get("legacy_repo_key").unwrap().as_deref(),
+            Some(crate::util::legacy_repo_key(root.path()).as_str()),
+            "migration should stamp provenance",
+        );
+    }
+
+    #[test]
+    fn ownership_probe_leaves_foreign_store_untouched() {
+        // The probe asks who owns a possibly-foreign store; it must be
+        // strictly read-only. A read-write SQLite open can materialize
+        // -wal/-shm files or roll back a journal in a store dir we have
+        // promised never to touch.
+        let base = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let other = tempfile::TempDir::new().unwrap();
+        let legacy_dir = base.path().join(crate::util::legacy_repo_key(root.path()));
+        std::fs::create_dir_all(&legacy_dir).unwrap();
+        {
+            let s = Store::open(&legacy_dir.join("store.db")).unwrap();
+            s.kv_set("project_root", &other.path().to_string_lossy()).unwrap();
+        }
+        let before: Vec<String> = std::fs::read_dir(&legacy_dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        let _ = Store::resolve_db_path(base.path(), root.path());
+        let after: Vec<String> = std::fs::read_dir(&legacy_dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        let mut b = before.clone();
+        let mut a = after.clone();
+        b.sort();
+        a.sort();
+        assert_eq!(a, b, "probing ownership must not add or remove files in a foreign store dir");
+    }
+
+    #[test]
+    fn locate_db_path_is_read_only_and_finds_legacy_store() {
+        // Display surfaces (statusline, hook) resolve the store WITHOUT
+        // migrating: a legacy-keyed store is found in place and no rename
+        // happens.
+        let base = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let legacy_dir = base.path().join(crate::util::legacy_repo_key(root.path()));
+        std::fs::create_dir_all(&legacy_dir).unwrap();
+        {
+            let s = Store::open(&legacy_dir.join("store.db")).unwrap();
+            s.kv_set("project_root", &root.path().to_string_lossy()).unwrap();
+        }
+        let db = Store::locate_db_path_in(base.path(), root.path());
+        assert_eq!(db, legacy_dir.join("store.db"), "locate must find the legacy store in place");
+        assert!(legacy_dir.exists(), "locate must never rename or migrate");
+    }
+
+    #[test]
+    fn does_not_claim_legacy_store_owned_by_another_root() {
+        let base = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let other = tempfile::TempDir::new().unwrap();
+        // A collided legacy key: the store belongs to a DIFFERENT root.
+        let legacy_dir = base.path().join(crate::util::legacy_repo_key(root.path()));
+        std::fs::create_dir_all(&legacy_dir).unwrap();
+        {
+            let s = Store::open(&legacy_dir.join("store.db")).unwrap();
+            s.kv_set("project_root", &other.path().to_string_lossy()).unwrap();
+            s.kv_set("marker", "not-yours").unwrap();
+        }
+        let _db = Store::resolve_db_path(base.path(), root.path());
+        assert!(legacy_dir.exists(), "an unclaimed legacy store must be preserved");
+        let s = Store::open(&_db).unwrap();
+        assert_eq!(
+            s.kv_get("marker").unwrap(),
+            None,
+            "must not inherit another repo's memory on a key collision",
+        );
     }
 }

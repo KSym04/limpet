@@ -20,17 +20,11 @@ use std::path::{Path, PathBuf};
 
 const UI_HTML: &str = include_str!("ui.html");
 
-/// Base directory holding one store per indexed repository.
+/// Base directory holding one store per indexed repository. Calls the
+/// store's own base resolution directly: these endpoints are polled too
+/// often to afford a git subprocess or a migration probe per request.
 fn data_dir() -> PathBuf {
-    // default_db_path is <data_dir>/<repo_key>/store.db; peel two levels
-    // off a probe path to recover <data_dir> without duplicating the
-    // resolution logic.
-    let probe = Store::default_db_path(Path::new("."));
-    probe
-        .parent()
-        .and_then(|p| p.parent())
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."))
+    Store::data_base()
 }
 
 /// Every indexed project: (repo_key, project_root, store path).
