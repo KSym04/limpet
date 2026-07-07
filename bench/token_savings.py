@@ -86,16 +86,14 @@ QUESTIONS = [
 # would open to reconstruct the same relationships by hand.
 LINEAGE_QUESTIONS = [
     dict(q="what does FeedScanner extend and what interface does it satisfy",
-         served_text="lineage: FeedScanner extends BaseScanner (unique); "
-                     "BaseScanner implements Scannable (unique)",
+         served_text='{"target":"src.scan.feed_scanner.FeedScanner","ancestors":[{"fqn":"src.scan.base_scanner.BaseScanner","rel":"extends","resolved":"unique","depth":1},{"fqn":"src.scan.base_scanner.Scannable","rel":"implements","resolved":"unique","depth":2}],"descendants":[],"callers":[],"truncated":false,"unresolved_count":0}',
          files=["src/scan/feed_scanner.php", "src/scan/base_scanner.php"]),
     dict(q="who implements Scannable",
-         served_text="lineage: BaseScanner implements Scannable; "
-                     "FeedScanner extends BaseScanner",
+         served_text='{"target":"src.scan.base_scanner.Scannable","ancestors":[],"descendants":[{"fqn":"src.scan.base_scanner.BaseScanner","rel":"implements","resolved":"unique","depth":1},{"fqn":"src.scan.feed_scanner.FeedScanner","rel":"extends","resolved":"unique","depth":2}],"callers":[],"truncated":false,"unresolved_count":0}',
          files=["src/scan/base_scanner.php", "src/scan/feed_scanner.php"]),
     dict(q="who calls health_score",
-         served_text="lineage: FeedScanner.scan_batch calls health_score (unique)",
-         files=["src/scan/feed_scanner.php", "src/scan/base_scanner.php"]),
+         served_text='{"target":"src.scan.base_scanner.BaseScanner.health_score","ancestors":[],"descendants":[],"callers":[{"fqn":"src.scan.feed_scanner.FeedScanner.scan_batch","rel":"calls","resolved":"unique","depth":1}],"truncated":false,"unresolved_count":0}',
+         files=["src/scan/feed_scanner.php"]),
 ]
 
 
@@ -209,12 +207,11 @@ def main():
         served = tokens_of_text(item["served_text"])
         baseline = tokens_of_files([os.path.join(FIXTURE, f) for f in item["files"]]) + 300
         lineage_served += served
-        baseline_here = baseline
-        lineage_baseline += baseline_here
-        ratio = baseline_here / served if served else 0.0
-        net = "ok" if baseline_here > served else "NEGATIVE"
-        print(f"  {item['q'][:48]:48}  served={served:5} base={baseline_here:5} {ratio:4.1f}x {net}")
-        assert baseline_here > served, f"lineage question net negative: {item['q']}"
+        lineage_baseline += baseline
+        ratio = baseline / served if served else 0.0
+        net = "ok" if baseline > served else "NEGATIVE"
+        print(f"  {item['q'][:48]:48}  served={served:5} base={baseline:5} {ratio:4.1f}x {net}")
+        assert baseline > served, f"lineage question net negative: {item['q']}"
 
     lineage_ratio = lineage_baseline / lineage_served if lineage_served else 0.0
     print(f"lineage sub-gate ratio: {lineage_ratio:.1f}x (must be >= {GATE_RATIO})")
