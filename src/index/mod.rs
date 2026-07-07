@@ -8,6 +8,7 @@
 
 pub mod extract;
 pub mod fqn;
+pub mod graph;
 pub mod lang;
 
 use crate::config::RepoConfig;
