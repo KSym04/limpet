@@ -222,6 +222,10 @@ fn tool_remember(
     Ok(envelope(serde_json::to_value(&result)?, meta))
 }
 
+fn edge_json(e: &crate::index::graph::Edge) -> Value {
+    json!({ "fqn": e.fqn, "rel": e.rel, "resolved": e.resolved, "depth": e.depth })
+}
+
 fn tool_map(store: &Store, sweep: &SweepReport, args: &Value) -> Result<Value> {
     let target_raw = str_arg(args, "target")?;
     // A path target may arrive with `\`; a symbol FQN never contains one, so
@@ -345,6 +349,32 @@ fn tool_map(store: &Store, sweep: &SweepReport, args: &Value) -> Result<Value> {
         .iter()
         .filter(|m| m["status"].as_str() == Some("stale"))
         .count();
+
+    // Additive lineage for SYMBOL targets only (D2). Computed for the first
+    // matched symbol fqn; the payload names its own target so an ambiguous
+    // target string is self-disclosing. Read-only, bounded (I-G2).
+    let lineage_val = if scope_desc.starts_with("symbol ") {
+        let target_fqn = symbols
+            .first()
+            .and_then(|s| s.get("fqn"))
+            .and_then(Value::as_str)
+            .unwrap_or(target);
+        match crate::index::graph::lineage(store, target_fqn, Default::default()) {
+            Ok(l) => json!({
+                "target": l.target,
+                "ancestors": l.ancestors.iter().map(edge_json).collect::<Vec<_>>(),
+                "descendants": l.descendants.iter().map(edge_json).collect::<Vec<_>>(),
+                "callers": l.callers.iter().map(edge_json).collect::<Vec<_>>(),
+                "truncated": l.truncated,
+                "unresolved_count": l.unresolved_count,
+            }),
+            // Lineage is best-effort context; a failure never fails `map`.
+            Err(_) => Value::Null,
+        }
+    } else {
+        Value::Null
+    };
+
     // True totals, so a clipped list is disclosed instead of silently
     // presented as complete (envelope invariant; audit 2026-07).
     let sym_total: i64 = store.conn.query_row(
@@ -373,15 +403,16 @@ fn tool_map(store: &Store, sweep: &SweepReport, args: &Value) -> Result<Value> {
         stale,
         0,
     );
-    Ok(envelope(
-        json!({
-            "scope": scope_desc,
-            "symbols": symbols,
-            "calls": calls_out,
-            "memories": memories,
-        }),
-        meta,
-    ))
+    let mut data = json!({
+        "scope": scope_desc,
+        "symbols": symbols,
+        "calls": calls_out,
+        "memories": memories,
+    });
+    if !lineage_val.is_null() {
+        data.as_object_mut().unwrap().insert("lineage".into(), lineage_val);
+    }
+    Ok(envelope(data, meta))
 }
 
 fn tool_affected(store: &Store, root: &Path, sweep: &SweepReport) -> Result<Value> {
@@ -705,7 +736,7 @@ pub fn tool_schemas() -> Value {
         },
         {
             "name": "map",
-            "description": "Structural view of a file or symbol: outline, imports, syntactic call edges, plus every memory attached to it. Code and knowledge in one answer.",
+            "description": "Structural view of a file or symbol: outline, imports, syntactic call edges, plus every memory attached to it. For a SYMBOL target it also returns lineage (ancestors, descendants, callers) with each edge labeled unique/ambiguous/unresolved. Code and knowledge in one answer.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -738,4 +769,16 @@ pub fn tool_schemas() -> Value {
             }
         }
     ])
+}
+
+/// Test-only shim: call a tool handler directly, bypassing sweep/resolve.
+/// Used by integration tests that build their own Store in a tempdir.
+/// Not part of the public API; subject to removal without notice.
+#[doc(hidden)]
+pub fn dispatch_for_test(name: &str, store: &Store, args: &Value) -> Result<Value> {
+    let sweep = SweepReport::default();
+    match name {
+        "map" => tool_map(store, &sweep, args),
+        other => Err(anyhow!("unknown tool '{other}'")),
+    }
 }
