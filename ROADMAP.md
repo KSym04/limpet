@@ -12,7 +12,7 @@ confident answers about code that moved on; a deterministic AST-hash anchor is
 the only thing that flags the lie. Everything below deepens that edge or it does
 not ship.
 
-## v0.10.0 - structural lineage (context, not just the symbol)
+## v0.11.0 - structural lineage (context, not just the symbol)
 
 - **AST lineage graph.** `map` on a symbol returns its structural neighborhood in
   one call: ancestors (what it extends or implements, the trait it satisfies),
@@ -37,7 +37,7 @@ not ship.
 - Boundary held: name resolution, not type resolution; ambiguity is disclosed,
   not resolved. limpet stays memory context, not a call-graph oracle.
 
-## v0.11.0 — grammar wave 2
+## v0.12.0 — grammar wave 2
 
 Go, Java, Ruby, C#, Bash. Each gated on the I7 fixture (function, class,
 method, import, call), a golden hash-property case (cosmetic-invariant,
@@ -53,7 +53,7 @@ uniqueness needs schema work), and a low-entropy follow guard so trivial
 duplicate bodies (empty functions, delegating one-liners) cannot be silently
 followed to the wrong twin.
 
-## v0.12.0 — freshness at scale
+## v0.13.0 — freshness at scale
 
 - **FS-event watcher** (notify) replacing the on-call sweep for very large
   repositories, where the 32-file sweep budget starts to lag.
