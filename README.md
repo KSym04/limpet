@@ -293,6 +293,19 @@ Data lives under `~/.local/share/limpet/`, one SQLite store per repository. Team
 $limpetSeg = & limpet statusline --root $projectDir
 ```
 
+The simplest setup is to let Claude Code call the binary directly as its whole statusline — add to `~/.claude/settings.json`:
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "limpet statusline --root \"$CLAUDE_PROJECT_DIR\""
+  }
+}
+```
+
+Already have a custom statusline? Append the binary's output as one segment — do **not** query `store.db` with `sqlite3` yourself. The per-repo store key scheme changes between versions (it moved from a path hash to a portable git-remote identity in v0.9.0), so a hand-rolled query silently stops matching and the segment just disappears. Only `limpet statusline` tracks the current scheme. Run `limpet doctor` to check how your statusline is wired: it reports `ok` when it delegates to the binary, `warn` when it hand-rolls a store query that will drift, and the exact line to add when nothing is wired.
+
 Toggle it off with `/limpet statusline` (writes `~/.claude/.limpet-statusline-off`; the command honors the flag).
 
 **Auto-recall at session start.** Without any hook, memory-first behavior depends on the agent remembering to type `/limpet`. With a SessionStart hook, every new session in an already-indexed project opens with a one-line brief injected into context — "This project has limpet memory: 13 active memories, 2 stale…" — and the agent recalls before it reads. Add to `~/.claude/settings.json`:
