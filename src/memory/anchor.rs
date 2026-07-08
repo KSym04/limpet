@@ -49,6 +49,8 @@ fn is_identity_leaf(kind: &str) -> bool {
             | "false"
             | "none"
             | "null"
+            // Bash-specific: unquoted word tokens carry command and variable identity.
+            | "word"
     )
 }
 

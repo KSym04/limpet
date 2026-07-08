@@ -1,6 +1,6 @@
 //! Language registry: extension detection and tree-sitter grammar handles.
 //!
-//! Ten curated grammars ship (PHP, JS, TS, Python, Rust, C/C++, Go, Java, Ruby, C#). Every
+//! Eleven curated grammars ship (PHP, JS, TS, Python, Rust, C/C++, Go, Java, Ruby, C#, Bash). Every
 //! language listed here has fixture
 //! coverage in `tests/index_langs.rs` (invariant I7); adding a language
 //! without a fixture is a review-blocking change.
@@ -20,6 +20,7 @@ pub enum Lang {
     Java,
     Ruby,
     CSharp,
+    Bash,
 }
 
 impl Lang {
@@ -35,6 +36,7 @@ impl Lang {
             Lang::Java => "java",
             Lang::Ruby => "ruby",
             Lang::CSharp => "c_sharp",
+            Lang::Bash => "bash",
         }
     }
 }
@@ -56,6 +58,7 @@ pub fn detect(path: &std::path::Path) -> Option<Lang> {
         "java" => Some(Lang::Java),
         "rb" | "rake" => Some(Lang::Ruby),
         "cs" => Some(Lang::CSharp),
+        "sh" | "bash" => Some(Lang::Bash),
         _ => None,
     }
 }
@@ -75,6 +78,7 @@ pub fn from_config_str(s: &str) -> Option<Lang> {
         "java" => Some(Lang::Java),
         "rb" | "ruby" => Some(Lang::Ruby),
         "cs" | "csharp" | "c#" => Some(Lang::CSharp),
+        "sh" | "bash" => Some(Lang::Bash),
         _ => None,
     }
 }
@@ -118,5 +122,6 @@ pub fn ts_language(lang: Lang) -> Language {
         Lang::Java => tree_sitter_java::LANGUAGE.into(),
         Lang::Ruby => tree_sitter_ruby::LANGUAGE.into(),
         Lang::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
+        Lang::Bash => tree_sitter_bash::LANGUAGE.into(),
     }
 }

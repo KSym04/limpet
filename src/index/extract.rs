@@ -681,6 +681,40 @@ fn walk(
             }
             _ => {}
         },
+        Lang::Bash => match kind {
+            "function_definition" => {
+                let name_opt = name_of(node, src).or_else(|| {
+                    // bash function name is often a `word` child, not a `name` field
+                    let mut c = node.walk();
+                    let x = node.children(&mut c).find(|ch| ch.kind() == "word").map(|w| node_text(w, src)); x
+                });
+                if let Some(name) = name_opt {
+                    push_sym(facts, node, src, parents, "function", name.clone());
+                    parents.push(name);
+                    pushed_parent = true;
+                }
+            }
+            "command" => {
+                // first word is the command name; `source`/`.` -> import, else call.
+                let cmd = node
+                    .child_by_field_name("name")
+                    .or_else(|| node.named_child(0))
+                    .map(|n| node_text(n, src))
+                    .unwrap_or_default();
+                if cmd == "source" || cmd == "." {
+                    let arg_text: Option<String> = {
+                        let mut c = node.walk();
+                        let x = node.children(&mut c).nth(1).map(|arg| node_text(arg, src)); x
+                    };
+                    if let Some(t) = arg_text {
+                        facts.imports.push(t.trim_matches(['"', '\'']).to_string());
+                    }
+                } else if !cmd.is_empty() {
+                    facts.calls.push((current_scope(parents), cmd));
+                }
+            }
+            _ => {}
+        },
         Lang::CSharp => match kind {
             "method_declaration" => {
                 if let Some(name) = name_of(node, src) {

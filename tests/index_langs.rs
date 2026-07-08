@@ -580,3 +580,47 @@ class Dog {
     assert_eq!(ha, hb, "cosmetic change (whitespace/comment) must not alter body_hash");
     assert_ne!(ha, hc, "semantic edit must alter body_hash");
 }
+
+#[test]
+fn bash_extraction() {
+    let src = r#"#!/bin/bash
+source ./helpers.sh
+
+greet() {
+    hello_world
+}
+"#;
+    let facts = extract::extract(Lang::Bash, src).unwrap();
+    assert!(names(&facts, "function").contains(&"greet".to_string()), "{:?}", facts.symbols);
+    assert!(facts.calls.iter().any(|(scope, callee)| scope == "greet" && callee == "hello_world"), "{:?}", facts.calls);
+    assert!(facts.imports.iter().any(|i| i.contains("helpers.sh")), "{:?}", facts.imports);
+    // Bash produces no inheritance edges.
+    assert!(facts.inherits.is_empty(), "{:?}", facts.inherits);
+}
+
+#[test]
+fn bash_hash_is_cosmetic_invariant_and_edit_sensitive() {
+    // baseline: greet function
+    let a = "#!/bin/bash\ngreet() {\n    hello_world\n}\n";
+    // cosmetic: extra blank line + comment, same semantics
+    let b = "#!/bin/bash\n# greets the world\ngreet() {\n\n    hello_world\n}\n";
+    // semantic: changed callee
+    let c = "#!/bin/bash\ngreet() {\n    goodbye_world\n}\n";
+
+    let hash_of = |src: &str| {
+        let facts = extract::extract(Lang::Bash, src).unwrap();
+        let sym = facts
+            .symbols
+            .iter()
+            .find(|s| s.name == "greet")
+            .unwrap_or_else(|| panic!("no greet symbol in: {src}"));
+        anchor::ast_body_hash(Lang::Bash, src, sym.byte_range).unwrap()
+    };
+
+    let ha = hash_of(a);
+    let hb = hash_of(b);
+    let hc = hash_of(c);
+
+    assert_eq!(ha, hb, "cosmetic change (whitespace/comment) must not alter body_hash");
+    assert_ne!(ha, hc, "semantic edit must alter body_hash");
+}
