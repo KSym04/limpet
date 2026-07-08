@@ -474,6 +474,80 @@ fn walk(
             }
             _ => {}
         },
+        Lang::Go => match kind {
+            "function_declaration" => {
+                if let Some(name) = name_of(node, src) {
+                    push_sym(facts, node, src, parents, "function", name.clone());
+                    parents.push(name);
+                    pushed_parent = true;
+                }
+            }
+            "method_declaration" => {
+                if let Some(name) = name_of(node, src) {
+                    push_sym(facts, node, src, parents, "method", name.clone());
+                    parents.push(name);
+                    pushed_parent = true;
+                }
+            }
+            "type_spec" => {
+                if let Some(name) = name_of(node, src) {
+                    push_sym(facts, node, src, parents, "class", name.clone());
+                    // Embedded fields (no field name) in the struct/interface body
+                    // are Go's composition — record as `embeds`.
+                    if let Some(body) = node.child_by_field_name("type") {
+                        let mut bc = body.walk();
+                        for f in body.children(&mut bc) {
+                            // struct: field_declaration with a type and no `name`
+                            // field; interface: embedded type_identifier directly.
+                            if f.kind() == "field_declaration"
+                                && f.child_by_field_name("name").is_none()
+                            {
+                                if let Some(t) = f
+                                    .child_by_field_name("type")
+                                    .or_else(|| f.named_child(0))
+                                {
+                                    push_inherit(
+                                        facts,
+                                        parents,
+                                        &name,
+                                        node_text(t, src),
+                                        "embeds",
+                                    );
+                                }
+                            } else if matches!(f.kind(), "type_identifier" | "qualified_type") {
+                                push_inherit(
+                                    facts,
+                                    parents,
+                                    &name,
+                                    node_text(f, src),
+                                    "embeds",
+                                );
+                            }
+                        }
+                    }
+                    parents.push(name);
+                    pushed_parent = true;
+                }
+            }
+            "import_spec" => {
+                if let Some(p) = node
+                    .child_by_field_name("path")
+                    .or_else(|| node.named_child(0))
+                {
+                    facts
+                        .imports
+                        .push(node_text(p, src).trim_matches('"').to_string());
+                }
+            }
+            "call_expression" => {
+                if let Some(func) = node.child_by_field_name("function") {
+                    if let Some(callee) = callee_name(func, src) {
+                        facts.calls.push((current_scope(parents), callee));
+                    }
+                }
+            }
+            _ => {}
+        },
     }
 
     let mut cursor = node.walk();

@@ -3,6 +3,7 @@
 //! a call, with correct FQNs after indexing.
 
 use limpet::index::{self, extract, lang::Lang};
+use limpet::memory::anchor;
 use limpet::store::Store;
 use std::fs;
 use tempfile::TempDir;
@@ -280,4 +281,67 @@ fn broken_file_is_isolated() {
         .unwrap();
     assert_eq!(ok_syms, 1, "good file must index despite bad sibling");
     assert!(report.files >= 1);
+}
+
+#[test]
+fn go_extraction() {
+    let src = r#"
+package main
+
+import "fmt"
+
+type Animal struct{}
+
+type Dog struct {
+    Animal
+}
+
+func (d Dog) Speak() string {
+    return bark()
+}
+
+func bark() string {
+    fmt.Println("woof")
+    return "woof"
+}
+"#;
+    let facts = extract::extract(Lang::Go, src).unwrap();
+    assert!(names(&facts, "function").contains(&"bark".to_string()), "{:?}", facts.symbols);
+    assert!(names(&facts, "method").contains(&"Speak".to_string()), "{:?}", facts.symbols);
+    assert!(names(&facts, "class").contains(&"Dog".to_string()), "{:?}", facts.symbols);
+    assert!(facts.imports.iter().any(|i| i.contains("fmt")), "{:?}", facts.imports);
+    assert!(facts.calls.iter().any(|(scope, callee)| scope == "Speak" && callee == "bark"));
+    // Go embedding surfaces as an `embeds` inherit edge.
+    assert!(
+        facts
+            .inherits
+            .iter()
+            .any(|i| i.name == "Dog" && i.parent_name == "Animal" && i.rel == "embeds"),
+        "{:?}",
+        facts.inherits
+    );
+}
+
+#[test]
+fn go_hash_is_cosmetic_invariant_and_edit_sensitive() {
+    let a = "package main\nfunc bark() string { return \"woof\" }\n";
+    let b = "package main\n// a comment\nfunc bark()  string  {  return \"woof\"  }\n";
+    let c = "package main\nfunc bark() string { return \"bark\" }\n";
+
+    let hash_of = |src: &str| {
+        let facts = extract::extract(Lang::Go, src).unwrap();
+        let sym = facts
+            .symbols
+            .iter()
+            .find(|s| s.name == "bark")
+            .unwrap_or_else(|| panic!("no bark symbol in: {src}"));
+        anchor::ast_body_hash(Lang::Go, src, sym.byte_range).unwrap()
+    };
+
+    let ha = hash_of(a);
+    let hb = hash_of(b);
+    let hc = hash_of(c);
+
+    assert_eq!(ha, hb, "cosmetic change (whitespace/comment) must not alter body_hash");
+    assert_ne!(ha, hc, "semantic edit must alter body_hash");
 }
