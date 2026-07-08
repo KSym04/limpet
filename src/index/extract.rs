@@ -555,6 +555,64 @@ fn walk(
             }
             _ => {}
         },
+        Lang::Java => match kind {
+            "method_declaration" => {
+                if let Some(name) = name_of(node, src) {
+                    push_sym(facts, node, src, parents, "method", name.clone());
+                    parents.push(name);
+                    pushed_parent = true;
+                }
+            }
+            "class_declaration" | "interface_declaration" => {
+                if let Some(name) = name_of(node, src) {
+                    push_sym(facts, node, src, parents, "class", name.clone());
+                    if let Some(sc) = node.child_by_field_name("superclass") {
+                        for p in base_names(sc, src) {
+                            push_inherit(facts, parents, &name, p, "extends");
+                        }
+                    }
+                    if let Some(ifc) = node.child_by_field_name("interfaces") {
+                        // super_interfaces -> type_list -> type_identifier
+                        let clause = (0..ifc.child_count())
+                            .filter_map(|i| ifc.child(i))
+                            .find(|c| c.kind() == "type_list")
+                            .unwrap_or(ifc);
+                        for p in base_names(clause, src) {
+                            push_inherit(facts, parents, &name, p, "implements");
+                        }
+                    }
+                    // interface X extends Y, Z -> extends
+                    if node.kind() == "interface_declaration" {
+                        let mut c = node.walk();
+                        for ch in node.children(&mut c) {
+                            if ch.kind() == "extends_interfaces" {
+                                for p in base_names(ch, src) {
+                                    push_inherit(facts, parents, &name, p, "extends");
+                                }
+                            }
+                        }
+                    }
+                    parents.push(name);
+                    pushed_parent = true;
+                }
+            }
+            "import_declaration" => {
+                facts.imports.push(
+                    node_text(node, src)
+                        .trim_start_matches("import")
+                        .trim()
+                        .trim_end_matches(';')
+                        .trim()
+                        .to_string(),
+                );
+            }
+            "method_invocation" => {
+                if let Some(name) = node.child_by_field_name("name") {
+                    facts.calls.push((current_scope(parents), node_text(name, src)));
+                }
+            }
+            _ => {}
+        },
     }
 
     let mut cursor = node.walk();

@@ -323,6 +323,77 @@ func bark() string {
 }
 
 #[test]
+fn java_extraction() {
+    let src = r#"
+package app;
+import app.services.Mailer;
+
+interface Pet {}
+
+class Animal {}
+
+class Dog extends Animal implements Pet {
+    public String speak() {
+        return bark();
+    }
+}
+"#;
+    let facts = extract::extract(Lang::Java, src).unwrap();
+    assert!(names(&facts, "class").contains(&"Dog".to_string()), "{:?}", facts.symbols);
+    assert!(names(&facts, "method").contains(&"speak".to_string()), "{:?}", facts.symbols);
+    assert!(facts.imports.iter().any(|i| i.contains("Mailer")), "{:?}", facts.imports);
+    assert!(facts.calls.iter().any(|(scope, callee)| scope == "speak" && callee == "bark"));
+    assert!(facts.inherits.iter().any(|i| i.name=="Dog" && i.parent_name=="Animal" && i.rel=="extends"), "{:?}", facts.inherits);
+    assert!(facts.inherits.iter().any(|i| i.name=="Dog" && i.parent_name=="Pet" && i.rel=="implements"), "{:?}", facts.inherits);
+}
+
+#[test]
+fn java_hash_is_cosmetic_invariant_and_edit_sensitive() {
+    let a = r#"
+class Foo {
+    public String speak() {
+        return bark();
+    }
+}
+"#;
+    // cosmetic: extra whitespace + a comment, same semantics
+    let b = r#"
+class Foo {
+    // a comment
+    public String speak() {
+
+        return  bark() ;
+    }
+}
+"#;
+    // semantic: changed return value
+    let c = r#"
+class Foo {
+    public String speak() {
+        return woof();
+    }
+}
+"#;
+
+    let hash_of = |src: &str| {
+        let facts = extract::extract(Lang::Java, src).unwrap();
+        let sym = facts
+            .symbols
+            .iter()
+            .find(|s| s.name == "speak")
+            .unwrap_or_else(|| panic!("no speak symbol in: {src}"));
+        anchor::ast_body_hash(Lang::Java, src, sym.byte_range).unwrap()
+    };
+
+    let ha = hash_of(a);
+    let hb = hash_of(b);
+    let hc = hash_of(c);
+
+    assert_eq!(ha, hb, "cosmetic change (whitespace/comment) must not alter body_hash");
+    assert_ne!(ha, hc, "semantic edit must alter body_hash");
+}
+
+#[test]
 fn go_hash_is_cosmetic_invariant_and_edit_sensitive() {
     let a = "package main\nfunc bark() string { return \"woof\" }\n";
     let b = "package main\n// a comment\nfunc bark()  string  {  return \"woof\"  }\n";
