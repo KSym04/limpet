@@ -38,7 +38,11 @@ fn is_identity_leaf(kind: &str) -> bool {
             | "number_literal"
             | "char_literal"
             | "raw_string_literal"
-            // Go: double-quoted and backtick string content nodes.
+            // Go: double-quoted and backtick string content nodes. These are
+            // Go-only at runtime: tree-sitter-rust defines a raw_string_literal_content
+            // symbol internally but ALIASES it to "string_content" in its public
+            // node-type table, so node.kind() never returns this for Rust and
+            // adding it here cannot shift existing Rust body hashes.
             | "interpreted_string_literal_content"
             | "raw_string_literal_content"
             | "true"
