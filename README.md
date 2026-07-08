@@ -34,7 +34,7 @@ Every claim here is checkable in this repo, not marketing:
 
 - **It knows when it is wrong.** Generic AI memory (vector stores, RAG, notes) trusts what it wrote forever. limpet anchors each memory to the code it describes through a normalized AST hash, so a memory flips to `stale` the moment that code is edited, follows it through renames and file moves, and heals if the change is reverted. Self-invalidation is the whole point, and no other open memory layer does it. → [the anchor lifecycle](#-the-anchor-lifecycle)
 - **It shows you what it saved.** Every recall is priced against the file reads it replaced and kept in a running ledger you can read: `limpet stats`. The benchmark measures 4.0x fewer tokens on questions an agent re-answers every session, and undercounts on purpose. → [the receipts](#-the-receipts-token-savings-measured)
-- **It indexes the whole repository, not just symbols.** Six tree-sitter grammars (PHP, JS, TS, Python, Rust, C/C++) give function- and class-level anchoring; every other file (templates, styles, configs, data, even non-UTF-8 legacy source) is anchorable at the file level. Memories can attach anywhere, and go stale when any of it changes. → [whole repo indexed](#-whole-repo-indexed-thin-on-purpose)
+- **It indexes the whole repository, not just symbols.** Eleven tree-sitter grammars (PHP, JS, TS, Python, Rust, C/C++, Go, Java, Ruby, C#, Bash) give function- and class-level anchoring; every other file (templates, styles, configs, data, even non-UTF-8 legacy source) is anchorable at the file level. Memories can attach anywhere, and go stale when any of it changes. → [whole repo indexed](#-whole-repo-indexed-thin-on-purpose)
 - **It never lies by omission.** Every response carries an honesty envelope: what matched, what was returned, what was dropped and why, how fresh the index is, how much is stale or contradicted. There is no code path that truncates silently, and the benchmark gate has killed limpet's own features when they crossed that line.
 
 It is not a vector database, a code-search engine, or a call-graph oracle; it is the layer that remembers *why*, tied to the code, and tells you when the why no longer holds. See [what limpet is not](#-what-limpet-is-not).
@@ -332,7 +332,7 @@ Toggle it off with `/limpet statusline` (writes `~/.claude/.limpet-statusline-of
 
 ## 🌳 Whole repo indexed, thin on purpose
 
-**Every file in the repository is indexed and anchorable.** Files with a shipped grammar (PHP, JavaScript, TypeScript, Python, Rust, C/C++) get full symbol extraction: functions, classes, imports, and name-based call references labeled `syntactic`. Every other file (`.twig`, `.scss`, `.vue`, `.blade.php`, `.erb`, `.md`, `.yml`, configs, anything) gets a file-level node with a content hash, so a memory can anchor to it and go `stale:file_edited` the moment it changes. On template-heavy stacks that is where the knowledge worth remembering actually lives.
+**Every file in the repository is indexed and anchorable.** Files with a shipped grammar (PHP, JavaScript, TypeScript, Python, Rust, C/C++, Go, Java, Ruby, C#, Bash) get full symbol extraction: functions, classes, imports, name-based call references labeled `syntactic`, and inheritance edges (extends, implements, impl_trait, embeds, mixin) surfaced through `map` lineage. Every other file (`.twig`, `.scss`, `.vue`, `.blade.php`, `.erb`, `.md`, `.yml`, configs, anything) gets a file-level node with a content hash, so a memory can anchor to it and go `stale:file_edited` the moment it changes. On template-heavy stacks that is where the knowledge worth remembering actually lives.
 
 Legacy encodings degrade gracefully: a grammar-matched file that is not valid UTF-8 (CP949 or UTF-16 source in an old C++ engine, say) keeps its file-level anchor instead of disappearing from the index. A grammar can only ever upgrade a file, never make it less anchorable.
 
@@ -353,7 +353,7 @@ An optional `.limpet.json` at the repository root tunes two things. It is a plai
 }
 ```
 
-- **`extensions`** maps a filename suffix to one of the shipped grammars (`php`, `js`, `ts`, `py`, `rust`, `cpp`), so template-heavy and legacy stacks get full symbol extraction on extensions the built-in table does not know. The longest matching suffix wins, so a specific `blade.php` overrides a generic `php`.
+- **`extensions`** maps a filename suffix to one of the shipped grammars (`php`, `js`, `ts`, `py`, `rust`, `cpp`, `go`, `java`, `rb`, `cs`, `bash`), so template-heavy and legacy stacks get full symbol extraction on extensions the built-in table does not know. The longest matching suffix wins, so a specific `blade.php` overrides a generic `php`.
 - **`auto_import`** (default `true`) seeds a brand-new store from a committed `.limpet/memory.jsonl` on the first index, so a teammate who clones the repo gets the shared memory with no extra step. It runs once, only on a fresh store, through the same guarded path as `limpet import`.
 
 **Portable identity.** A repository's store is keyed by its git `origin` remote when it has one, falling back to the canonical path. Move a checkout or re-clone it and the memory follows; two different repositories can no longer collide onto one store. Existing stores migrate automatically on first open, and a store is never mis-claimed: an ambiguous legacy store is left in place rather than reassigned.

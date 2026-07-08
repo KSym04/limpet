@@ -1,3 +1,26 @@
+# SPEC — grammar wave 2 (Go, Java, Ruby, C#, Bash) — v0.12.0
+
+Status: APPROVED (design, 2026-07-08). Full spec:
+docs/superpowers/specs/2026-07-08-grammar-wave-2-design.md
+
+Extend structural coverage 6 -> 11 grammars, purely additive: each new grammar
+is an isolated extractor arm + fixtures, gated by the same I7 fixture and
+hash-identity checks the first six passed. The lineage graph gains two honest
+inheritance rels so Go embedding (`embeds`) and Ruby mixins (`mixin`) are labeled
+for what they are, not fuzzed into `extends`.
+
+| Item | Target | Summary |
+|---|---|---|
+| Go / Java / Ruby / C# / Bash | v0.12.0 | one extractor arm + I7 fixture + hash/name gates per grammar |
+| inherits.rel widening | v0.12.0 | schema v4 adds `embeds`, `mixin`; migration drops+recreates the derived table |
+| FQN disambiguation + low-entropy follow guard | v0.13.0 | DEFERRED riders (touch anchor/dedup + schema uniqueness) |
+
+Locked: 5 grammars only (riders deferred); honest new rels via schema v4;
+no extract.rs split; Go/Bash grammar crates pinned ABI-compatible with
+tree-sitter 0.24.
+
+---
+
 # SPEC — lineage graph + live ledger + local event hook (design, next minors)
 
 Status: APPROVED (M0 closed 2026-07-07). Full spec:

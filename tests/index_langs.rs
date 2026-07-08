@@ -3,6 +3,7 @@
 //! a call, with correct FQNs after indexing.
 
 use limpet::index::{self, extract, lang::Lang};
+use limpet::memory::anchor;
 use limpet::store::Store;
 use std::fs;
 use tempfile::TempDir;
@@ -280,4 +281,346 @@ fn broken_file_is_isolated() {
         .unwrap();
     assert_eq!(ok_syms, 1, "good file must index despite bad sibling");
     assert!(report.files >= 1);
+}
+
+#[test]
+fn go_extraction() {
+    let src = r#"
+package main
+
+import "fmt"
+
+type Animal struct{}
+
+type Dog struct {
+    Animal
+}
+
+func (d Dog) Speak() string {
+    return bark()
+}
+
+func bark() string {
+    fmt.Println("woof")
+    return "woof"
+}
+"#;
+    let facts = extract::extract(Lang::Go, src).unwrap();
+    assert!(names(&facts, "function").contains(&"bark".to_string()), "{:?}", facts.symbols);
+    assert!(names(&facts, "method").contains(&"Speak".to_string()), "{:?}", facts.symbols);
+    assert!(names(&facts, "class").contains(&"Dog".to_string()), "{:?}", facts.symbols);
+    assert!(facts.imports.iter().any(|i| i.contains("fmt")), "{:?}", facts.imports);
+    assert!(facts.calls.iter().any(|(scope, callee)| scope == "Speak" && callee == "bark"));
+    // Go embedding surfaces as an `embeds` inherit edge.
+    assert!(
+        facts
+            .inherits
+            .iter()
+            .any(|i| i.name == "Dog" && i.parent_name == "Animal" && i.rel == "embeds"),
+        "{:?}",
+        facts.inherits
+    );
+}
+
+#[test]
+fn java_extraction() {
+    let src = r#"
+package app;
+import app.services.Mailer;
+
+interface Pet {}
+
+class Animal {}
+
+class Dog extends Animal implements Pet {
+    public String speak() {
+        return bark();
+    }
+}
+"#;
+    let facts = extract::extract(Lang::Java, src).unwrap();
+    assert!(names(&facts, "class").contains(&"Dog".to_string()), "{:?}", facts.symbols);
+    assert!(names(&facts, "method").contains(&"speak".to_string()), "{:?}", facts.symbols);
+    assert!(facts.imports.iter().any(|i| i.contains("Mailer")), "{:?}", facts.imports);
+    assert!(facts.calls.iter().any(|(scope, callee)| scope == "speak" && callee == "bark"));
+    assert!(facts.inherits.iter().any(|i| i.name=="Dog" && i.parent_name=="Animal" && i.rel=="extends"), "{:?}", facts.inherits);
+    assert!(facts.inherits.iter().any(|i| i.name=="Dog" && i.parent_name=="Pet" && i.rel=="implements"), "{:?}", facts.inherits);
+}
+
+#[test]
+fn java_hash_is_cosmetic_invariant_and_edit_sensitive() {
+    let a = r#"
+class Foo {
+    public String speak() {
+        return bark();
+    }
+}
+"#;
+    // cosmetic: extra whitespace + a comment, same semantics
+    let b = r#"
+class Foo {
+    // a comment
+    public String speak() {
+
+        return  bark() ;
+    }
+}
+"#;
+    // semantic: changed return value
+    let c = r#"
+class Foo {
+    public String speak() {
+        return woof();
+    }
+}
+"#;
+
+    let hash_of = |src: &str| {
+        let facts = extract::extract(Lang::Java, src).unwrap();
+        let sym = facts
+            .symbols
+            .iter()
+            .find(|s| s.name == "speak")
+            .unwrap_or_else(|| panic!("no speak symbol in: {src}"));
+        anchor::ast_body_hash(Lang::Java, src, sym.byte_range).unwrap()
+    };
+
+    let ha = hash_of(a);
+    let hb = hash_of(b);
+    let hc = hash_of(c);
+
+    assert_eq!(ha, hb, "cosmetic change (whitespace/comment) must not alter body_hash");
+    assert_ne!(ha, hc, "semantic edit must alter body_hash");
+}
+
+#[test]
+fn go_hash_is_cosmetic_invariant_and_edit_sensitive() {
+    let a = "package main\nfunc bark() string { return \"woof\" }\n";
+    let b = "package main\n// a comment\nfunc bark()  string  {  return \"woof\"  }\n";
+    let c = "package main\nfunc bark() string { return \"bark\" }\n";
+
+    let hash_of = |src: &str| {
+        let facts = extract::extract(Lang::Go, src).unwrap();
+        let sym = facts
+            .symbols
+            .iter()
+            .find(|s| s.name == "bark")
+            .unwrap_or_else(|| panic!("no bark symbol in: {src}"));
+        anchor::ast_body_hash(Lang::Go, src, sym.byte_range).unwrap()
+    };
+
+    let ha = hash_of(a);
+    let hb = hash_of(b);
+    let hc = hash_of(c);
+
+    assert_eq!(ha, hb, "cosmetic change (whitespace/comment) must not alter body_hash");
+    assert_ne!(ha, hc, "semantic edit must alter body_hash");
+}
+
+#[test]
+fn java_interface_extends() {
+    let src = "interface Walkable {}\ninterface Runner extends Walkable {}\n";
+    let facts = extract::extract(Lang::Java, src).unwrap();
+    assert!(
+        facts.inherits.iter().any(|i| i.name == "Runner"
+            && i.parent_name == "Walkable"
+            && i.rel == "extends"),
+        "interface extends must produce an extends edge: {:?}",
+        facts.inherits
+    );
+}
+
+#[test]
+fn ruby_extraction() {
+    let src = r#"
+require 'mailer'
+
+module Walkable
+end
+
+class Animal
+end
+
+class Dog < Animal
+  include Walkable
+  def speak(name)
+    greeting = "hi"
+    bark()
+  end
+end
+"#;
+    let facts = extract::extract(Lang::Ruby, src).unwrap();
+    assert!(names(&facts, "class").contains(&"Dog".to_string()), "{:?}", facts.symbols);
+    assert!(names(&facts, "method").contains(&"speak".to_string()), "{:?}", facts.symbols);
+    assert!(facts.imports.iter().any(|i| i.contains("mailer")), "{:?}", facts.imports);
+    assert!(facts.calls.iter().any(|(scope, callee)| scope == "speak" && callee == "bark"),
+        "speak -> bark call edge missing: {:?}", facts.calls);
+    assert!(facts.inherits.iter().any(|i| i.name=="Dog" && i.parent_name=="Animal" && i.rel=="extends"), "{:?}", facts.inherits);
+    assert!(facts.inherits.iter().any(|i| i.name=="Dog" && i.parent_name=="Walkable" && i.rel=="mixin"), "{:?}", facts.inherits);
+    assert!(!facts.calls.iter().any(|(_, c)| c == "name" || c == "greeting"),
+        "local vars and params must not be recorded as calls: {:?}", facts.calls);
+}
+
+#[test]
+fn ruby_hash_is_cosmetic_invariant_and_edit_sensitive() {
+    // baseline: speak method
+    let a = r#"
+class Dog
+  def speak
+    bark
+  end
+end
+"#;
+    // cosmetic: extra blank line + comment, same semantics
+    let b = r#"
+class Dog
+  # says woof
+  def speak
+
+    bark
+  end
+end
+"#;
+    // semantic: changed callee
+    let c = r#"
+class Dog
+  def speak
+    woof
+  end
+end
+"#;
+
+    let hash_of = |src: &str| {
+        let facts = extract::extract(Lang::Ruby, src).unwrap();
+        let sym = facts
+            .symbols
+            .iter()
+            .find(|s| s.name == "speak")
+            .unwrap_or_else(|| panic!("no speak symbol in: {src}"));
+        anchor::ast_body_hash(Lang::Ruby, src, sym.byte_range).unwrap()
+    };
+
+    let ha = hash_of(a);
+    let hb = hash_of(b);
+    let hc = hash_of(c);
+
+    assert_eq!(ha, hb, "cosmetic change (whitespace/comment) must not alter body_hash");
+    assert_ne!(ha, hc, "semantic edit must alter body_hash");
+}
+
+#[test]
+fn csharp_extraction() {
+    let src = r#"
+using App.Services;
+
+interface IPet {}
+
+class Animal {}
+
+class Dog : Animal, IPet {
+    public string Speak() {
+        return Bark();
+    }
+}
+"#;
+    let facts = extract::extract(Lang::CSharp, src).unwrap();
+    assert!(names(&facts, "class").contains(&"Dog".to_string()), "{:?}", facts.symbols);
+    assert!(names(&facts, "method").contains(&"Speak".to_string()), "{:?}", facts.symbols);
+    assert!(facts.imports.iter().any(|i| i.contains("App.Services")), "{:?}", facts.imports);
+    assert!(facts.calls.iter().any(|(scope, callee)| scope == "Speak" && callee == "Bark"));
+    // base-list: both entries recorded as extends (class vs interface not
+    // distinguished syntactically; resolved read-time, labeled).
+    assert!(facts.inherits.iter().any(|i| i.name=="Dog" && i.parent_name=="Animal" && i.rel=="extends"), "{:?}", facts.inherits);
+    assert!(facts.inherits.iter().any(|i| i.name=="Dog" && i.parent_name=="IPet" && i.rel=="extends"), "{:?}", facts.inherits);
+}
+
+#[test]
+fn csharp_hash_is_cosmetic_invariant_and_edit_sensitive() {
+    // baseline: Speak method
+    let a = r#"
+class Dog {
+    public string Speak() {
+        return Bark();
+    }
+}
+"#;
+    // cosmetic: extra whitespace + comment, same semantics
+    let b = r#"
+class Dog {
+    // says woof
+    public string Speak() {
+
+        return  Bark() ;
+    }
+}
+"#;
+    // semantic: changed callee
+    let c = r#"
+class Dog {
+    public string Speak() {
+        return Woof();
+    }
+}
+"#;
+
+    let hash_of = |src: &str| {
+        let facts = extract::extract(Lang::CSharp, src).unwrap();
+        let sym = facts
+            .symbols
+            .iter()
+            .find(|s| s.name == "Speak")
+            .unwrap_or_else(|| panic!("no Speak symbol in: {src}"));
+        anchor::ast_body_hash(Lang::CSharp, src, sym.byte_range).unwrap()
+    };
+
+    let ha = hash_of(a);
+    let hb = hash_of(b);
+    let hc = hash_of(c);
+
+    assert_eq!(ha, hb, "cosmetic change (whitespace/comment) must not alter body_hash");
+    assert_ne!(ha, hc, "semantic edit must alter body_hash");
+}
+
+#[test]
+fn bash_extraction() {
+    let src = r#"#!/bin/bash
+source ./helpers.sh
+
+greet() {
+    hello_world
+}
+"#;
+    let facts = extract::extract(Lang::Bash, src).unwrap();
+    assert!(names(&facts, "function").contains(&"greet".to_string()), "{:?}", facts.symbols);
+    assert!(facts.calls.iter().any(|(scope, callee)| scope == "greet" && callee == "hello_world"), "{:?}", facts.calls);
+    assert!(facts.imports.iter().any(|i| i.contains("helpers.sh")), "{:?}", facts.imports);
+    // Bash produces no inheritance edges.
+    assert!(facts.inherits.is_empty(), "{:?}", facts.inherits);
+}
+
+#[test]
+fn bash_hash_is_cosmetic_invariant_and_edit_sensitive() {
+    // baseline: greet function
+    let a = "#!/bin/bash\ngreet() {\n    hello_world\n}\n";
+    // cosmetic: extra blank line + comment, same semantics
+    let b = "#!/bin/bash\n# greets the world\ngreet() {\n\n    hello_world\n}\n";
+    // semantic: changed callee
+    let c = "#!/bin/bash\ngreet() {\n    goodbye_world\n}\n";
+
+    let hash_of = |src: &str| {
+        let facts = extract::extract(Lang::Bash, src).unwrap();
+        let sym = facts
+            .symbols
+            .iter()
+            .find(|s| s.name == "greet")
+            .unwrap_or_else(|| panic!("no greet symbol in: {src}"));
+        anchor::ast_body_hash(Lang::Bash, src, sym.byte_range).unwrap()
+    };
+
+    let ha = hash_of(a);
+    let hb = hash_of(b);
+    let hc = hash_of(c);
+
+    assert_eq!(ha, hb, "cosmetic change (whitespace/comment) must not alter body_hash");
+    assert_ne!(ha, hc, "semantic edit must alter body_hash");
 }

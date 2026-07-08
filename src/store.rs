@@ -10,7 +10,7 @@ use rusqlite::Connection;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 pub struct Store {
     pub conn: Connection,
@@ -119,7 +119,8 @@ END;
 CREATE TABLE IF NOT EXISTS inherits (
   child_fqn   TEXT NOT NULL,
   parent_name TEXT NOT NULL,
-  rel         TEXT NOT NULL CHECK(rel IN ('extends','implements','impl_trait')),
+  rel         TEXT NOT NULL
+    CHECK(rel IN ('extends','implements','impl_trait','embeds','mixin')),
   file        TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_inherits_child  ON inherits(child_fqn);
@@ -184,6 +185,62 @@ fn migrate_to_v3(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Schema v4 (lazy migration): widen `inherits.rel` to admit `embeds` (Go
+/// embedding) and `mixin` (Ruby include/prepend/extend). SQLite cannot ALTER a
+/// CHECK in place, but `inherits` is fully derived and repopulated per file on
+/// index, so we drop and recreate it with the wider CHECK; content refills on
+/// the next `index`.
+///
+/// IMPORTANT: the DROP must happen ONLY when the table still carries the old
+/// narrow CHECK. An unconditional DROP would wipe freshly-indexed edges every
+/// time a second process (e.g. `limpet serve`) opens the store, because all
+/// migrations run on every open. We gate the rebuild on whether the stored
+/// CREATE SQL already contains `'embeds'` — present means already widened,
+/// absent (or table missing) means the one-time rebuild is needed.
+fn migrate_to_v4(conn: &Connection) -> Result<()> {
+    // Only rebuild inherits when it still carries the OLD narrow CHECK.
+    // The table is derived (refilled per file on index), but the rebuild must
+    // NOT run on every open — an unconditional DROP would wipe the freshly
+    // indexed edges each time a second process (e.g. `serve`) opens the store.
+    use rusqlite::OptionalExtension;
+    let existing_sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='inherits'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let needs_widen = existing_sql
+        .as_deref()
+        .is_none_or(|s| !s.contains("'embeds'"));
+    if needs_widen {
+        conn.execute_batch(
+            "DROP TABLE IF EXISTS inherits;
+             CREATE TABLE inherits (
+               child_fqn   TEXT NOT NULL,
+               parent_name TEXT NOT NULL,
+               rel         TEXT NOT NULL
+                 CHECK(rel IN ('extends','implements','impl_trait','embeds','mixin')),
+               file        TEXT NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS idx_inherits_child  ON inherits(child_fqn);
+             CREATE INDEX IF NOT EXISTS idx_inherits_parent ON inherits(parent_name);
+             CREATE INDEX IF NOT EXISTS idx_inherits_file   ON inherits(file);",
+        )?;
+        // The rebuild emptied a table the sweep will not refill on its own
+        // (unchanged files are never re-parsed). Zero every known mtime so the
+        // bounded sweep sees each file as changed and repopulates inherits
+        // incrementally; rows (and thus symbols and anchors) are untouched.
+        conn.execute("UPDATE files SET mtime_ns = 0", [])?;
+    }
+    conn.execute(
+        "INSERT INTO meta_kv(k, v) VALUES('schema_version', ?1)
+         ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+        [SCHEMA_VERSION.to_string()],
+    )?;
+    Ok(())
+}
+
 impl Store {
     /// Open (creating if needed) the store at an explicit database path.
     pub fn open(db_path: &Path) -> Result<Store> {
@@ -199,6 +256,7 @@ impl Store {
         conn.execute_batch(SCHEMA_V1)?;
         migrate_to_v2(&conn)?;
         migrate_to_v3(&conn)?;
+        migrate_to_v4(&conn)?;
         Ok(Store { conn, session_base: std::cell::Cell::new(Ledger::default()) })
     }
 
@@ -209,6 +267,7 @@ impl Store {
         conn.execute_batch(SCHEMA_V1)?;
         migrate_to_v2(&conn)?;
         migrate_to_v3(&conn)?;
+        migrate_to_v4(&conn)?;
         Ok(Store { conn, session_base: std::cell::Cell::new(Ledger::default()) })
     }
 
@@ -1047,7 +1106,7 @@ mod tests {
             .unwrap();
         assert_eq!(private, 0, "pre-existing rows default to not-private");
         assert_eq!(origin, None);
-        assert_eq!(s.kv_get("schema_version").unwrap().as_deref(), Some("3"));
+        assert_eq!(s.kv_get("schema_version").unwrap().as_deref(), Some("4"));
     }
 
     #[test]
@@ -1150,7 +1209,7 @@ mod tests {
             .conn
             .query_row("SELECT v FROM meta_kv WHERE k='schema_version'", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(ver, "3");
+        assert_eq!(ver, "4");
         // Insert + read back an edge (CHECK constraint honored).
         store
             .conn
@@ -1164,6 +1223,122 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM inherits WHERE parent_name='Base'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn v3_store_migrates_to_v4_wider_rels() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("store.db");
+        // Build a v3 store (v1 batch WITH the old narrow inherits CHECK + v2 + v3).
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE meta_kv (k TEXT PRIMARY KEY, v TEXT NOT NULL);
+                 CREATE TABLE inherits (
+                   child_fqn TEXT NOT NULL, parent_name TEXT NOT NULL,
+                   rel TEXT NOT NULL CHECK(rel IN ('extends','implements','impl_trait')),
+                   file TEXT NOT NULL);",
+            )
+            .unwrap();
+            conn.execute("INSERT INTO meta_kv(k,v) VALUES('schema_version','3')", []).unwrap();
+        }
+        // Opening through Store must migrate to v4 and accept the new rels.
+        let store = Store::open(&db).unwrap();
+        let ver: String = store
+            .conn
+            .query_row("SELECT v FROM meta_kv WHERE k='schema_version'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ver, "4");
+        for rel in ["embeds", "mixin", "extends"] {
+            store
+                .conn
+                .execute(
+                    "INSERT INTO inherits(child_fqn,parent_name,rel,file) VALUES('a.B','P',?1,'a.go')",
+                    [rel],
+                )
+                .unwrap_or_else(|e| panic!("rel {rel} rejected: {e}"));
+        }
+        // A bogus rel is still rejected.
+        assert!(store
+            .conn
+            .execute(
+                "INSERT INTO inherits(child_fqn,parent_name,rel,file) VALUES('a.B','P','bogus','a.go')",
+                [],
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn inherits_survive_store_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("store.db");
+        {
+            let store = Store::open(&db).unwrap();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO inherits(child_fqn,parent_name,rel,file) VALUES('a.Dog','Animal','embeds','a.go')",
+                    [],
+                )
+                .unwrap();
+        } // drop/close
+        // Reopen: migrations run again; the inherits row MUST still be there.
+        let store = Store::open(&db).unwrap();
+        let n: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM inherits WHERE child_fqn='a.Dog'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            n,
+            1,
+            "inherits must survive a store reopen (migrate_to_v4 must not wipe it every open)"
+        );
+    }
+
+    #[test]
+    fn v4_widen_marks_files_for_reindex() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("store.db");
+        // v3-shaped store: narrow CHECK + a populated files row.
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE meta_kv (k TEXT PRIMARY KEY, v TEXT NOT NULL);
+                 CREATE TABLE files (path TEXT PRIMARY KEY, lang TEXT, mtime_ns INTEGER NOT NULL,
+                   size INTEGER NOT NULL, hash TEXT NOT NULL, parse_ok INTEGER NOT NULL DEFAULT 1);
+                 CREATE TABLE inherits (
+                   child_fqn TEXT NOT NULL, parent_name TEXT NOT NULL,
+                   rel TEXT NOT NULL CHECK(rel IN ('extends','implements','impl_trait')),
+                   file TEXT NOT NULL);",
+            )
+            .unwrap();
+            conn.execute("INSERT INTO meta_kv(k,v) VALUES('schema_version','3')", []).unwrap();
+            conn.execute(
+                "INSERT INTO files(path,lang,mtime_ns,size,hash) VALUES('a.go','go',12345,10,'h')",
+                [],
+            )
+            .unwrap();
+        }
+        let store = Store::open(&db).unwrap();
+        // The widen fired: files must be marked dirty so the sweep refills inherits.
+        let mtime: i64 = store
+            .conn
+            .query_row("SELECT mtime_ns FROM files WHERE path='a.go'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mtime, 0, "widen must zero mtimes so the sweep repopulates inherits");
+        // Reopen: already wide, mtimes must NOT be touched again.
+        store.conn.execute("UPDATE files SET mtime_ns = 999", []).unwrap();
+        drop(store);
+        let store = Store::open(&db).unwrap();
+        let mtime: i64 = store
+            .conn
+            .query_row("SELECT mtime_ns FROM files WHERE path='a.go'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mtime, 999, "already-wide open must not re-zero mtimes");
     }
 
     #[test]

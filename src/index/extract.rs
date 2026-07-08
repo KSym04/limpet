@@ -102,7 +102,8 @@ fn base_names(clause: Node, src: &[u8]) -> Vec<String> {
     for ch in clause.children(&mut c) {
         match ch.kind() {
             "name" | "identifier" | "type_identifier" | "qualified_name"
-            | "scoped_type_identifier" | "namespace_name" | "dotted_name" => {
+            | "scoped_type_identifier" | "namespace_name" | "dotted_name"
+            | "constant" => {
                 out.push(node_text(ch, src));
             }
             _ => {}
@@ -144,6 +145,10 @@ fn callee_name(func: Node, src: &[u8]) -> Option<String> {
             .map(|n| node_text(n, src)),
         // rust path::func(), c++ Namespace::func()
         "scoped_identifier" | "qualified_identifier" => func
+            .child_by_field_name("name")
+            .map(|n| node_text(n, src)),
+        // C# this.Foo() / obj.Foo()
+        "member_access_expression" => func
             .child_by_field_name("name")
             .map(|n| node_text(n, src)),
         _ => None,
@@ -466,6 +471,286 @@ fn walk(
                 }
             }
             "call_expression" => {
+                if let Some(func) = node.child_by_field_name("function") {
+                    if let Some(callee) = callee_name(func, src) {
+                        facts.calls.push((current_scope(parents), callee));
+                    }
+                }
+            }
+            _ => {}
+        },
+        Lang::Go => match kind {
+            "function_declaration" => {
+                if let Some(name) = name_of(node, src) {
+                    push_sym(facts, node, src, parents, "function", name.clone());
+                    parents.push(name);
+                    pushed_parent = true;
+                }
+            }
+            "method_declaration" => {
+                if let Some(name) = name_of(node, src) {
+                    push_sym(facts, node, src, parents, "method", name.clone());
+                    parents.push(name);
+                    pushed_parent = true;
+                }
+            }
+            "type_spec" => {
+                if let Some(name) = name_of(node, src) {
+                    push_sym(facts, node, src, parents, "class", name.clone());
+                    // Embedded fields (no field name) in the struct/interface body
+                    // are Go's composition — record as `embeds`.
+                    // tree-sitter-go 0.25 wraps field declarations in a
+                    // `field_declaration_list` node inside `struct_type`; descend
+                    // one extra level when that wrapper is present.
+                    if let Some(body) = node.child_by_field_name("type") {
+                        let field_list = (0..body.child_count())
+                            .filter_map(|i| body.child(i))
+                            .find(|c| c.kind() == "field_declaration_list")
+                            .unwrap_or(body);
+                        let mut bc = field_list.walk();
+                        for f in field_list.children(&mut bc) {
+                            // struct: field_declaration with a type and no `name`
+                            // field; interface: embedded type_identifier directly.
+                            if f.kind() == "field_declaration"
+                                && f.child_by_field_name("name").is_none()
+                            {
+                                if let Some(t) = f
+                                    .child_by_field_name("type")
+                                    .or_else(|| f.named_child(0))
+                                {
+                                    push_inherit(
+                                        facts,
+                                        parents,
+                                        &name,
+                                        node_text(t, src),
+                                        "embeds",
+                                    );
+                                }
+                            } else if matches!(f.kind(), "type_identifier" | "qualified_type") {
+                                push_inherit(
+                                    facts,
+                                    parents,
+                                    &name,
+                                    node_text(f, src),
+                                    "embeds",
+                                );
+                            }
+                        }
+                    }
+                    parents.push(name);
+                    pushed_parent = true;
+                }
+            }
+            "import_spec" => {
+                if let Some(p) = node
+                    .child_by_field_name("path")
+                    .or_else(|| node.named_child(0))
+                {
+                    facts
+                        .imports
+                        .push(node_text(p, src).trim_matches('"').to_string());
+                }
+            }
+            "call_expression" => {
+                if let Some(func) = node.child_by_field_name("function") {
+                    if let Some(callee) = callee_name(func, src) {
+                        facts.calls.push((current_scope(parents), callee));
+                    }
+                }
+            }
+            _ => {}
+        },
+        Lang::Ruby => match kind {
+            "method" | "singleton_method" => {
+                if let Some(name) = name_of(node, src) {
+                    let k = if parents.is_empty() { "function" } else { "method" };
+                    push_sym(facts, node, src, parents, k, name.clone());
+                    parents.push(name);
+                    pushed_parent = true;
+                }
+            }
+            "class" | "module" => {
+                if let Some(name) = name_of(node, src) {
+                    push_sym(facts, node, src, parents, "class", name.clone());
+                    // class Dog < Animal -> superclass field
+                    if let Some(sc) = node.child_by_field_name("superclass") {
+                        for p in base_names(sc, src) {
+                            push_inherit(facts, parents, &name, p, "extends");
+                        }
+                    }
+                    parents.push(name);
+                    pushed_parent = true;
+                }
+            }
+            "call" => {
+                // include/prepend/extend Mod -> mixin, anchored to the enclosing class;
+                // require '...' -> import; everything else -> call edge.
+                let mname = node
+                    .child_by_field_name("method")
+                    .map(|m| node_text(m, src))
+                    .unwrap_or_default();
+                match mname.as_str() {
+                    "include" | "prepend" | "extend" => {
+                        if let Some(cls) = parents.last().cloned() {
+                            if let Some(args) = node.child_by_field_name("arguments") {
+                                for p in base_names(args, src) {
+                                    let up = &parents[..parents.len() - 1];
+                                    push_inherit(facts, up, &cls, p, "mixin");
+                                }
+                            }
+                        }
+                    }
+                    "require" | "require_relative" => {
+                        if let Some(args) = node.child_by_field_name("arguments") {
+                            facts.imports.push(
+                                node_text(args, src)
+                                    .trim_matches(['(', ')', '"', '\'', ' '])
+                                    .to_string(),
+                            );
+                        }
+                    }
+                    other if !other.is_empty() => {
+                        facts.calls.push((current_scope(parents), other.to_string()));
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        },
+        Lang::Java => match kind {
+            "method_declaration" => {
+                if let Some(name) = name_of(node, src) {
+                    push_sym(facts, node, src, parents, "method", name.clone());
+                    parents.push(name);
+                    pushed_parent = true;
+                }
+            }
+            "class_declaration" | "interface_declaration" => {
+                if let Some(name) = name_of(node, src) {
+                    push_sym(facts, node, src, parents, "class", name.clone());
+                    if let Some(sc) = node.child_by_field_name("superclass") {
+                        for p in base_names(sc, src) {
+                            push_inherit(facts, parents, &name, p, "extends");
+                        }
+                    }
+                    if let Some(ifc) = node.child_by_field_name("interfaces") {
+                        // super_interfaces -> type_list -> type_identifier
+                        let clause = (0..ifc.child_count())
+                            .filter_map(|i| ifc.child(i))
+                            .find(|c| c.kind() == "type_list")
+                            .unwrap_or(ifc);
+                        for p in base_names(clause, src) {
+                            push_inherit(facts, parents, &name, p, "implements");
+                        }
+                    }
+                    // interface X extends Y, Z -> extends
+                    // extends_interfaces -> type_list -> type_identifier (parallel
+                    // structure to super_interfaces above, must descend type_list).
+                    if node.kind() == "interface_declaration" {
+                        let mut c = node.walk();
+                        for ch in node.children(&mut c) {
+                            if ch.kind() == "extends_interfaces" {
+                                let clause = (0..ch.child_count())
+                                    .filter_map(|i| ch.child(i))
+                                    .find(|c| c.kind() == "type_list")
+                                    .unwrap_or(ch);
+                                for p in base_names(clause, src) {
+                                    push_inherit(facts, parents, &name, p, "extends");
+                                }
+                            }
+                        }
+                    }
+                    parents.push(name);
+                    pushed_parent = true;
+                }
+            }
+            "import_declaration" => {
+                facts.imports.push(
+                    node_text(node, src)
+                        .trim_start_matches("import")
+                        .trim()
+                        .trim_end_matches(';')
+                        .trim()
+                        .to_string(),
+                );
+            }
+            "method_invocation" => {
+                if let Some(name) = node.child_by_field_name("name") {
+                    facts.calls.push((current_scope(parents), node_text(name, src)));
+                }
+            }
+            _ => {}
+        },
+        Lang::Bash => match kind {
+            "function_definition" => {
+                let name_opt = name_of(node, src).or_else(|| {
+                    // bash function name is often a `word` child, not a `name` field
+                    let mut c = node.walk();
+                    let x = node.children(&mut c).find(|ch| ch.kind() == "word").map(|w| node_text(w, src)); x
+                });
+                if let Some(name) = name_opt {
+                    push_sym(facts, node, src, parents, "function", name.clone());
+                    parents.push(name);
+                    pushed_parent = true;
+                }
+            }
+            "command" => {
+                // first word is the command name; `source`/`.` -> import, else call.
+                let cmd = node
+                    .child_by_field_name("name")
+                    .or_else(|| node.named_child(0))
+                    .map(|n| node_text(n, src))
+                    .unwrap_or_default();
+                if cmd == "source" || cmd == "." {
+                    let arg_text: Option<String> = {
+                        let mut c = node.walk();
+                        let x = node.children(&mut c).nth(1).map(|arg| node_text(arg, src)); x
+                    };
+                    if let Some(t) = arg_text {
+                        facts.imports.push(t.trim_matches(['"', '\'']).to_string());
+                    }
+                } else if !cmd.is_empty() {
+                    facts.calls.push((current_scope(parents), cmd));
+                }
+            }
+            _ => {}
+        },
+        Lang::CSharp => match kind {
+            "method_declaration" => {
+                if let Some(name) = name_of(node, src) {
+                    push_sym(facts, node, src, parents, "method", name.clone());
+                    parents.push(name);
+                    pushed_parent = true;
+                }
+            }
+            "class_declaration" | "interface_declaration" | "struct_declaration" => {
+                if let Some(name) = name_of(node, src) {
+                    push_sym(facts, node, src, parents, "class", name.clone());
+                    let bl = node.child_by_field_name("bases").or_else(|| {
+                        (0..node.child_count())
+                            .filter_map(|i| node.child(i))
+                            .find(|ch| ch.kind() == "base_list")
+                    });
+                    if let Some(bl) = bl {
+                        for p in base_names(bl, src) {
+                            push_inherit(facts, parents, &name, p, "extends");
+                        }
+                    }
+                    parents.push(name);
+                    pushed_parent = true;
+                }
+            }
+            "using_directive" => {
+                facts.imports.push(
+                    node_text(node, src)
+                        .trim_start_matches("using")
+                        .trim()
+                        .trim_end_matches(';')
+                        .trim()
+                        .to_string(),
+                );
+            }
+            "invocation_expression" => {
                 if let Some(func) = node.child_by_field_name("function") {
                     if let Some(callee) = callee_name(func, src) {
                         facts.calls.push((current_scope(parents), callee));

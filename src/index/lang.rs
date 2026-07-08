@@ -1,6 +1,6 @@
 //! Language registry: extension detection and tree-sitter grammar handles.
 //!
-//! Six curated grammars ship (PHP, JS, TS, Python, Rust, C/C++). Every
+//! Eleven curated grammars ship (PHP, JS, TS, Python, Rust, C/C++, Go, Java, Ruby, C#, Bash). Every
 //! language listed here has fixture
 //! coverage in `tests/index_langs.rs` (invariant I7); adding a language
 //! without a fixture is a review-blocking change.
@@ -16,6 +16,11 @@ pub enum Lang {
     Py,
     Rust,
     Cpp,
+    Go,
+    Java,
+    Ruby,
+    CSharp,
+    Bash,
 }
 
 impl Lang {
@@ -27,6 +32,11 @@ impl Lang {
             Lang::Py => "python",
             Lang::Rust => "rust",
             Lang::Cpp => "cpp",
+            Lang::Go => "go",
+            Lang::Java => "java",
+            Lang::Ruby => "ruby",
+            Lang::CSharp => "c_sharp",
+            Lang::Bash => "bash",
         }
     }
 }
@@ -44,6 +54,11 @@ pub fn detect(path: &std::path::Path) -> Option<Lang> {
         "py" => Some(Lang::Py),
         "rs" => Some(Lang::Rust),
         "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" | "h" | "c" | "inl" => Some(Lang::Cpp),
+        "go" => Some(Lang::Go),
+        "java" => Some(Lang::Java),
+        "rb" | "rake" => Some(Lang::Ruby),
+        "cs" => Some(Lang::CSharp),
+        "sh" | "bash" => Some(Lang::Bash),
         _ => None,
     }
 }
@@ -59,6 +74,11 @@ pub fn from_config_str(s: &str) -> Option<Lang> {
         "py" | "python" => Some(Lang::Py),
         "rs" | "rust" => Some(Lang::Rust),
         "cpp" | "c" | "c++" => Some(Lang::Cpp),
+        "go" | "golang" => Some(Lang::Go),
+        "java" => Some(Lang::Java),
+        "rb" | "ruby" => Some(Lang::Ruby),
+        "cs" | "csharp" | "c#" => Some(Lang::CSharp),
+        "sh" | "bash" => Some(Lang::Bash),
         _ => None,
     }
 }
@@ -98,5 +118,10 @@ pub fn ts_language(lang: Lang) -> Language {
         Lang::Py => tree_sitter_python::LANGUAGE.into(),
         Lang::Rust => tree_sitter_rust::LANGUAGE.into(),
         Lang::Cpp => tree_sitter_cpp::LANGUAGE.into(),
+        Lang::Go => tree_sitter_go::LANGUAGE.into(),
+        Lang::Java => tree_sitter_java::LANGUAGE.into(),
+        Lang::Ruby => tree_sitter_ruby::LANGUAGE.into(),
+        Lang::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
+        Lang::Bash => tree_sitter_bash::LANGUAGE.into(),
     }
 }

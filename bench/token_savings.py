@@ -94,6 +94,9 @@ LINEAGE_QUESTIONS = [
     dict(q="who calls health_score",
          served_text='{"target":"src.scan.base_scanner.BaseScanner.health_score","ancestors":[],"descendants":[],"callers":[{"fqn":"src.scan.feed_scanner.FeedScanner.scan_batch","rel":"calls","resolved":"unique","depth":1}],"truncated":false,"unresolved_count":0}',
          files=["src/scan/feed_scanner.php"]),
+    dict(q="what does FeedScanner embed",
+         served_text='{"target":"embedding.FeedScanner","ancestors":[{"fqn":"embedding.BaseScanner","rel":"embeds","resolved":"unique","depth":1}],"descendants":[],"callers":[],"truncated":false,"unresolved_count":0}',
+         files=["embedding.go"]),
 ]
 
 

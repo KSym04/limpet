@@ -47,12 +47,12 @@ lessons (`number_literal` missing from the hash identity set, the definition
 name hiding in the declarator chain) say every grammar conceals at least one
 node-shape surprise. The non-UTF-8 file-level fallback (I-N1) generalizes.
 
-Riding along with this milestone, from the 2026-07 audit: full FQN
-disambiguation (trait impls, C++ overloads, nested modules currently share
-FQNs; the `(fqn, hash)` existence check shipped in 0.7.2 stops the flapping,
-uniqueness needs schema work), and a low-entropy follow guard so trivial
-duplicate bodies (empty functions, delegating one-liners) cannot be silently
-followed to the wrong twin.
+Adding the ABI-15 grammars (Go, Bash) requires bumping the vendored tree-sitter
+core to 0.25; the existing six grammars keep loading unchanged.
+
+The two audit riders once slated to ride along here — full FQN disambiguation
+and the low-entropy follow guard — are DEFERRED to v0.13.0: both touch anchor
+identity and dedup, a different risk class than additively adding grammars.
 
 ## v0.13.0 — freshness at scale
 
@@ -60,6 +60,13 @@ followed to the wrong twin.
   repositories, where the 32-file sweep budget starts to lag.
 - **Sweep prioritization:** files carrying anchors reindex first, so staleness
   is instant where it matters most.
+- **Full FQN disambiguation** (deferred from grammar wave 2): trait impls, C++
+  overloads, and nested modules currently share FQNs; the `(fqn, hash)`
+  existence check shipped in 0.7.2 stops the flapping, but true uniqueness needs
+  schema work.
+- **Low-entropy follow guard** (deferred from grammar wave 2): trivial duplicate
+  bodies (empty functions, delegating one-liners) must not be silently followed
+  to the wrong twin.
 
 ## v1.0 — the stability contract (not features)
 
