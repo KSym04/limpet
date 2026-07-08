@@ -494,9 +494,16 @@ fn walk(
                     push_sym(facts, node, src, parents, "class", name.clone());
                     // Embedded fields (no field name) in the struct/interface body
                     // are Go's composition — record as `embeds`.
+                    // tree-sitter-go 0.25 wraps field declarations in a
+                    // `field_declaration_list` node inside `struct_type`; descend
+                    // one extra level when that wrapper is present.
                     if let Some(body) = node.child_by_field_name("type") {
-                        let mut bc = body.walk();
-                        for f in body.children(&mut bc) {
+                        let field_list = (0..body.child_count())
+                            .filter_map(|i| body.child(i))
+                            .find(|c| c.kind() == "field_declaration_list")
+                            .unwrap_or(body);
+                        let mut bc = field_list.walk();
+                        for f in field_list.children(&mut bc) {
                             // struct: field_declaration with a type and no `name`
                             // field; interface: embedded type_identifier directly.
                             if f.kind() == "field_declaration"

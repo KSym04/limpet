@@ -38,6 +38,9 @@ fn is_identity_leaf(kind: &str) -> bool {
             | "number_literal"
             | "char_literal"
             | "raw_string_literal"
+            // Go: double-quoted and backtick string content nodes.
+            | "interpreted_string_literal_content"
+            | "raw_string_literal_content"
             | "true"
             | "false"
             | "none"
