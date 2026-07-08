@@ -21,12 +21,26 @@ pub struct Sym {
     pub byte_range: (usize, usize),
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct Inherit {
+    /// Enclosing symbol names of the child type, outermost first (FQN formed
+    /// at persist time, mirroring `Sym`).
+    pub parents: Vec<String>,
+    /// The child type's own name.
+    pub name: String,
+    /// Bare syntactic name of the supertype (resolved read-time, I-G1).
+    pub parent_name: String,
+    /// "extends" | "implements" | "impl_trait"
+    pub rel: &'static str,
+}
+
 #[derive(Debug, Default)]
 pub struct FileFacts {
     pub symbols: Vec<Sym>,
     pub imports: Vec<String>,
     /// (enclosing symbol name or "<file>", callee name)
     pub calls: Vec<(String, String)>,
+    pub inherits: Vec<Inherit>,
 }
 
 /// Parse `src` as `lang` and extract structural facts.
@@ -35,6 +49,19 @@ pub fn extract(lang_id: Lang, src: &str) -> Result<FileFacts> {
     parser
         .set_language(&lang::ts_language(lang_id))
         .map_err(|e| anyhow::anyhow!("grammar load failed: {e}"))?;
+    // PHP grammar requires the `<?php` opening tag; add it when absent so
+    // callers (tests, REPL snippets) can pass raw PHP code directly.
+    // Strip a leading BOM before deciding whether the PHP open tag is present,
+    // so a real <?php file that starts with a BOM is NOT prepended (which would
+    // shift every symbol's byte range and corrupt its body hash).
+    let has_tag = src.trim_start_matches('\u{feff}').trim_start().starts_with("<?");
+    let owned;
+    let src = if lang_id == Lang::Php && !has_tag {
+        owned = format!("<?php\n{src}");
+        owned.as_str()
+    } else {
+        src
+    };
     let Some(tree) = parser.parse(src, None) else {
         bail!("tree-sitter returned no tree");
     };
@@ -50,6 +77,38 @@ fn node_text(node: Node, src: &[u8]) -> String {
 
 fn name_of(node: Node, src: &[u8]) -> Option<String> {
     node.child_by_field_name("name").map(|n| node_text(n, src))
+}
+
+fn push_inherit(
+    facts: &mut FileFacts,
+    parents: &[String],
+    name: &str,
+    parent_name: String,
+    rel: &'static str,
+) {
+    facts.inherits.push(Inherit {
+        parents: parents.to_vec(),
+        name: name.to_string(),
+        parent_name,
+        rel,
+    });
+}
+
+/// Collect bare type names from a clause node, taking each child that is a
+/// plain name/identifier and skipping punctuation, keywords, and generics.
+fn base_names(clause: Node, src: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut c = clause.walk();
+    for ch in clause.children(&mut c) {
+        match ch.kind() {
+            "name" | "identifier" | "type_identifier" | "qualified_name"
+            | "scoped_type_identifier" | "namespace_name" | "dotted_name" => {
+                out.push(node_text(ch, src));
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 fn push_sym(
@@ -149,6 +208,22 @@ fn walk(
             "class_declaration" | "interface_declaration" | "trait_declaration" => {
                 if let Some(name) = name_of(node, src) {
                     push_sym(facts, node, src, parents, "class", name.clone());
+                    let mut cc = node.walk();
+                    for ch in node.children(&mut cc) {
+                        match ch.kind() {
+                            "base_clause" => {
+                                for p in base_names(ch, src) {
+                                    push_inherit(facts, parents, &name, p, "extends");
+                                }
+                            }
+                            "class_interface_clause" => {
+                                for p in base_names(ch, src) {
+                                    push_inherit(facts, parents, &name, p, "implements");
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                     parents.push(name);
                     pushed_parent = true;
                 }
@@ -193,6 +268,33 @@ fn walk(
             "class_declaration" | "abstract_class_declaration" => {
                 if let Some(name) = name_of(node, src) {
                     push_sym(facts, node, src, parents, "class", name.clone());
+                    // class_heritage is not a named field in JS/TS grammars; locate by kind.
+                    let heritage = (0..node.child_count())
+                        .filter_map(|i| node.child(i))
+                        .find(|c| c.kind() == "class_heritage");
+                    if let Some(h) = heritage {
+                        let mut hc = h.walk();
+                        for ch in h.children(&mut hc) {
+                            match ch.kind() {
+                                "extends_clause" => {
+                                    for p in base_names(ch, src) {
+                                        push_inherit(facts, parents, &name, p, "extends");
+                                    }
+                                }
+                                "implements_clause" => {
+                                    for p in base_names(ch, src) {
+                                        push_inherit(facts, parents, &name, p, "implements");
+                                    }
+                                }
+                                // JS: class_heritage has direct identifier children (no
+                                // extends_clause wrapper), all are extends targets.
+                                "identifier" | "type_identifier" => {
+                                    push_inherit(facts, parents, &name, node_text(ch, src), "extends");
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
                     parents.push(name);
                     pushed_parent = true;
                 }
@@ -225,6 +327,16 @@ fn walk(
             "class_definition" => {
                 if let Some(name) = name_of(node, src) {
                     push_sym(facts, node, src, parents, "class", name.clone());
+                    if let Some(args) = node.child_by_field_name("superclasses") {
+                        let mut ac = args.walk();
+                        for ch in args.children(&mut ac) {
+                            // Positional bases only: identifier / dotted_name.
+                            // keyword_argument (metaclass=...) is skipped.
+                            if matches!(ch.kind(), "identifier" | "dotted_name" | "attribute") {
+                                push_inherit(facts, parents, &name, node_text(ch, src), "extends");
+                            }
+                        }
+                    }
                     parents.push(name);
                     pushed_parent = true;
                 }
@@ -259,6 +371,16 @@ fn walk(
                 // Named types only; anonymous structs/enums stay unanchored.
                 if let Some(name) = name_of(node, src) {
                     push_sym(facts, node, src, parents, "class", name.clone());
+                    let bc_opt = node.child_by_field_name("bases").or_else(|| {
+                        (0..node.child_count())
+                            .filter_map(|i| node.child(i))
+                            .find(|c| c.kind() == "base_class_clause")
+                    });
+                    if let Some(bc) = bc_opt {
+                        for p in base_names(bc, src) {
+                            push_inherit(facts, parents, &name, p, "extends");
+                        }
+                    }
                     parents.push(name);
                     pushed_parent = true;
                 }
@@ -298,11 +420,36 @@ fn walk(
             "struct_item" | "enum_item" | "trait_item" => {
                 if let Some(name) = name_of(node, src) {
                     push_sym(facts, node, src, parents, "class", name.clone());
+                    if node.kind() == "trait_item" {
+                        if let Some(b) = node.child_by_field_name("bounds") {
+                            for p in base_names(b, src) {
+                                push_inherit(facts, parents, &name, p, "extends");
+                            }
+                        }
+                    }
                     parents.push(name);
                     pushed_parent = true;
                 }
             }
             "impl_item" => {
+                let ty = node.child_by_field_name("type").map(|t| node_text(t, src));
+                if let (Some(tf), Some(ty_name)) =
+                    (node.child_by_field_name("trait"), ty.as_ref())
+                {
+                    // `impl Trait for Type` -> Type impl_trait Trait. Skip
+                    // only generic trait names (angle brackets). A qualified
+                    // path like `fmt::Display` is captured on its LAST segment,
+                    // matching how the read-time resolver matches bare symbol names.
+                    let trait_name = node_text(tf, src);
+                    if !trait_name.contains('<') {
+                        let bare = trait_name
+                            .rsplit("::")
+                            .next()
+                            .unwrap_or(&trait_name)
+                            .to_string();
+                        push_inherit(facts, parents, ty_name, bare, "impl_trait");
+                    }
+                }
                 if let Some(t) = node.child_by_field_name("type") {
                     parents.push(node_text(t, src));
                     pushed_parent = true;
@@ -336,5 +483,103 @@ fn walk(
 
     if pushed_parent {
         parents.pop();
+    }
+}
+
+#[cfg(test)]
+mod inherit_tests {
+    use super::*;
+    use crate::index::lang::Lang;
+
+    fn edges(lang: Lang, src: &str) -> Vec<(String, String, String, &'static str)> {
+        extract(lang, src)
+            .unwrap()
+            .inherits
+            .into_iter()
+            .map(|i| (i.parents.join("."), i.name, i.parent_name, i.rel))
+            .collect()
+    }
+
+
+#[test]
+    fn php_extends_and_implements() {
+        let e = edges(Lang::Php, "class Dog extends Animal implements Pet, Runner {}");
+        assert!(e.contains(&(String::new(), "Dog".into(), "Animal".into(), "extends")));
+        assert!(e.contains(&(String::new(), "Dog".into(), "Pet".into(), "implements")));
+        assert!(e.contains(&(String::new(), "Dog".into(), "Runner".into(), "implements")));
+    }
+
+    #[test]
+    fn js_class_extends() {
+        let e = edges(Lang::Js, "class Dog extends Animal {}");
+        assert_eq!(e, vec![(String::new(), "Dog".into(), "Animal".into(), "extends")]);
+    }
+
+    #[test]
+    fn ts_extends_and_implements() {
+        let e = edges(Lang::Ts, "class Dog extends Animal implements Pet {}");
+        assert!(e.contains(&(String::new(), "Dog".into(), "Animal".into(), "extends")));
+        assert!(e.contains(&(String::new(), "Dog".into(), "Pet".into(), "implements")));
+    }
+
+    #[test]
+    fn python_bases_skip_keyword() {
+        let e = edges(Lang::Py, "class Dog(Animal, metaclass=Meta):\n    pass\n");
+        assert!(e.contains(&(String::new(), "Dog".into(), "Animal".into(), "extends")));
+        assert!(!e.iter().any(|(_, _, p, _)| p == "Meta"), "metaclass= is not a base");
+    }
+
+    #[test]
+    fn rust_impl_trait_for_type() {
+        let e = edges(Lang::Rust, "impl Animal for Dog { fn speak(&self) {} }");
+        assert_eq!(e, vec![(String::new(), "Dog".into(), "Animal".into(), "impl_trait")]);
+    }
+
+    #[test]
+    fn cpp_base_class_clause_multiple() {
+        let e = edges(Lang::Cpp, "class Dog : public Animal, private Pet {};");
+        assert!(e.contains(&(String::new(), "Dog".into(), "Animal".into(), "extends")));
+        assert!(e.contains(&(String::new(), "Dog".into(), "Pet".into(), "extends")));
+    }
+
+    #[test]
+    fn malformed_supertype_no_panic() {
+        // Generic/templated bases are skipped, never panic.
+        let _ = extract(Lang::Rust, "impl<T> Foo<T> for Bar<T> {}").unwrap();
+        let _ = extract(Lang::Cpp, "template<class T> class X : public Y<T> {};").unwrap();
+    }
+
+    #[test]
+    fn rust_impl_qualified_trait_path() {
+        let e = edges(Lang::Rust, "impl fmt::Display for Dog { }");
+        assert_eq!(e, vec![(String::new(), "Dog".into(), "Display".into(), "impl_trait")]);
+    }
+
+    #[test]
+    fn rust_trait_supertrait_captured() {
+        let e = edges(Lang::Rust, "trait Working: Animal { }");
+        assert!(e.contains(&(String::new(), "Working".into(), "Animal".into(), "extends")));
+    }
+
+    #[test]
+    fn php_bom_prefixed_file_keeps_aligned_offsets() {
+        let src = "\u{feff}<?php\nclass Dog extends Animal {}\n";
+        let facts = extract(Lang::Php, src).unwrap();
+        // Inheritance edge still captured.
+        assert!(
+            facts.inherits.iter().any(|i| i.name == "Dog"
+                && i.parent_name == "Animal"
+                && i.rel == "extends"),
+            "expected Dog extends Animal edge"
+        );
+        // Byte range for the Dog class, sliced from the ORIGINAL src, must contain "Dog".
+        let dog = facts.symbols.iter().find(|s| s.name == "Dog").expect("Dog symbol");
+        let (a, b) = dog.byte_range;
+        let slice = &src.as_bytes()[a..b];
+        assert!(
+            std::str::from_utf8(slice).unwrap().contains("class Dog"),
+            "byte range must align with original src, not the prepended buffer; got: {:?}",
+            std::str::from_utf8(slice)
+        );
     }
 }

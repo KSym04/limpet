@@ -82,7 +82,7 @@ That takes three properties nobody else combines:
 |---|---|
 | `recall` | Task description in, token-budgeted ranked memory pack out. Stale and contradicted items are always flagged, never hidden. |
 | `remember` | Store a memory: `fact`, `decision`, `episode`, `insight`, or `intent`. Anchor it to code. Attach evidence to make it verified. `private: true` keeps a memory local (recalled here, withheld from export); `origin` makes writes idempotent for seeding flows. |
-| `map` | Structural outline of a file or symbol plus every memory attached to it. Code and knowledge in one answer. |
+| `map` | Structural outline of a file or symbol plus every memory attached to it. For a symbol target it also returns `lineage` (ancestors, descendants, callers) with each edge labeled `unique`/`ambiguous`/`unresolved`. Code and knowledge in one answer. |
 | `affected` | What does my uncommitted diff touch: symbols, memories now at risk, and decisions constraining the code being edited. |
 | `verify_queue` | Verified facts whose anchored code changed, each with the exact command that originally proved it. |
 | `admin` | index, status, forget, export / import (guarded), ledger / ledger_reset (the savings receipt). Export reports `private_withheld` so callers know how many memories stayed local. |

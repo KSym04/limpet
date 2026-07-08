@@ -8,6 +8,7 @@
 
 pub mod extract;
 pub mod fqn;
+pub mod graph;
 pub mod lang;
 
 use crate::config::RepoConfig;
@@ -159,6 +160,7 @@ fn index_file_parsed(
     store.conn.execute("DELETE FROM symbols WHERE file = ?1", [rel])?;
     store.conn.execute("DELETE FROM imports WHERE file = ?1", [rel])?;
     store.conn.execute("DELETE FROM calls WHERE file = ?1", [rel])?;
+    store.conn.execute("DELETE FROM inherits WHERE file = ?1", [rel])?;
 
     let (facts, parse_ok) = match extract::extract(lang_id, src) {
         Ok(f) => (f, true),
@@ -221,6 +223,14 @@ fn index_file_parsed(
             params![caller_fqn, callee, rel],
         )?;
     }
+    for inh in &facts.inherits {
+        let parent_refs: Vec<&str> = inh.parents.iter().map(String::as_str).collect();
+        let child_fqn = fqn::fqn(rel, &parent_refs, &inh.name);
+        store.conn.execute(
+            "INSERT INTO inherits(child_fqn, parent_name, rel, file) VALUES (?1,?2,?3,?4)",
+            params![child_fqn, inh.parent_name, inh.rel, rel],
+        )?;
+    }
     Ok((count, parse_ok))
 }
 
@@ -237,6 +247,7 @@ fn index_file_level(
     store.conn.execute("DELETE FROM symbols WHERE file = ?1", [rel])?;
     store.conn.execute("DELETE FROM imports WHERE file = ?1", [rel])?;
     store.conn.execute("DELETE FROM calls WHERE file = ?1", [rel])?;
+    store.conn.execute("DELETE FROM inherits WHERE file = ?1", [rel])?;
     store.conn.execute(
         "INSERT INTO files(path, lang, mtime_ns, size, hash, parse_ok)
          VALUES (?1,NULL,?2,?3,?4,1)
@@ -398,6 +409,7 @@ pub fn sweep(
                 store.conn.execute("DELETE FROM files WHERE path = ?1", [rel])?;
                 store.conn.execute("DELETE FROM imports WHERE file = ?1", [rel])?;
                 store.conn.execute("DELETE FROM calls WHERE file = ?1", [rel])?;
+                store.conn.execute("DELETE FROM inherits WHERE file = ?1", [rel])?;
                 report.removed.push(rel.clone());
             }
         }
@@ -634,5 +646,34 @@ mod tests {
         let report = full_index(&store, root).unwrap();
         assert_eq!(report.files, 1);
         assert!(report.failed.is_empty(), "binary files must index cleanly: {:?}", report.failed);
+    }
+
+    #[test]
+    fn inherits_persisted_and_repopulated_on_reindex() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("a.rs"), "struct Dog;\nimpl Animal for Dog {}\n").unwrap();
+        let store = Store::open_in_memory().unwrap();
+        full_index(&store, root).unwrap();
+
+        let (child, parent, rel): (String, String, String) = store
+            .conn
+            .query_row(
+                "SELECT child_fqn, parent_name, rel FROM inherits WHERE file='a.rs'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(parent, "Animal");
+        assert_eq!(rel, "impl_trait");
+        assert!(child.ends_with("Dog"), "child_fqn resolves to the Dog type: {child}");
+
+        // Reindex must delete+reinsert, not duplicate.
+        full_index(&store, root).unwrap();
+        let n: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM inherits WHERE file='a.rs'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "no duplicate edges after reindex");
     }
 }

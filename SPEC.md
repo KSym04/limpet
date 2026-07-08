@@ -9,8 +9,8 @@ ships only if it feeds the honest receipt or the honesty envelope.
 
 | # | Feature | Target | Summary |
 |---|---|---|---|
-| M1 | AST lineage graph | v0.10.0 | inheritance + resolved call edges -> bounded up/down lineage in `map` |
-| M2 | Live token ledger | v0.10.0 rider | per-call + per-session savings surfaced in the recall envelope |
+| M1 | AST lineage graph | v0.11.0 | inheritance + resolved call edges -> bounded up/down lineage in `map` |
+| M2 | Live token ledger | DEFERRED | built + bench-gated in 0.11.0; meta.ledger dropped the bench to 3.8x (under 4x), so reverted; stays in admin/stats/UI |
 | M3 | Local event hook | v1.1+ bet | opt-in exec hook on memory transitions; local `check` gate |
 
 ## Core Architecture
@@ -53,7 +53,7 @@ cost_to_learn spec (below) reads from the `calls` table.
 
 ## Task Implementation Checklist
 
-M1 — lineage graph (v0.9.0):
+M1 — lineage graph (v0.11.0):
 - [ ] store: `inherits` table + indexes + schema bump 2->3 + migration test
 - [ ] index: per-file `inherits` delete/reinsert at the 3 reindex sites
 - [ ] extract.rs: inheritance capture for php/js/ts/py/rs/cpp (+ unit tests each)
@@ -62,7 +62,7 @@ M1 — lineage graph (v0.9.0):
 - [ ] bench: fixture inheritance chain + lineage questions; ratio >= 4x sub-gate
 - [ ] tests green; dogfood; NO RELEASE until Ken tests
 
-M2 — live ledger (v0.9.1):
+M2 — live ledger (v0.11.0):
 - [ ] serve: per-session `SessionLedger`, reset at serve start
 - [ ] recall envelope: additive `meta.ledger` {served,baseline,saved,reads_avoided,cumulative_saved,estimate}
 - [ ] assert sink is meta_kv; memory.jsonl untouched; negative not floored
