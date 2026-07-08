@@ -381,7 +381,7 @@ An optional `.limpet.json` at the repository root tunes two things. It is a plai
 
 ## 🧭 Roadmap
 
-See [ROADMAP.md](ROADMAP.md) for the full plan: portable repo identity, the structural lineage graph, grammar wave 2, and the 1.0 stability contract. One rule governs all of it: a feature ships only if it feeds a receipt (`limpet stats`, the benchmark, rework-avoided) or the honesty envelope.
+See [ROADMAP.md](ROADMAP.md) for what has shipped (portable repo identity, the statusline doctor, the structural lineage graph, and grammar wave 2 — eleven languages) and what is next (freshness at scale, then the 1.0 stability contract). One rule governs all of it: a feature ships only if it feeds a receipt (`limpet stats`, the benchmark, rework-avoided) or the honesty envelope.
 
 ## ⚖️ Reliance and license
 

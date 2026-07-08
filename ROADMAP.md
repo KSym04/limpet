@@ -12,47 +12,29 @@ confident answers about code that moved on; a deterministic AST-hash anchor is
 the only thing that flags the lie. Everything below deepens that edge or it does
 not ship.
 
-## v0.11.0 - structural lineage (context, not just the symbol)
+## Shipped
 
-- **AST lineage graph.** `map` on a symbol returns its structural neighborhood in
-  one call: ancestors (what it extends or implements, the trait it satisfies),
-  descendants (subclasses, implementors, callees), and callers, instead of the
-  agent grepping and reading five to ten files to reconstruct inheritance and
-  blast radius by hand. Inheritance edges are extracted for all six grammars;
-  call and inherit edges store bare names and resolve read-time against the
-  current symbol table, so nothing rots and every endpoint is labeled unique,
-  ambiguous, or unresolved (an edge is never guessed). Traversal is depth and
-  node capped with disclosed truncation. Ships with an additive schema migration
-  (the `inherits` table). This is the query that makes the syntactic call graph
-  pay for itself: the old v1.1 "reverse debugging" bet, earned. Gated on the
-  bench, the fixture gains an inheritance chain and lineage-only questions, and
-  the 4x ratio must hold with those questions net positive.
-- **Live ledger in the envelope: tested and deferred.** A per-recall
-  `meta.ledger` block was built and bench-gated during 0.11.0. Honest pricing
-  showed it adds ~279 tokens per recall and drops the overall savings ratio to
-  3.8x, under the 4x gate, even with the lineage questions lifting the
-  denominator. Per the roadmap's own rule (a feature that cannot show its number
-  under the gate does not ship), the envelope ledger was dropped. The receipt
-  stays where it already costs the agent nothing: `admin {op:"ledger"}`, `limpet
-  stats`, and the UI. Revisit only if a future richer-pack bench proves it fits.
-- Boundary held: name resolution, not type resolution; ambiguity is disclosed,
-  not resolved. limpet stays memory context, not a call-graph oracle.
+Delivered releases in brief (full detail lives in git history, `limpet stats`,
+and the store's own memory). The roadmap below this point is what is NOT yet
+built.
 
-## v0.12.0 — grammar wave 2
-
-Go, Java, Ruby, C#, Bash. Each gated on the I7 fixture (function, class,
-method, import, call), a golden hash-property case (cosmetic-invariant,
-edit-sensitive), an identity-leaf audit, and an own-name-node check — the C++
-lessons (`number_literal` missing from the hash identity set, the definition
-name hiding in the declarator chain) say every grammar conceals at least one
-node-shape surprise. The non-UTF-8 file-level fallback (I-N1) generalizes.
-
-Adding the ABI-15 grammars (Go, Bash) requires bumping the vendored tree-sitter
-core to 0.25; the existing six grammars keep loading unchanged.
-
-The two audit riders once slated to ride along here — full FQN disambiguation
-and the low-entropy follow guard — are DEFERRED to v0.13.0: both touch anchor
-identity and dedup, a different risk class than additively adding grammars.
+- **v0.9.0 — portable repo identity.** The per-repo store is keyed by git-remote
+  identity, not a path slug, so memory follows the project across clones, moves,
+  and renames. Closed a silent path-collision data-loss seam.
+- **v0.10.0 — statusline doctor advisory.** `limpet doctor` reports how the
+  statusline is wired (ok when it delegates to the binary, warn on a hand-rolled
+  store query that will drift, note with the exact line when unwired), so the
+  segment can never break silently.
+- **v0.11.0 — AST lineage graph.** `map` on a symbol returns ancestors,
+  descendants, and callers in one call, each edge labeled unique / ambiguous /
+  unresolved and resolved read-time so nothing rots (additive `inherits` table).
+  The per-recall envelope ledger was built, bench-failed at 3.8x under the 4x
+  gate, and dropped; the receipt stays free in `admin {op:"ledger"}`, `limpet
+  stats`, and the UI. Revisit only if a richer-pack bench proves it fits.
+- **v0.12.0 — grammar wave 2.** Go (`embeds`), Java, Ruby (`mixin`), C#, and Bash
+  bring coverage to eleven grammars, each gated by the I7 fixture and the
+  hash-identity checks. Adding the ABI-15 grammars (Go, Bash) bumped the vendored
+  tree-sitter core to 0.25; the original six (ABI 14) keep loading unchanged.
 
 ## v0.13.0 — freshness at scale
 
