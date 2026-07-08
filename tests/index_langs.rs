@@ -443,8 +443,9 @@ end
 
 class Dog < Animal
   include Walkable
-  def speak
-    bark
+  def speak(name)
+    greeting = "hi"
+    bark()
   end
 end
 "#;
@@ -452,9 +453,12 @@ end
     assert!(names(&facts, "class").contains(&"Dog".to_string()), "{:?}", facts.symbols);
     assert!(names(&facts, "method").contains(&"speak".to_string()), "{:?}", facts.symbols);
     assert!(facts.imports.iter().any(|i| i.contains("mailer")), "{:?}", facts.imports);
-    assert!(facts.calls.iter().any(|(scope, callee)| scope == "speak" && callee == "bark"));
+    assert!(facts.calls.iter().any(|(scope, callee)| scope == "speak" && callee == "bark"),
+        "speak -> bark call edge missing: {:?}", facts.calls);
     assert!(facts.inherits.iter().any(|i| i.name=="Dog" && i.parent_name=="Animal" && i.rel=="extends"), "{:?}", facts.inherits);
     assert!(facts.inherits.iter().any(|i| i.name=="Dog" && i.parent_name=="Walkable" && i.rel=="mixin"), "{:?}", facts.inherits);
+    assert!(!facts.calls.iter().any(|(_, c)| c == "name" || c == "greeting"),
+        "local vars and params must not be recorded as calls: {:?}", facts.calls);
 }
 
 #[test]

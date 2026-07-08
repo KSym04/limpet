@@ -611,20 +611,6 @@ fn walk(
                     _ => {}
                 }
             }
-            // Bare identifier inside a method body: Ruby omits the `call` node
-            // when there are no arguments (e.g. `bark` on its own line).
-            // Emit a call edge only when we are already inside a method scope.
-            "identifier" => {
-                if let Some(parent_node) = node.parent() {
-                    if parent_node.kind() == "body_statement" {
-                        // Only emit if we are inside at least one method scope.
-                        if !parents.is_empty() {
-                            let text = node_text(node, src);
-                            facts.calls.push((current_scope(parents), text));
-                        }
-                    }
-                }
-            }
             _ => {}
         },
         Lang::Java => match kind {
