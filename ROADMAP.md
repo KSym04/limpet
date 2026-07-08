@@ -27,13 +27,14 @@ not ship.
   pay for itself: the old v1.1 "reverse debugging" bet, earned. Gated on the
   bench, the fixture gains an inheritance chain and lineage-only questions, and
   the 4x ratio must hold with those questions net positive.
-- **Live ledger in the envelope** (rides along). Every `recall` reports this
-  call's savings (served, baseline, saved, reads-avoided) plus the running
-  total, in `meta.ledger`, labeled an estimate (baseline understates by design;
-  negative is shown, never floored). The receipt stops being a separate
-  `limpet stats` trip and becomes instant per-call feedback. The sink stays the
-  local ledger: nothing is written to the memory export, nothing leaves the
-  machine.
+- **Live ledger in the envelope: tested and deferred.** A per-recall
+  `meta.ledger` block was built and bench-gated during 0.11.0. Honest pricing
+  showed it adds ~279 tokens per recall and drops the overall savings ratio to
+  3.8x, under the 4x gate, even with the lineage questions lifting the
+  denominator. Per the roadmap's own rule (a feature that cannot show its number
+  under the gate does not ship), the envelope ledger was dropped. The receipt
+  stays where it already costs the agent nothing: `admin {op:"ledger"}`, `limpet
+  stats`, and the UI. Revisit only if a future richer-pack bench proves it fits.
 - Boundary held: name resolution, not type resolution; ambiguity is disclosed,
   not resolved. limpet stays memory context, not a call-graph oracle.
 

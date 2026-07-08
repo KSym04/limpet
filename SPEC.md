@@ -10,7 +10,7 @@ ships only if it feeds the honest receipt or the honesty envelope.
 | # | Feature | Target | Summary |
 |---|---|---|---|
 | M1 | AST lineage graph | v0.11.0 | inheritance + resolved call edges -> bounded up/down lineage in `map` |
-| M2 | Live token ledger | v0.11.0 rider | per-call + per-session savings surfaced in the recall envelope |
+| M2 | Live token ledger | DEFERRED | built + bench-gated in 0.11.0; meta.ledger dropped the bench to 3.8x (under 4x), so reverted; stays in admin/stats/UI |
 | M3 | Local event hook | v1.1+ bet | opt-in exec hook on memory transitions; local `check` gate |
 
 ## Core Architecture
