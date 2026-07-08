@@ -227,6 +227,11 @@ fn migrate_to_v4(conn: &Connection) -> Result<()> {
              CREATE INDEX IF NOT EXISTS idx_inherits_parent ON inherits(parent_name);
              CREATE INDEX IF NOT EXISTS idx_inherits_file   ON inherits(file);",
         )?;
+        // The rebuild emptied a table the sweep will not refill on its own
+        // (unchanged files are never re-parsed). Zero every known mtime so the
+        // bounded sweep sees each file as changed and repopulates inherits
+        // incrementally; rows (and thus symbols and anchors) are untouched.
+        conn.execute("UPDATE files SET mtime_ns = 0", [])?;
     }
     conn.execute(
         "INSERT INTO meta_kv(k, v) VALUES('schema_version', ?1)
@@ -1292,6 +1297,48 @@ mod tests {
             1,
             "inherits must survive a store reopen (migrate_to_v4 must not wipe it every open)"
         );
+    }
+
+    #[test]
+    fn v4_widen_marks_files_for_reindex() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("store.db");
+        // v3-shaped store: narrow CHECK + a populated files row.
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE meta_kv (k TEXT PRIMARY KEY, v TEXT NOT NULL);
+                 CREATE TABLE files (path TEXT PRIMARY KEY, lang TEXT, mtime_ns INTEGER NOT NULL,
+                   size INTEGER NOT NULL, hash TEXT NOT NULL, parse_ok INTEGER NOT NULL DEFAULT 1);
+                 CREATE TABLE inherits (
+                   child_fqn TEXT NOT NULL, parent_name TEXT NOT NULL,
+                   rel TEXT NOT NULL CHECK(rel IN ('extends','implements','impl_trait')),
+                   file TEXT NOT NULL);",
+            )
+            .unwrap();
+            conn.execute("INSERT INTO meta_kv(k,v) VALUES('schema_version','3')", []).unwrap();
+            conn.execute(
+                "INSERT INTO files(path,lang,mtime_ns,size,hash) VALUES('a.go','go',12345,10,'h')",
+                [],
+            )
+            .unwrap();
+        }
+        let store = Store::open(&db).unwrap();
+        // The widen fired: files must be marked dirty so the sweep refills inherits.
+        let mtime: i64 = store
+            .conn
+            .query_row("SELECT mtime_ns FROM files WHERE path='a.go'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mtime, 0, "widen must zero mtimes so the sweep repopulates inherits");
+        // Reopen: already wide, mtimes must NOT be touched again.
+        store.conn.execute("UPDATE files SET mtime_ns = 999", []).unwrap();
+        drop(store);
+        let store = Store::open(&db).unwrap();
+        let mtime: i64 = store
+            .conn
+            .query_row("SELECT mtime_ns FROM files WHERE path='a.go'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mtime, 999, "already-wide open must not re-zero mtimes");
     }
 
     #[test]
