@@ -189,22 +189,45 @@ fn migrate_to_v3(conn: &Connection) -> Result<()> {
 /// embedding) and `mixin` (Ruby include/prepend/extend). SQLite cannot ALTER a
 /// CHECK in place, but `inherits` is fully derived and repopulated per file on
 /// index, so we drop and recreate it with the wider CHECK; content refills on
-/// the next `index`. A fresh store already has the wide CHECK from SCHEMA_V1 and
-/// this DROP+CREATE is a harmless no-op-shaped rebuild.
+/// the next `index`.
+///
+/// IMPORTANT: the DROP must happen ONLY when the table still carries the old
+/// narrow CHECK. An unconditional DROP would wipe freshly-indexed edges every
+/// time a second process (e.g. `limpet serve`) opens the store, because all
+/// migrations run on every open. We gate the rebuild on whether the stored
+/// CREATE SQL already contains `'embeds'` — present means already widened,
+/// absent (or table missing) means the one-time rebuild is needed.
 fn migrate_to_v4(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
-        "DROP TABLE IF EXISTS inherits;
-         CREATE TABLE inherits (
-           child_fqn   TEXT NOT NULL,
-           parent_name TEXT NOT NULL,
-           rel         TEXT NOT NULL
-             CHECK(rel IN ('extends','implements','impl_trait','embeds','mixin')),
-           file        TEXT NOT NULL
-         );
-         CREATE INDEX IF NOT EXISTS idx_inherits_child  ON inherits(child_fqn);
-         CREATE INDEX IF NOT EXISTS idx_inherits_parent ON inherits(parent_name);
-         CREATE INDEX IF NOT EXISTS idx_inherits_file   ON inherits(file);",
-    )?;
+    // Only rebuild inherits when it still carries the OLD narrow CHECK.
+    // The table is derived (refilled per file on index), but the rebuild must
+    // NOT run on every open — an unconditional DROP would wipe the freshly
+    // indexed edges each time a second process (e.g. `serve`) opens the store.
+    use rusqlite::OptionalExtension;
+    let existing_sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='inherits'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let needs_widen = existing_sql
+        .as_deref()
+        .map_or(true, |s| !s.contains("'embeds'"));
+    if needs_widen {
+        conn.execute_batch(
+            "DROP TABLE IF EXISTS inherits;
+             CREATE TABLE inherits (
+               child_fqn   TEXT NOT NULL,
+               parent_name TEXT NOT NULL,
+               rel         TEXT NOT NULL
+                 CHECK(rel IN ('extends','implements','impl_trait','embeds','mixin')),
+               file        TEXT NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS idx_inherits_child  ON inherits(child_fqn);
+             CREATE INDEX IF NOT EXISTS idx_inherits_parent ON inherits(parent_name);
+             CREATE INDEX IF NOT EXISTS idx_inherits_file   ON inherits(file);",
+        )?;
+    }
     conn.execute(
         "INSERT INTO meta_kv(k, v) VALUES('schema_version', ?1)
          ON CONFLICT(k) DO UPDATE SET v = excluded.v",
@@ -1238,6 +1261,37 @@ mod tests {
                 [],
             )
             .is_err());
+    }
+
+    #[test]
+    fn inherits_survive_store_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("store.db");
+        {
+            let store = Store::open(&db).unwrap();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO inherits(child_fqn,parent_name,rel,file) VALUES('a.Dog','Animal','embeds','a.go')",
+                    [],
+                )
+                .unwrap();
+        } // drop/close
+        // Reopen: migrations run again; the inherits row MUST still be there.
+        let store = Store::open(&db).unwrap();
+        let n: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM inherits WHERE child_fqn='a.Dog'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            n,
+            1,
+            "inherits must survive a store reopen (migrate_to_v4 must not wipe it every open)"
+        );
     }
 
     #[test]
