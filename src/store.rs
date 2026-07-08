@@ -212,7 +212,7 @@ fn migrate_to_v4(conn: &Connection) -> Result<()> {
         .optional()?;
     let needs_widen = existing_sql
         .as_deref()
-        .map_or(true, |s| !s.contains("'embeds'"));
+        .is_none_or(|s| !s.contains("'embeds'"));
     if needs_widen {
         conn.execute_batch(
             "DROP TABLE IF EXISTS inherits;
