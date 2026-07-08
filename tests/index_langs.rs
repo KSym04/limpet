@@ -416,3 +416,16 @@ fn go_hash_is_cosmetic_invariant_and_edit_sensitive() {
     assert_eq!(ha, hb, "cosmetic change (whitespace/comment) must not alter body_hash");
     assert_ne!(ha, hc, "semantic edit must alter body_hash");
 }
+
+#[test]
+fn java_interface_extends() {
+    let src = "interface Walkable {}\ninterface Runner extends Walkable {}\n";
+    let facts = extract::extract(Lang::Java, src).unwrap();
+    assert!(
+        facts.inherits.iter().any(|i| i.name == "Runner"
+            && i.parent_name == "Walkable"
+            && i.rel == "extends"),
+        "interface extends must produce an extends edge: {:?}",
+        facts.inherits
+    );
+}

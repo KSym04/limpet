@@ -582,11 +582,17 @@ fn walk(
                         }
                     }
                     // interface X extends Y, Z -> extends
+                    // extends_interfaces -> type_list -> type_identifier (parallel
+                    // structure to super_interfaces above, must descend type_list).
                     if node.kind() == "interface_declaration" {
                         let mut c = node.walk();
                         for ch in node.children(&mut c) {
                             if ch.kind() == "extends_interfaces" {
-                                for p in base_names(ch, src) {
+                                let clause = (0..ch.child_count())
+                                    .filter_map(|i| ch.child(i))
+                                    .find(|c| c.kind() == "type_list")
+                                    .unwrap_or(ch);
+                                for p in base_names(clause, src) {
                                     push_inherit(facts, parents, &name, p, "extends");
                                 }
                             }
