@@ -151,10 +151,23 @@ fn tool_recall(store: &Store, sweep: &SweepReport, args: &Value) -> Result<Value
         stale,
         contradicted,
     );
-    // The ledger is deliberately NOT in this response: even a 2-int block
-    // per recall dropped the token-savings bench under its 4x gate. The
-    // receipt is for humans; it lives in admin {op:"ledger"}, `limpet
-    // stats`, and the UI, where reading it costs the agent nothing.
+    // Live receipt (M2): per-call ledger now surfaced in the envelope and bench-gated.
+    let mut meta = meta;
+    let saved_this = cost.baseline - cost.served; // never floored (I-L2)
+    let cumulative_saved = store.ledger_read().saved();
+    if let Some(m) = meta.as_object_mut() {
+        m.insert(
+            "ledger".into(),
+            json!({
+                "served": cost.served,
+                "baseline": cost.baseline,
+                "saved": saved_this,
+                "reads_avoided": cost.reads_avoided,
+                "cumulative_saved": cumulative_saved,
+                "estimate": true,
+            }),
+        );
+    }
     Ok(envelope(Value::Array(items), meta))
 }
 
@@ -779,6 +792,7 @@ pub fn dispatch_for_test(name: &str, store: &Store, args: &Value) -> Result<Valu
     let sweep = SweepReport::default();
     match name {
         "map" => tool_map(store, &sweep, args),
+        "recall" => tool_recall(store, &sweep, args),
         other => Err(anyhow!("unknown tool '{other}'")),
     }
 }
