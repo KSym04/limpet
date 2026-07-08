@@ -429,3 +429,77 @@ fn java_interface_extends() {
         facts.inherits
     );
 }
+
+#[test]
+fn ruby_extraction() {
+    let src = r#"
+require 'mailer'
+
+module Walkable
+end
+
+class Animal
+end
+
+class Dog < Animal
+  include Walkable
+  def speak
+    bark
+  end
+end
+"#;
+    let facts = extract::extract(Lang::Ruby, src).unwrap();
+    assert!(names(&facts, "class").contains(&"Dog".to_string()), "{:?}", facts.symbols);
+    assert!(names(&facts, "method").contains(&"speak".to_string()), "{:?}", facts.symbols);
+    assert!(facts.imports.iter().any(|i| i.contains("mailer")), "{:?}", facts.imports);
+    assert!(facts.calls.iter().any(|(scope, callee)| scope == "speak" && callee == "bark"));
+    assert!(facts.inherits.iter().any(|i| i.name=="Dog" && i.parent_name=="Animal" && i.rel=="extends"), "{:?}", facts.inherits);
+    assert!(facts.inherits.iter().any(|i| i.name=="Dog" && i.parent_name=="Walkable" && i.rel=="mixin"), "{:?}", facts.inherits);
+}
+
+#[test]
+fn ruby_hash_is_cosmetic_invariant_and_edit_sensitive() {
+    // baseline: speak method
+    let a = r#"
+class Dog
+  def speak
+    bark
+  end
+end
+"#;
+    // cosmetic: extra blank line + comment, same semantics
+    let b = r#"
+class Dog
+  # says woof
+  def speak
+
+    bark
+  end
+end
+"#;
+    // semantic: changed callee
+    let c = r#"
+class Dog
+  def speak
+    woof
+  end
+end
+"#;
+
+    let hash_of = |src: &str| {
+        let facts = extract::extract(Lang::Ruby, src).unwrap();
+        let sym = facts
+            .symbols
+            .iter()
+            .find(|s| s.name == "speak")
+            .unwrap_or_else(|| panic!("no speak symbol in: {src}"));
+        anchor::ast_body_hash(Lang::Ruby, src, sym.byte_range).unwrap()
+    };
+
+    let ha = hash_of(a);
+    let hb = hash_of(b);
+    let hc = hash_of(c);
+
+    assert_eq!(ha, hb, "cosmetic change (whitespace/comment) must not alter body_hash");
+    assert_ne!(ha, hc, "semantic edit must alter body_hash");
+}

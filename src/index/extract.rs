@@ -102,7 +102,8 @@ fn base_names(clause: Node, src: &[u8]) -> Vec<String> {
     for ch in clause.children(&mut c) {
         match ch.kind() {
             "name" | "identifier" | "type_identifier" | "qualified_name"
-            | "scoped_type_identifier" | "namespace_name" | "dotted_name" => {
+            | "scoped_type_identifier" | "namespace_name" | "dotted_name"
+            | "constant" => {
                 out.push(node_text(ch, src));
             }
             _ => {}
@@ -550,6 +551,77 @@ fn walk(
                 if let Some(func) = node.child_by_field_name("function") {
                     if let Some(callee) = callee_name(func, src) {
                         facts.calls.push((current_scope(parents), callee));
+                    }
+                }
+            }
+            _ => {}
+        },
+        Lang::Ruby => match kind {
+            "method" | "singleton_method" => {
+                if let Some(name) = name_of(node, src) {
+                    let k = if parents.is_empty() { "function" } else { "method" };
+                    push_sym(facts, node, src, parents, k, name.clone());
+                    parents.push(name);
+                    pushed_parent = true;
+                }
+            }
+            "class" | "module" => {
+                if let Some(name) = name_of(node, src) {
+                    push_sym(facts, node, src, parents, "class", name.clone());
+                    // class Dog < Animal -> superclass field
+                    if let Some(sc) = node.child_by_field_name("superclass") {
+                        for p in base_names(sc, src) {
+                            push_inherit(facts, parents, &name, p, "extends");
+                        }
+                    }
+                    parents.push(name);
+                    pushed_parent = true;
+                }
+            }
+            "call" => {
+                // include/prepend/extend Mod -> mixin, anchored to the enclosing class;
+                // require '...' -> import; everything else -> call edge.
+                let mname = node
+                    .child_by_field_name("method")
+                    .map(|m| node_text(m, src))
+                    .unwrap_or_default();
+                match mname.as_str() {
+                    "include" | "prepend" | "extend" => {
+                        if let Some(cls) = parents.last().cloned() {
+                            if let Some(args) = node.child_by_field_name("arguments") {
+                                for p in base_names(args, src) {
+                                    let up = &parents[..parents.len() - 1];
+                                    push_inherit(facts, up, &cls, p, "mixin");
+                                }
+                            }
+                        }
+                    }
+                    "require" | "require_relative" => {
+                        if let Some(args) = node.child_by_field_name("arguments") {
+                            facts.imports.push(
+                                node_text(args, src)
+                                    .trim_matches(['(', ')', '"', '\'', ' '])
+                                    .to_string(),
+                            );
+                        }
+                    }
+                    other if !other.is_empty() => {
+                        facts.calls.push((current_scope(parents), other.to_string()));
+                    }
+                    _ => {}
+                }
+            }
+            // Bare identifier inside a method body: Ruby omits the `call` node
+            // when there are no arguments (e.g. `bark` on its own line).
+            // Emit a call edge only when we are already inside a method scope.
+            "identifier" => {
+                if let Some(parent_node) = node.parent() {
+                    if parent_node.kind() == "body_statement" {
+                        // Only emit if we are inside at least one method scope.
+                        if !parents.is_empty() {
+                            let text = node_text(node, src);
+                            facts.calls.push((current_scope(parents), text));
+                        }
                     }
                 }
             }

@@ -1,6 +1,6 @@
 //! Language registry: extension detection and tree-sitter grammar handles.
 //!
-//! Eight curated grammars ship (PHP, JS, TS, Python, Rust, C/C++, Go, Java). Every
+//! Nine curated grammars ship (PHP, JS, TS, Python, Rust, C/C++, Go, Java, Ruby). Every
 //! language listed here has fixture
 //! coverage in `tests/index_langs.rs` (invariant I7); adding a language
 //! without a fixture is a review-blocking change.
@@ -18,6 +18,7 @@ pub enum Lang {
     Cpp,
     Go,
     Java,
+    Ruby,
 }
 
 impl Lang {
@@ -31,6 +32,7 @@ impl Lang {
             Lang::Cpp => "cpp",
             Lang::Go => "go",
             Lang::Java => "java",
+            Lang::Ruby => "ruby",
         }
     }
 }
@@ -50,6 +52,7 @@ pub fn detect(path: &std::path::Path) -> Option<Lang> {
         "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" | "h" | "c" | "inl" => Some(Lang::Cpp),
         "go" => Some(Lang::Go),
         "java" => Some(Lang::Java),
+        "rb" | "rake" => Some(Lang::Ruby),
         _ => None,
     }
 }
@@ -67,6 +70,7 @@ pub fn from_config_str(s: &str) -> Option<Lang> {
         "cpp" | "c" | "c++" => Some(Lang::Cpp),
         "go" | "golang" => Some(Lang::Go),
         "java" => Some(Lang::Java),
+        "rb" | "ruby" => Some(Lang::Ruby),
         _ => None,
     }
 }
@@ -108,5 +112,6 @@ pub fn ts_language(lang: Lang) -> Language {
         Lang::Cpp => tree_sitter_cpp::LANGUAGE.into(),
         Lang::Go => tree_sitter_go::LANGUAGE.into(),
         Lang::Java => tree_sitter_java::LANGUAGE.into(),
+        Lang::Ruby => tree_sitter_ruby::LANGUAGE.into(),
     }
 }
