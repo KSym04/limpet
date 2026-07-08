@@ -507,3 +507,76 @@ end
     assert_eq!(ha, hb, "cosmetic change (whitespace/comment) must not alter body_hash");
     assert_ne!(ha, hc, "semantic edit must alter body_hash");
 }
+
+#[test]
+fn csharp_extraction() {
+    let src = r#"
+using App.Services;
+
+interface IPet {}
+
+class Animal {}
+
+class Dog : Animal, IPet {
+    public string Speak() {
+        return Bark();
+    }
+}
+"#;
+    let facts = extract::extract(Lang::CSharp, src).unwrap();
+    assert!(names(&facts, "class").contains(&"Dog".to_string()), "{:?}", facts.symbols);
+    assert!(names(&facts, "method").contains(&"Speak".to_string()), "{:?}", facts.symbols);
+    assert!(facts.imports.iter().any(|i| i.contains("App.Services")), "{:?}", facts.imports);
+    assert!(facts.calls.iter().any(|(scope, callee)| scope == "Speak" && callee == "Bark"));
+    // base-list: both entries recorded as extends (class vs interface not
+    // distinguished syntactically; resolved read-time, labeled).
+    assert!(facts.inherits.iter().any(|i| i.name=="Dog" && i.parent_name=="Animal" && i.rel=="extends"), "{:?}", facts.inherits);
+    assert!(facts.inherits.iter().any(|i| i.name=="Dog" && i.parent_name=="IPet" && i.rel=="extends"), "{:?}", facts.inherits);
+}
+
+#[test]
+fn csharp_hash_is_cosmetic_invariant_and_edit_sensitive() {
+    // baseline: Speak method
+    let a = r#"
+class Dog {
+    public string Speak() {
+        return Bark();
+    }
+}
+"#;
+    // cosmetic: extra whitespace + comment, same semantics
+    let b = r#"
+class Dog {
+    // says woof
+    public string Speak() {
+
+        return  Bark() ;
+    }
+}
+"#;
+    // semantic: changed callee
+    let c = r#"
+class Dog {
+    public string Speak() {
+        return Woof();
+    }
+}
+"#;
+
+    let hash_of = |src: &str| {
+        let facts = extract::extract(Lang::CSharp, src).unwrap();
+        let sym = facts
+            .symbols
+            .iter()
+            .find(|s| s.name == "Speak")
+            .unwrap_or_else(|| panic!("no Speak symbol in: {src}"));
+        anchor::ast_body_hash(Lang::CSharp, src, sym.byte_range).unwrap()
+    };
+
+    let ha = hash_of(a);
+    let hb = hash_of(b);
+    let hc = hash_of(c);
+
+    assert_eq!(ha, hb, "cosmetic change (whitespace/comment) must not alter body_hash");
+    assert_ne!(ha, hc, "semantic edit must alter body_hash");
+}

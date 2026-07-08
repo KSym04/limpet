@@ -147,6 +147,10 @@ fn callee_name(func: Node, src: &[u8]) -> Option<String> {
         "scoped_identifier" | "qualified_identifier" => func
             .child_by_field_name("name")
             .map(|n| node_text(n, src)),
+        // C# this.Foo() / obj.Foo()
+        "member_access_expression" => func
+            .child_by_field_name("name")
+            .map(|n| node_text(n, src)),
         _ => None,
     }
 }
@@ -673,6 +677,50 @@ fn walk(
             "method_invocation" => {
                 if let Some(name) = node.child_by_field_name("name") {
                     facts.calls.push((current_scope(parents), node_text(name, src)));
+                }
+            }
+            _ => {}
+        },
+        Lang::CSharp => match kind {
+            "method_declaration" => {
+                if let Some(name) = name_of(node, src) {
+                    push_sym(facts, node, src, parents, "method", name.clone());
+                    parents.push(name);
+                    pushed_parent = true;
+                }
+            }
+            "class_declaration" | "interface_declaration" | "struct_declaration" => {
+                if let Some(name) = name_of(node, src) {
+                    push_sym(facts, node, src, parents, "class", name.clone());
+                    let bl = node.child_by_field_name("bases").or_else(|| {
+                        (0..node.child_count())
+                            .filter_map(|i| node.child(i))
+                            .find(|ch| ch.kind() == "base_list")
+                    });
+                    if let Some(bl) = bl {
+                        for p in base_names(bl, src) {
+                            push_inherit(facts, parents, &name, p, "extends");
+                        }
+                    }
+                    parents.push(name);
+                    pushed_parent = true;
+                }
+            }
+            "using_directive" => {
+                facts.imports.push(
+                    node_text(node, src)
+                        .trim_start_matches("using")
+                        .trim()
+                        .trim_end_matches(';')
+                        .trim()
+                        .to_string(),
+                );
+            }
+            "invocation_expression" => {
+                if let Some(func) = node.child_by_field_name("function") {
+                    if let Some(callee) = callee_name(func, src) {
+                        facts.calls.push((current_scope(parents), callee));
+                    }
                 }
             }
             _ => {}

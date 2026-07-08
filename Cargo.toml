@@ -28,6 +28,7 @@ self-replace = "1"
 tree-sitter-go = "=0.25.0"
 tree-sitter-java = "0.23"
 tree-sitter-ruby = "0.23"
+tree-sitter-c-sharp = "0.23"
 
 [dev-dependencies]
 tempfile = "3"
