@@ -51,8 +51,12 @@ pub fn extract(lang_id: Lang, src: &str) -> Result<FileFacts> {
         .map_err(|e| anyhow::anyhow!("grammar load failed: {e}"))?;
     // PHP grammar requires the `<?php` opening tag; add it when absent so
     // callers (tests, REPL snippets) can pass raw PHP code directly.
+    // Strip a leading BOM before deciding whether the PHP open tag is present,
+    // so a real <?php file that starts with a BOM is NOT prepended (which would
+    // shift every symbol's byte range and corrupt its body hash).
+    let has_tag = src.trim_start_matches('\u{feff}').trim_start().starts_with("<?");
     let owned;
-    let src = if lang_id == Lang::Php && !src.trim_start().starts_with("<?") {
+    let src = if lang_id == Lang::Php && !has_tag {
         owned = format!("<?php\n{src}");
         owned.as_str()
     } else {
@@ -555,5 +559,27 @@ mod inherit_tests {
     fn rust_trait_supertrait_captured() {
         let e = edges(Lang::Rust, "trait Working: Animal { }");
         assert!(e.contains(&(String::new(), "Working".into(), "Animal".into(), "extends")));
+    }
+
+    #[test]
+    fn php_bom_prefixed_file_keeps_aligned_offsets() {
+        let src = "\u{feff}<?php\nclass Dog extends Animal {}\n";
+        let facts = extract(Lang::Php, src).unwrap();
+        // Inheritance edge still captured.
+        assert!(
+            facts.inherits.iter().any(|i| i.name == "Dog"
+                && i.parent_name == "Animal"
+                && i.rel == "extends"),
+            "expected Dog extends Animal edge"
+        );
+        // Byte range for the Dog class, sliced from the ORIGINAL src, must contain "Dog".
+        let dog = facts.symbols.iter().find(|s| s.name == "Dog").expect("Dog symbol");
+        let (a, b) = dog.byte_range;
+        let slice = &src.as_bytes()[a..b];
+        assert!(
+            std::str::from_utf8(slice).unwrap().contains("class Dog"),
+            "byte range must align with original src, not the prepended buffer; got: {:?}",
+            std::str::from_utf8(slice)
+        );
     }
 }
