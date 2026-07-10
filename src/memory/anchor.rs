@@ -342,16 +342,25 @@ pub fn resolve_all(store: &crate::store::Store) -> Result<ResolveReport> {
             (false, false) => {
                 // FQN gone: search for the body elsewhere (rename/move).
                 let mut fstmt = store.conn.prepare(
-                    "SELECT fqn, file FROM symbols WHERE body_hash = ?1 LIMIT 3",
+                    "SELECT fqn, file, body_len FROM symbols WHERE body_hash = ?1 LIMIT 3",
                 )?;
-                let matches: Vec<(String, String)> = fstmt
-                    .query_map([anchor_hash], |r| Ok((r.get(0)?, r.get(1)?)))?
+                let matches: Vec<(String, String, Option<i64>)> = fstmt
+                    .query_map([anchor_hash], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
                     .collect::<rusqlite::Result<_>>()?;
                 match matches.len() {
                     0 => AnchorFate::Invalidated,
-                    1 => AnchorFate::Followed {
-                        new_fqn: matches[0].0.clone(),
-                        new_file: matches[0].1.clone(),
+                    1 => match matches[0].2 {
+                        // A trivial body is not evidence: an empty fn or bare
+                        // delegation hashes identically to every twin, and a
+                        // wrong follow lies forever. Stale heals if the
+                        // original returns; NULL (pre-v5) keeps legacy grace.
+                        Some(len) if (len as u32) < MIN_FOLLOW_BODY_BYTES => {
+                            AnchorFate::Stale { reason: "low_entropy" }
+                        }
+                        _ => AnchorFate::Followed {
+                            new_fqn: matches[0].0.clone(),
+                            new_file: matches[0].1.clone(),
+                        },
                     },
                     _ => AnchorFate::Stale { reason: "ambiguous_anchor" },
                 }

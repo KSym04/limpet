@@ -575,3 +575,128 @@ fn body_hashes_carry_normalization_length() {
     assert_eq!(out[0].1, out[1].1, "identical bodies must measure identically");
     assert!(out[0].1 > 0, "normalization buffer is never empty");
 }
+
+/// Seed a store with an entry anchored to a trivial `orig` symbol in a.py,
+/// plus an identical-bodied `twin` symbol already living in b.py. Both
+/// bodies measure well under MIN_FOLLOW_BODY_BYTES (76B, see
+/// entropy_calibration.rs for the Python trivial floor).
+fn seed_trivial_twin(root: &std::path::Path) -> (Store, String) {
+    fs::write(root.join("a.py"), "def orig():\n    pass\n").unwrap();
+    fs::write(root.join("b.py"), "def twin():\n    pass\n").unwrap();
+    let store = Store::open_in_memory().unwrap();
+    index::full_index(&store, root).unwrap();
+    let result = memory::remember(
+        &store,
+        "fact",
+        "orig is a placeholder awaiting implementation",
+        "explicit",
+        None,
+        &[AnchorSpec { file: "a.py".into(), symbol: Some("orig".into()) }],
+        None,
+        &[],
+        None,
+        false,
+        None,
+    )
+    .unwrap();
+    (store, result.id)
+}
+
+#[test]
+fn trivial_unique_twin_is_refused_as_low_entropy() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    let (store, id) = seed_trivial_twin(root);
+
+    // orig disappears from a.py; twin's identical trivial body in b.py is
+    // the only remaining body-hash match. It is a real UNIQUE match, but an
+    // empty `pass` body is not evidence of identity: refuse to follow it.
+    fs::write(root.join("a.py"), "def unrelated():\n    return 1\n").unwrap();
+    let report = mutate_and_resolve(&store, root);
+    assert_eq!(report.stale, 1, "trivial unique match must not silently follow");
+    assert_eq!(report.followed, 0, "the anchor must not be re-pointed at the twin");
+    let (status, reason) = status_of(&store, &id);
+    assert_eq!(status, "stale");
+    assert_eq!(reason.as_deref(), Some("low_entropy"));
+    let fqn: String = store
+        .conn
+        .query_row("SELECT symbol_fqn FROM anchors WHERE entry_id = ?1", [&id], |r| r.get(0))
+        .unwrap();
+    assert_eq!(fqn, "a.orig", "anchor must still point at the original, never re-pointed");
+}
+
+#[test]
+fn low_entropy_refusal_heals_when_the_original_returns() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    let (store, id) = seed_trivial_twin(root);
+
+    fs::write(root.join("a.py"), "def unrelated():\n    return 1\n").unwrap();
+    let _ = mutate_and_resolve(&store, root);
+    assert_eq!(status_of(&store, &id).0, "stale", "precondition: refusal must have staled it");
+
+    // orig comes back exactly as it was (branch switch, stash pop, etc).
+    fs::write(root.join("a.py"), "def orig():\n    pass\n").unwrap();
+    let _ = mutate_and_resolve(&store, root);
+    assert_eq!(
+        status_of(&store, &id).0,
+        "active",
+        "the original returning must heal a low_entropy refusal (symmetric staleness)"
+    );
+    let fqn: String = store
+        .conn
+        .query_row("SELECT symbol_fqn FROM anchors WHERE entry_id = ?1", [&id], |r| r.get(0))
+        .unwrap();
+    assert_eq!(fqn, "a.orig", "anchor was never touched through the whole cycle");
+}
+
+#[test]
+fn null_body_len_keeps_legacy_follow() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    // A real (non-trivial) body, well clear of the follow floor (343B
+    // measured for this shape in tests/entropy_calibration.rs's sibling
+    // fixtures), so the only variable under test is body_len itself.
+    let real = "def orig(x):\n    y = x + 1\n    if y > 2:\n        return y * 3\n    return y\n";
+    fs::write(root.join("a.py"), real).unwrap();
+    fs::write(root.join("b.py"), real.replace("orig", "twin")).unwrap();
+    let store = Store::open_in_memory().unwrap();
+    index::full_index(&store, root).unwrap();
+    let result = memory::remember(
+        &store,
+        "fact",
+        "orig triples y once it clears 2",
+        "explicit",
+        None,
+        &[AnchorSpec { file: "a.py".into(), symbol: Some("orig".into()) }],
+        None,
+        &[],
+        None,
+        false,
+        None,
+    )
+    .unwrap();
+
+    // orig disappears from a.py; twin is the unique body-hash match. Simulate
+    // a pre-v5 row that never got a body_len backfill.
+    fs::write(root.join("a.py"), "def unrelated():\n    return 1\n").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    index::sweep(&store, root, &Default::default()).unwrap();
+    store
+        .conn
+        .execute("UPDATE symbols SET body_len = NULL WHERE name = 'twin'", [])
+        .unwrap();
+    let report = anchor::resolve_all(&store).unwrap();
+
+    assert_eq!(report.followed, 1, "NULL body_len must keep legacy grace and follow");
+    let (status, _reason) = status_of(&store, &result.id);
+    assert_eq!(status, "active");
+    let (fqn, file): (String, String) = store
+        .conn
+        .query_row("SELECT symbol_fqn, file FROM anchors WHERE entry_id = ?1", [&result.id], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    assert_eq!(fqn, "b.twin");
+    assert_eq!(file, "b.py");
+}
