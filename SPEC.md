@@ -1,3 +1,42 @@
+# SPEC — freshness at scale, branch 1: sweep priority + low-entropy guard — v0.13.0
+
+Status: APPROVED (2026-07-11). Full spec:
+docs/superpowers/specs/2026-07-11-freshness-at-scale-design.md
+
+Two freshness-correctness fixes that feed the honesty envelope. Sweep order
+stops being arbitrary: files carrying anchors reindex first inside the same
+32-file budget, so staleness lands where memories live. Follow stops trusting
+uniqueness alone: a trivial body (empty fn, delegating one-liner) is refused as
+follow evidence and surfaces as `Stale{low_entropy}` instead of silently
+re-pointing to the wrong twin.
+
+| Item | Target | Summary |
+|---|---|---|
+| Sweep prioritization | v0.13.0 | stable-partition `changed` anchored-first before the budget cut; report shape unchanged |
+| schema v5 `symbols.body_len` | v0.13.0 | normalization-buffer byte length beside the hash; additive ALTER, table_info self-gate, mtime_ns=0 refill |
+| Low-entropy follow guard | v0.13.0 | both follow sites: unique match under measured threshold -> `Stale{low_entropy}`; NULL = legacy grace; heals when original returns |
+
+Locked: hash recipe byte-identical (length is a read of the same buffer);
+thresholds calibrated from real buffer lengths across all 11 grammars before
+the constants are set, biased low (never misclassify a real body); stale not
+invalidated; two-process release-binary dogfood mandatory for the migration.
+
+## Task Implementation Checklist — freshness branch 1
+
+- [ ] Calibration harness: print normalization-buffer lengths for trivial +
+      real fixture bodies across all 11 grammars; pick both thresholds
+- [ ] `ast_body_hashes`/`ast_body_hash_node` return (hash, len); all callers
+- [ ] schema v5: ALTER + table_info self-gate + refill + reopen/refill tests
+- [ ] `index_file_parsed` writes `body_len`
+- [ ] Sweep prioritization + budget-boundary test
+- [ ] Symbol-site guard + NULL grace + healing round-trip tests
+- [ ] File-site guard (`files.size`) + tests
+- [ ] Docs: `low_entropy` stale reason; README if reasons enumerated
+- [ ] Full suite + clippy + QA gate + two-process dogfood
+- [ ] Whole-branch review -> STOP for Ken -> PR
+
+---
+
 # SPEC — grammar wave 2 (Go, Java, Ruby, C#, Bash) — v0.12.0
 
 Status: APPROVED (design, 2026-07-08). Full spec:
