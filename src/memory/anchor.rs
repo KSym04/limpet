@@ -360,7 +360,7 @@ pub fn resolve_all(store: &crate::store::Store) -> Result<ResolveReport> {
                         // delegation hashes identically to every twin, and a
                         // wrong follow lies forever. Stale heals if the
                         // original returns; NULL (pre-v5) keeps legacy grace.
-                        Some(len) if (len as u32) < MIN_FOLLOW_BODY_BYTES => {
+                        Some(len) if len < i64::from(MIN_FOLLOW_BODY_BYTES) => {
                             AnchorFate::Stale { reason: "low_entropy" }
                         }
                         _ => AnchorFate::Followed {
