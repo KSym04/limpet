@@ -113,7 +113,7 @@ fn normalization_buffer(node: Node, src: &[u8]) -> Vec<u8> {
 /// inside the body or adding a statement always does; identical bodies
 /// hash identically across files and names.
 pub fn ast_body_hash_node(node: Node, src: &[u8]) -> String {
-    let digest = Sha256::digest(&normalization_buffer(node, src));
+    let digest = Sha256::digest(normalization_buffer(node, src));
     hex32(&digest)
 }
 

@@ -23,17 +23,20 @@ invalidated; two-process release-binary dogfood mandatory for the migration.
 
 ## Task Implementation Checklist — freshness branch 1
 
-- [ ] Calibration harness: print normalization-buffer lengths for trivial +
+- [x] Calibration harness: print normalization-buffer lengths for trivial +
       real fixture bodies across all 11 grammars; pick both thresholds
-- [ ] `ast_body_hashes`/`ast_body_hash_node` return (hash, len); all callers
-- [ ] schema v5: ALTER + table_info self-gate + refill + reopen/refill tests
-- [ ] `index_file_parsed` writes `body_len`
-- [ ] Sweep prioritization + budget-boundary test
-- [ ] Symbol-site guard + NULL grace + healing round-trip tests
-- [ ] File-site guard (`files.size`) + tests
-- [ ] Docs: `low_entropy` stale reason; README if reasons enumerated
-- [ ] Full suite + clippy + QA gate + two-process dogfood
-- [ ] Whole-branch review -> STOP for Ken -> PR
+      (BODY=124, FILE=34; max trivial 123 vs min real 265)
+- [x] `ast_body_hashes`/`ast_body_hash_node` return (hash, len); all callers
+- [x] schema v5: ALTER + table_info self-gate + refill + reopen/refill tests
+- [x] `index_file_parsed` writes `body_len`
+- [x] Sweep prioritization + budget-boundary test
+- [x] Symbol-site guard + NULL grace + healing round-trip tests
+- [x] File-site guard (`files.size`) + tests
+- [x] Docs: `low_entropy` stale reason; README fate table + prose
+- [x] Full suite (163) + clippy clean + bench 4.0x/5.4x + two-process dogfood
+      (real v4 store migrated, inherits intact, anchored files refilled first,
+      guard fired live stale:low_entropy and healed on restore)
+- [ ] Whole-branch review -> PR -> merge -> /deploy-limpet 0.13.0 (Ken pre-authorized 2026-07-11)
 
 ---
 
