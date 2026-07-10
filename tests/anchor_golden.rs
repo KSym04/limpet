@@ -480,7 +480,7 @@ fn cpp_rename_is_followed() {
 fn file_anchor_follows_a_move() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
-    fs::write(root.join("hero.twig"), "{% block hero %}x{% endblock %}\n").unwrap();
+    fs::write(root.join("hero.twig"), "{% block hero %}This is a substantial hero block with meaningful content that exceeds the low-entropy threshold{% endblock %}\n").unwrap();
     let store = Store::open_in_memory().unwrap();
     index::full_index(&store, root).unwrap();
     let result = memory::remember(
@@ -699,4 +699,81 @@ fn null_body_len_keeps_legacy_follow() {
         .unwrap();
     assert_eq!(fqn, "b.twin");
     assert_eq!(file, "b.py");
+}
+
+#[test]
+fn tiny_file_move_is_refused_as_low_entropy() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    let tiny_content = "# stub\n";
+    fs::write(root.join("tiny.md"), tiny_content).unwrap();
+    let store = Store::open_in_memory().unwrap();
+    index::full_index(&store, root).unwrap();
+    let result = memory::remember(
+        &store,
+        "insight",
+        "stub documentation",
+        "explicit",
+        None,
+        &[AnchorSpec { file: "tiny.md".into(), symbol: None }],
+        None,
+        &[],
+        None,
+        false,
+        None,
+    )
+    .unwrap();
+
+    // Low-entropy file move: content hash matches but size < MIN_FOLLOW_FILE_BYTES
+    // so it refuses to follow. Anchor stays at original path, entry goes stale.
+    fs::create_dir_all(root.join("docs")).unwrap();
+    fs::rename(root.join("tiny.md"), root.join("docs/renamed.md")).unwrap();
+    let _ = mutate_and_resolve(&store, root);
+    let (status, reason) = status_of(&store, &result.id);
+    assert_eq!(status, "stale", "tiny file move must be refused as stale");
+    assert_eq!(reason, Some("low_entropy".into()), "stale reason must be low_entropy");
+    let file: String = store
+        .conn
+        .query_row("SELECT file FROM anchors WHERE entry_id = ?1", [&result.id], |r| r.get(0))
+        .unwrap();
+    assert_eq!(file, "tiny.md", "anchor must not re-point for low-entropy file");
+}
+
+#[test]
+fn real_file_move_still_follows() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    let real_content = "# Real Documentation\n\nThis is a substantial file with enough content to exceed the low-entropy threshold. \
+        It should have multiple paragraphs and meaningful size so that when it moves to a new location, \
+        the anchor system will recognize it as a high-confidence follow and update the file path in the anchors table. \
+        This ensures that large, meaningful files are not mistakenly refused as low-entropy when they change locations.";
+    fs::write(root.join("docs.md"), real_content).unwrap();
+    let store = Store::open_in_memory().unwrap();
+    index::full_index(&store, root).unwrap();
+    let result = memory::remember(
+        &store,
+        "insight",
+        "real documentation",
+        "explicit",
+        None,
+        &[AnchorSpec { file: "docs.md".into(), symbol: None }],
+        None,
+        &[],
+        None,
+        false,
+        None,
+    )
+    .unwrap();
+
+    // Real file move: substantial content, size >= MIN_FOLLOW_FILE_BYTES,
+    // so anchor follows the moved file to its new location.
+    fs::create_dir_all(root.join("archives")).unwrap();
+    fs::rename(root.join("docs.md"), root.join("archives/docs.md")).unwrap();
+    let _ = mutate_and_resolve(&store, root);
+    assert_eq!(status_of(&store, &result.id).0, "active", "real file move must be followed");
+    let file: String = store
+        .conn
+        .query_row("SELECT file FROM anchors WHERE entry_id = ?1", [&result.id], |r| r.get(0))
+        .unwrap();
+    assert_eq!(file, "archives/docs.md", "anchor must re-point for high-entropy file");
 }

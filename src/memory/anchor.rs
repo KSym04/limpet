@@ -277,20 +277,26 @@ pub fn resolve_all(store: &crate::store::Store) -> Result<ResolveReport> {
                     // by hash exactly like symbol anchors follow bodies.
                     let mut fstmt = store
                         .conn
-                        .prepare("SELECT path FROM files WHERE hash = ?1 LIMIT 3")?;
-                    let homes: Vec<String> = fstmt
-                        .query_map([h], |r| r.get(0))?
+                        .prepare("SELECT path, size FROM files WHERE hash = ?1 LIMIT 3")?;
+                    let homes: Vec<(String, i64)> = fstmt
+                        .query_map([h], |r| Ok((r.get(0)?, r.get(1)?)))?
                         .collect::<rusqlite::Result<_>>()?;
                     match homes.len() {
                         0 => AnchorFate::Invalidated,
+                        // A near-empty file's content hash matches every
+                        // stub like it; refusing beats guessing (heals if
+                        // the original path returns).
+                        1 if homes[0].1 < MIN_FOLLOW_FILE_BYTES => {
+                            AnchorFate::Stale { reason: "low_entropy" }
+                        }
                         1 => {
                             store.conn.execute(
                                 "UPDATE anchors SET file = ?1 WHERE id = ?2",
-                                params![homes[0], row.anchor_id],
+                                params![homes[0].0, row.anchor_id],
                             )?;
                             AnchorFate::Followed {
-                                new_fqn: homes[0].clone(),
-                                new_file: homes[0].clone(),
+                                new_fqn: homes[0].0.clone(),
+                                new_file: homes[0].0.clone(),
                             }
                         }
                         _ => AnchorFate::Stale { reason: "ambiguous_anchor" },
