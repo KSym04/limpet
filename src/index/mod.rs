@@ -177,8 +177,8 @@ fn index_file_parsed(
     )?;
 
     let ranges: Vec<(usize, usize)> = facts.symbols.iter().map(|s| s.byte_range).collect();
-    let hashes = anchor::ast_body_hashes(lang_id, src, &ranges)
-        .unwrap_or_else(|_| vec![String::from("unhashed"); ranges.len()]);
+    let hashes: Vec<(String, u32)> = anchor::ast_body_hashes(lang_id, src, &ranges)
+        .unwrap_or_else(|_| vec![(String::from("unhashed"), 0); ranges.len()]);
 
     let mut count = 0usize;
     for (ordinal, sym) in facts.symbols.iter().enumerate() {
@@ -190,10 +190,10 @@ fn index_file_parsed(
             let up = &parent_refs[..parent_refs.len() - 1];
             Some(fqn::fqn(rel, up, parent_refs[parent_refs.len() - 1]))
         };
-        let body_hash = hashes
+        let (body_hash, _body_len) = hashes
             .get(ordinal)
             .cloned()
-            .unwrap_or_else(|| String::from("unhashed"));
+            .unwrap_or_else(|| (String::from("unhashed"), 0));
         store.conn.execute(
             "INSERT INTO symbols(fqn, name, kind, file, start_line, end_line,
                                  body_hash, parent_fqn, ordinal)

@@ -87,15 +87,11 @@ fn own_name_node(node: Node) -> Option<Node> {
 
 /// Hash the normalized AST subtree rooted at `node`.
 ///
-/// The symbol's own name node is excluded: a pure rename keeps the body
-/// hash identical, which is exactly what makes rename following possible.
-/// Identifiers inside the body still count.
-///
-/// Properties (tested in tests/anchor_golden.rs):
-/// reformatting and comments never change the hash; renaming an identifier
-/// inside the body or adding a statement always does; identical bodies
-/// hash identically across files and names.
-pub fn ast_body_hash_node(node: Node, src: &[u8]) -> String {
+/// Build the normalization buffer for the subtree rooted at `node`:
+/// kind names + parens + identity-leaf text, comments skipped, the
+/// symbol's own name node excluded. This buffer IS the hash input; its
+/// length is the body's entropy measure (schema v5 `symbols.body_len`).
+fn normalization_buffer(node: Node, src: &[u8]) -> Vec<u8> {
     let mut buf = Vec::with_capacity(1024);
     let own_name_id = own_name_node(node).map(|n| n.id());
     buf.extend_from_slice(node.kind().as_bytes());
@@ -105,7 +101,19 @@ pub fn ast_body_hash_node(node: Node, src: &[u8]) -> String {
         emit_excluding(child, src, &mut buf, own_name_id);
     }
     buf.push(b')');
-    let digest = Sha256::digest(&buf);
+    buf
+}
+
+/// The symbol's own name node is excluded: a pure rename keeps the body
+/// hash identical, which is exactly what makes rename following possible.
+/// Identifiers inside the body still count.
+///
+/// Properties (tested in tests/anchor_golden.rs):
+/// reformatting and comments never change the hash; renaming an identifier
+/// inside the body or adding a statement always does; identical bodies
+/// hash identically across files and names.
+pub fn ast_body_hash_node(node: Node, src: &[u8]) -> String {
+    let digest = Sha256::digest(&normalization_buffer(node, src));
     hex32(&digest)
 }
 
@@ -143,16 +151,18 @@ fn hex32(digest: &[u8]) -> String {
 /// Parse `src` and hash the subtree covering `byte_range` (a symbol's
 /// defining node, as recorded by extraction).
 pub fn ast_body_hash(lang_id: Lang, src: &str, byte_range: (usize, usize)) -> Result<String> {
-    Ok(ast_body_hashes(lang_id, src, &[byte_range])?.remove(0))
+    Ok(ast_body_hashes(lang_id, src, &[byte_range])?.remove(0).0)
 }
 
 /// Hash many symbol ranges from ONE parse. Indexing previously reparsed the
 /// whole file once per symbol, O(symbols x full parse) on big files.
+/// Returns (hash, normalization-buffer byte length) per range; the length
+/// is the entropy signal behind the low-entropy follow guard.
 pub fn ast_body_hashes(
     lang_id: Lang,
     src: &str,
     ranges: &[(usize, usize)],
-) -> Result<Vec<String>> {
+) -> Result<Vec<(String, u32)>> {
     let mut parser = Parser::new();
     parser
         .set_language(&lang::ts_language(lang_id))
@@ -165,7 +175,9 @@ pub fn ast_body_hashes(
         .iter()
         .map(|&(s, e)| {
             let node = root.descendant_for_byte_range(s, e).unwrap_or(root);
-            ast_body_hash_node(node, src.as_bytes())
+            let buf = normalization_buffer(node, src.as_bytes());
+            let digest = Sha256::digest(&buf);
+            (hex32(&digest), buf.len() as u32)
         })
         .collect())
 }

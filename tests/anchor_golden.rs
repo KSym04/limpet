@@ -562,3 +562,16 @@ fn hash_properties_hold_per_language() {
         assert_ne!(h(original), h(real_edit), "{lang:?}: real edit did not alter hash");
     }
 }
+
+#[test]
+fn body_hashes_carry_normalization_length() {
+    // Two identical bodies under different names: same hash, same len, len > 0.
+    let src = "def alpha():\n    return compute(1)\n\ndef beta():\n    return compute(1)\n";
+    let facts = index::extract::extract(Lang::Py, src).unwrap();
+    let ranges: Vec<(usize, usize)> = facts.symbols.iter().map(|s| s.byte_range).collect();
+    let out = anchor::ast_body_hashes(Lang::Py, src, &ranges).unwrap();
+    assert_eq!(out.len(), 2);
+    assert_eq!(out[0].0, out[1].0, "identical bodies must hash identically");
+    assert_eq!(out[0].1, out[1].1, "identical bodies must measure identically");
+    assert!(out[0].1 > 0, "normalization buffer is never empty");
+}
