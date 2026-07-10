@@ -85,8 +85,6 @@ fn own_name_node(node: Node) -> Option<Node> {
     }
 }
 
-/// Hash the normalized AST subtree rooted at `node`.
-///
 /// Build the normalization buffer for the subtree rooted at `node`:
 /// kind names + parens + identity-leaf text, comments skipped, the
 /// symbol's own name node excluded. This buffer IS the hash input; its
@@ -104,6 +102,8 @@ fn normalization_buffer(node: Node, src: &[u8]) -> Vec<u8> {
     buf
 }
 
+/// Hash the normalized AST subtree rooted at `node`.
+///
 /// The symbol's own name node is excluded: a pure rename keeps the body
 /// hash identical, which is exactly what makes rename following possible.
 /// Identifiers inside the body still count.
