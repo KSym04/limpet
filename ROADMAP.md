@@ -1,7 +1,7 @@
 # limpet roadmap
 
 Versions are indicative: features earn their tag, they are not scheduled to a
-calendar. The spine through everything below is one rule — **every feature
+calendar. The spine through everything below is one rule: **every feature
 must feed one of the receipts (bench, ledger, rework counter) or the honesty
 envelope.** Anything that cannot show its number in `limpet stats` or flag its
 own staleness does not ship. That discipline is the product.
@@ -24,24 +24,24 @@ Delivered releases in brief (full detail lives in git history, `limpet stats`,
 and the store's own memory). The roadmap below this point is what is NOT yet
 built.
 
-- **v0.9.0 — portable repo identity.** The per-repo store is keyed by git-remote
+- **v0.9.0: portable repo identity.** The per-repo store is keyed by git-remote
   identity, not a path slug, so memory follows the project across clones, moves,
   and renames. Closed a silent path-collision data-loss seam.
-- **v0.10.0 — statusline doctor advisory.** `limpet doctor` reports how the
+- **v0.10.0: statusline doctor advisory.** `limpet doctor` reports how the
   statusline is wired (ok when it delegates to the binary, warn on a hand-rolled
   store query that will drift, note with the exact line when unwired), so the
   segment can never break silently.
-- **v0.11.0 — AST lineage graph.** `map` on a symbol returns ancestors,
+- **v0.11.0: AST lineage graph.** `map` on a symbol returns ancestors,
   descendants, and callers in one call, each edge labeled unique / ambiguous /
   unresolved and resolved read-time so nothing rots (additive `inherits` table).
   The per-recall envelope ledger was built, bench-failed at 3.8x under the 4x
   gate, and dropped; the receipt stays free in `admin {op:"ledger"}`, `limpet
   stats`, and the UI. Revisit only if a richer-pack bench proves it fits.
-- **v0.12.0 — grammar wave 2.** Go (`embeds`), Java, Ruby (`mixin`), C#, and Bash
+- **v0.12.0: grammar wave 2.** Go (`embeds`), Java, Ruby (`mixin`), C#, and Bash
   bring coverage to eleven grammars, each gated by the I7 fixture and the
   hash-identity checks. Adding the ABI-15 grammars (Go, Bash) bumped the vendored
   tree-sitter core to 0.25; the original six (ABI 14) keep loading unchanged.
-- **v0.13.0 — sweep priority + low-entropy follow guard.** Files carrying
+- **v0.13.0: sweep priority + low-entropy follow guard.** Files carrying
   anchors reindex first inside the unchanged 32-file sweep budget, so staleness
   lands where memories live. Rename/move following is evidence-gated: schema v5
   stores each symbol's normalization-buffer length beside its hash, and a
@@ -50,18 +50,18 @@ built.
   a trivial twin; it heals the moment the original returns. On pre-v5 stores
   the guard hardens progressively as the sweep refills.
 
-## v0.14.0 — freshness at scale, part 2
+## v0.14.0: freshness at scale, part 2
 
 - **Full FQN disambiguation** (deferred from grammar wave 2): trait impls, C++
   overloads, and nested modules currently share FQNs; the `(fqn, hash)`
   existence check shipped in 0.7.2 stops the flapping, but true uniqueness needs
   schema work.
 - **FS-event watcher** (notify) replacing the on-call sweep for very large
-  repositories — gated on evidence: build a lag bench on a genuinely large repo
+  repositories, gated on evidence: build a lag bench on a genuinely large repo
   first; if sweep prioritization keeps anchored-file staleness latency
   acceptable, the watcher (and its per-platform risk surface) stays unbuilt.
 
-## v1.0 — the stability contract (not features)
+## v1.0: the stability contract (not features)
 
 - Store schema, JSONL export format, and tool API frozen, with documented
   migration guarantees; the version guard extends to schema migrations.
@@ -74,7 +74,7 @@ built.
 
 1.0 means one thing: your memory is safe to depend on for years.
 
-## v1.1+ — the bets (each gated on evals, not vibes)
+## v1.1+: the bets (each gated on evals, not vibes)
 
 | Bet | Gate before it ships |
 |---|---|

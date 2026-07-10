@@ -23,7 +23,7 @@ their code changes. Work with it in this order.
    listening on 127.0.0.1:9748 (`lsof -nP -iTCP:9748 -sTCP:LISTEN`), run
    `limpet ui` as a background shell task and report the graph is live at
    http://127.0.0.1:9748. If the port is already in use, just report the
-   URL. If the `limpet` binary is not on PATH, skip this step silently —
+   URL. If the `limpet` binary is not on PATH, skip this step silently;
    never block the memory workflow on the UI.
 
 ## Standing behavior for the rest of the session
@@ -46,7 +46,7 @@ their code changes. Work with it in this order.
   - `intent`: what a module is for when the code cannot say
   Anchor to a symbol when one exists (survives renames and moves, gives
   precise staleness); anchor to the file (omit `symbol`) for templates,
-  styles, and configs — every file in the repo is indexed and file anchors
+  styles, and configs: every file in the repo is indexed and file anchors
   go stale when the file's content changes. If `remember` rejects an
   anchor, the path is wrong or the file is excluded by ignore rules; fix
   it rather than dropping the anchor.
@@ -70,7 +70,7 @@ docs, long-body commits, and the assistant's project memory directory.
    coverage. A non-empty store means gap-fill mode: drop any candidate a
    recall already answers. If the limpet binary was updated during this
    session, the MCP server may still run the old image and will silently
-   drop `private`/`origin` arguments — restart the session before
+   drop `private`/`origin` arguments; restart the session before
    seeding.
 2. Quality pre-check, before curating: percentage of commits with
    non-empty bodies, merge count, docs present. Thin history gets said
@@ -84,7 +84,7 @@ docs, long-body commits, and the assistant's project memory directory.
    project memory dir (skip silently when absent). Global assistant
    memory only after an explicit in-run confirmation, and always private.
    Every proposed anchor path must be verified to exist (`ls`) before it
-   enters the candidate table — harvesters guess module names, and
+   enters the candidate table; harvesters guess module names, and
    `remember` rejects an unresolvable anchor loudly at write time.
 4. Curate to limpet's bar: kind (decision/episode/insight/intent), anchor
    (symbol if identifiable, else file), short standalone body. Reject
@@ -129,7 +129,7 @@ docs, long-body commits, and the assistant's project memory directory.
   statusline (`| 🐚 <active> ↑<saved>k tokens saved`). On by default;
   toggling creates or removes
   `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.limpet-statusline-off`, then report
-  the new state. Rendering is `limpet statusline --root <dir>` — read-only,
+  the new state. Rendering is `limpet statusline --root <dir>`: read-only,
   no server, no sweep, no writes, works on macOS/Linux/Windows alike.
 - `/limpet update`: run `limpet update` in the shell to self-update to the
   latest release binary (checksum-verified, atomic). This is the only limpet

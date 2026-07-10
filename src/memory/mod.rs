@@ -81,7 +81,7 @@ struct ResolvedAnchor {
 fn resolve_anchor(store: &Store, spec: &AnchorSpec) -> Result<ResolvedAnchor> {
     match &spec.symbol {
         Some(symbol) => {
-            // Accept a bare name or a full FQN — but never guess between
+            // Accept a bare name or a full FQN, but never guess between
             // duplicates: two `push` methods in one file must surface as a
             // choice, not a silently-picked LIMIT 1 (audit 2026-07).
             let mut cstmt = store.conn.prepare(

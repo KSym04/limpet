@@ -1,4 +1,4 @@
-# SPEC — freshness at scale, branch 1: sweep priority + low-entropy guard — v0.13.0
+# SPEC: freshness at scale, branch 1: sweep priority + low-entropy guard, v0.13.0
 
 Status: APPROVED (2026-07-11). Full spec:
 docs/superpowers/specs/2026-07-11-freshness-at-scale-design.md
@@ -21,7 +21,7 @@ thresholds calibrated from real buffer lengths across all 11 grammars before
 the constants are set, biased low (never misclassify a real body); stale not
 invalidated; two-process release-binary dogfood mandatory for the migration.
 
-## Task Implementation Checklist — freshness branch 1
+## Task Implementation Checklist: freshness branch 1
 
 - [x] Calibration harness: print normalization-buffer lengths for trivial +
       real fixture bodies across all 11 grammars; pick both thresholds
@@ -40,7 +40,7 @@ invalidated; two-process release-binary dogfood mandatory for the migration.
 
 ---
 
-# SPEC — grammar wave 2 (Go, Java, Ruby, C#, Bash) — v0.12.0
+# SPEC: grammar wave 2 (Go, Java, Ruby, C#, Bash), v0.12.0
 
 Status: APPROVED (design, 2026-07-08). Full spec:
 docs/superpowers/specs/2026-07-08-grammar-wave-2-design.md
@@ -63,7 +63,7 @@ tree-sitter 0.24.
 
 ---
 
-# SPEC — lineage graph + live ledger + local event hook (design, next minors)
+# SPEC: lineage graph + live ledger + local event hook (design, next minors)
 
 Status: APPROVED (M0 closed 2026-07-07). Full spec:
 docs/superpowers/specs/2026-07-07-limpet-lineage-ledger-hook-design.md
@@ -118,7 +118,7 @@ cost_to_learn spec (below) reads from the `calls` table.
 
 ## Task Implementation Checklist
 
-M1 — lineage graph (v0.11.0):
+M1: lineage graph (v0.11.0):
 - [ ] store: `inherits` table + indexes + schema bump 2->3 + migration test
 - [ ] index: per-file `inherits` delete/reinsert at the 3 reindex sites
 - [ ] extract.rs: inheritance capture for php/js/ts/py/rs/cpp (+ unit tests each)
@@ -127,13 +127,13 @@ M1 — lineage graph (v0.11.0):
 - [ ] bench: fixture inheritance chain + lineage questions; ratio >= 4x sub-gate
 - [ ] tests green; dogfood; NO RELEASE until Ken tests
 
-M2 — live ledger (v0.11.0):
+M2: live ledger (v0.11.0):
 - [ ] serve: per-session `SessionLedger`, reset at serve start
 - [ ] recall envelope: additive `meta.ledger` {served,baseline,saved,reads_avoided,cumulative_saved,estimate}
 - [ ] assert sink is meta_kv; memory.jsonl untouched; negative not floored
 - [ ] tests green; dogfood
 
-M3 — local event hook (v0.10.0, gate ruling at kickoff):
+M3: local event hook (v0.10.0, gate ruling at kickoff):
 - [ ] event emitter (memory.remembered/stale/contradicted, index.completed), post-commit
 - [ ] opt-in `.limpet/hooks.toml` exec hook; event JSON on stdin; bounded timeout
 - [ ] local `limpet check` exit codes; no network opened (assert stdio-only)
@@ -209,7 +209,7 @@ plainly. Global assistant memory: explicit in-run confirm, always private.
 
 ---
 
-# SPEC — cost_to_learn + authority-weighted recall (proposed, ~v0.9)
+# SPEC: cost_to_learn + authority-weighted recall (proposed, ~v0.9)
 
 Status: DESIGN. Gated on the recall_eval precision suite and the bench like
 every ranking change; not yet implemented.
@@ -230,20 +230,20 @@ past an honesty flag, or override the freshness signals.
 Two new `entries` columns (schema v2, lazy migration; `version_guard`
 already gates cross-version writes):
 
-- `cost_to_learn TEXT` — coarse bucket, NOT a number (numbers invite
+- `cost_to_learn TEXT`: coarse bucket, NOT a number (numbers invite
   inflation): one of `trivial` (default/unset), `hours`, `days`, `incident`.
   Set on `remember`; maps to a small fixed weight (0.0 / 0.3 / 0.6 / 1.0).
-- `survived_changes INTEGER NOT NULL DEFAULT 0` — incremented in
+- `survived_changes INTEGER NOT NULL DEFAULT 0`: incremented in
   `resolve_all` each time an anchor is `Followed` (the code moved/renamed and
   the memory tracked it) or stayed `Fresh` across a sweep that reindexed its
   file. Earned, not settable by the caller. This is "survived N refactors".
 
 Structural signals read at recall time (no new storage):
 
-- `fan_in` — how central the anchored code is: callers of the anchored
+- `fan_in`: how central the anchored code is: callers of the anchored
   symbol from the `calls` table plus the count of OTHER memories anchored to
   the same file/symbol. High fan-in = the memory describes load-bearing code.
-- `evidenced` — `source = 'verified'` (already exists): a lesson with a proof
+- `evidenced`: `source = 'verified'` (already exists): a lesson with a proof
   command outranks an unproven claim.
 
 ## Authority formula (all inputs normalized 0..1)
@@ -309,7 +309,7 @@ is the most urgent thing to re-prove and sorts to the top.
 
 ---
 
-# SPEC — security + Windows hardening (v0.7.3)
+# SPEC: security + Windows hardening (v0.7.3)
 
 Two parallel audits (adversarial security, Windows correctness) plus a
 `cargo audit` advisory scan (clean, 123 deps). The security audit's headline:
@@ -329,8 +329,8 @@ tests use non-canonicalized `TempDir` roots.
 - **Future timestamps rejected.** A `9999-...` `updated_at` would win the LWW
   merge against every honest later update forever; future or unparseable
   stamps are rejected.
-- **Bounded line reads** (1 MiB) — no OOM from one giant line.
-- **Confidence clamped** to [0,1] — an imported `1e300` can no longer pin a
+- **Bounded line reads** (1 MiB): no OOM from one giant line.
+- **Confidence clamped** to [0,1]: an imported `1e300` can no longer pin a
   hostile memory to the top of recall.
 - **Body size capped** at `MAX_BODY_BYTES` (64 KiB), enforced on both the
   remember and import paths.

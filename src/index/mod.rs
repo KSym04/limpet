@@ -426,7 +426,7 @@ pub fn sweep(
     }
 
     // Anchored files first: staleness must land where memories live. Stale
-    // and invalidated entries are included — they re-resolve and heal, so
+    // and invalidated entries are included: they re-resolve and heal, so
     // their files matter just as much; only superseded is final. Stable
     // sort preserves discovery order within each group.
     let mut astmt = store.conn.prepare(

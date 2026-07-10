@@ -26,7 +26,7 @@ pub fn dispatch(store: &mut Store, root: &Path, name: &str, args: &Value) -> Res
     // (full_index) is where it fails loudly.
     let ext = crate::config::RepoConfig::load(root).unwrap_or_default().extensions;
     // Freshness first (I6): bounded sweep + anchor resolution on every call.
-    // A failed sweep must not be reported as "dirty: 0" — that asserts a
+    // A failed sweep must not be reported as "dirty: 0"; that asserts a
     // freshness that was never checked (audit 2026-07).
     let sweep = match index::sweep(store, root, &ext) {
         Ok(s) => s,
@@ -711,7 +711,7 @@ pub fn tool_schemas() -> Value {
         },
         {
             "name": "remember",
-            "description": "Store a durable memory. kinds: fact (verified behavior), decision (choice + why), episode (what worked/failed), insight (gotcha), intent (what a module is for). Anchor it to code so limpet can flag it when that code changes: symbol anchors track the function/class body, file anchors (no symbol) track the whole file's content — any indexed file works, including templates, styles, and configs. Every anchor must resolve or the call fails with the reason; nothing is stored half-anchored. Provide evidence {command, output} to make it a verified fact.",
+            "description": "Store a durable memory. kinds: fact (verified behavior), decision (choice + why), episode (what worked/failed), insight (gotcha), intent (what a module is for). Anchor it to code so limpet can flag it when that code changes: symbol anchors track the function/class body, file anchors (no symbol) track the whole file's content; any indexed file works, including templates, styles, and configs. Every anchor must resolve or the call fails with the reason; nothing is stored half-anchored. Provide evidence {command, output} to make it a verified fact.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -759,7 +759,7 @@ pub fn tool_schemas() -> Value {
         },
         {
             "name": "admin",
-            "description": "Maintenance: op=index (full reindex), status (includes private count), forget (id), export / import (JSONL at .limpet/memory.jsonl for team sharing via git — private memories are withheld from export and counted in private_withheld), ledger (token-savings receipt: session + lifetime + methodology) / ledger_reset.",
+            "description": "Maintenance: op=index (full reindex), status (includes private count), forget (id), export / import (JSONL at .limpet/memory.jsonl for team sharing via git; private memories are withheld from export and counted in private_withheld), ledger (token-savings receipt: session + lifetime + methodology) / ledger_reset.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

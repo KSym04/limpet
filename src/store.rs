@@ -196,12 +196,12 @@ fn migrate_to_v3(conn: &Connection) -> Result<()> {
 /// narrow CHECK. An unconditional DROP would wipe freshly-indexed edges every
 /// time a second process (e.g. `limpet serve`) opens the store, because all
 /// migrations run on every open. We gate the rebuild on whether the stored
-/// CREATE SQL already contains `'embeds'` — present means already widened,
+/// CREATE SQL already contains `'embeds'`: present means already widened,
 /// absent (or table missing) means the one-time rebuild is needed.
 fn migrate_to_v4(conn: &Connection) -> Result<()> {
     // Only rebuild inherits when it still carries the OLD narrow CHECK.
     // The table is derived (refilled per file on index), but the rebuild must
-    // NOT run on every open — an unconditional DROP would wipe the freshly
+    // NOT run on every open: an unconditional DROP would wipe the freshly
     // indexed edges each time a second process (e.g. `serve`) opens the store.
     use rusqlite::OptionalExtension;
     let existing_sql: Option<String> = conn
@@ -242,7 +242,7 @@ fn migrate_to_v4(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Schema v5 (lazy migration): additive `symbols.body_len` — the byte length
+/// Schema v5 (lazy migration): additive `symbols.body_len`: the byte length
 /// of the normalization buffer behind `body_hash`, the entropy signal for the
 /// low-entropy follow guard. Gate on the ACTUAL table state (pragma), never
 /// the version stamp: migrations run on every open and must no-op on re-run.
@@ -1091,7 +1091,7 @@ mod tests {
         {
             let conn = rusqlite::Connection::open(&db).unwrap();
             conn.execute_batch(SCHEMA_V1).unwrap();
-            // Only the first ALTER — simulates crash before `origin` was added.
+            // Only the first ALTER; simulates crash before `origin` was added.
             conn.execute_batch(
                 "ALTER TABLE entries ADD COLUMN private INTEGER NOT NULL DEFAULT 0",
             )

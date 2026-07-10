@@ -498,7 +498,7 @@ fn walk(
                 if let Some(name) = name_of(node, src) {
                     push_sym(facts, node, src, parents, "class", name.clone());
                     // Embedded fields (no field name) in the struct/interface body
-                    // are Go's composition — record as `embeds`.
+                    // are Go's composition; record as `embeds`.
                     // tree-sitter-go 0.25 wraps field declarations in a
                     // `field_declaration_list` node inside `struct_type`; descend
                     // one extra level when that wrapper is present.

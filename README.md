@@ -8,7 +8,7 @@
 [![Platforms](https://img.shields.io/badge/macOS%20%7C%20Linux%20%7C%20Windows-supported-lightgrey.svg)](https://github.com/KSym04/limpet/actions/workflows/ci.yml)
 [![100% local](https://img.shields.io/badge/network%20calls-zero-blue.svg)](SECURITY.md)
 
-**Persistent memory for AI coding agents — that knows when it has gone stale.** Everything your agent learns about a codebase (decisions, verified facts, failed approaches, gotchas) survives every session, anchored to the actual code it describes, and flips to `stale` the moment that code changes. One Rust binary, one SQLite file, standard MCP, zero network calls.
+**Persistent memory for AI coding agents that knows when it has gone stale.** Everything your agent learns about a codebase (decisions, verified facts, failed approaches, gotchas) survives every session, anchored to the actual code it describes, and flips to `stale` the moment that code changes. One Rust binary, one SQLite file, standard MCP, zero network calls.
 
 <p align="center">
   <img src="docs/limpet-ui.png" alt="limpet visual memory graph: memories colored by health, clamped to code symbols" width="820">
@@ -16,7 +16,7 @@
   <em>limpet ui: green memories are trustworthy, amber went stale when their code changed, squares are the symbols they clamp onto</em>
 </p>
 
-The failure mode that kills AI coding assistants is not forgetting; it is remembering something that is no longer true. Vector stores, RAG pipelines, and markdown notes trust what they wrote forever, so an agent that still believes last month's version of a function is not unhelpful — it is confidently wrong. limpet anchors each memory to a normalized AST hash of the code it describes: rename or move the code and the memory follows, edit it and the memory goes visibly stale with a reason, revert and it heals. Noticing its own staleness is the entire premise, and no other open memory layer does it.
+The failure mode that kills AI coding assistants is not forgetting; it is remembering something that is no longer true. Vector stores, RAG pipelines, and markdown notes trust what they wrote forever, so an agent that still believes last month's version of a function is not unhelpful, it is confidently wrong. limpet anchors each memory to a normalized AST hash of the code it describes: rename or move the code and the memory follows, edit it and the memory goes visibly stale with a reason, revert and it heals. Noticing its own staleness is the entire premise, and no other open memory layer does it.
 
 ## ⏱️ 30 seconds to running
 
@@ -24,13 +24,13 @@ The failure mode that kills AI coding assistants is not forgetting; it is rememb
 curl -fsSL https://raw.githubusercontent.com/KSym04/limpet/main/install.sh | bash
 ```
 
-(Windows: `irm https://raw.githubusercontent.com/KSym04/limpet/main/install.ps1 | iex` — full install options [below](#-install).)
+(Windows: `irm https://raw.githubusercontent.com/KSym04/limpet/main/install.ps1 | iex`; full install options [below](#-install).)
 
 Restart Claude Code, type `/limpet` in any project, and just work:
 
-> **session 1** — "the scanner batch size is 50 because shared hosts kill long requests" → stored as a `decision`, anchored to the function that uses it
+> **session 1:** "the scanner batch size is 50 because shared hosts kill long requests" → stored as a `decision`, anchored to the function that uses it
 >
-> **session 30, fresh context** — *you:* why is the batch size 50? → *agent:* one `recall`, ~350 tokens, full answer. No file spelunking, no re-teaching your own codebase.
+> **session 30, fresh context:** *you:* why is the batch size 50? → *agent:* one `recall`, ~350 tokens, full answer. No file spelunking, no re-teaching your own codebase.
 >
 > **you edit that function** → the memory flips to `stale: body_edited` everywhere it appears. Nothing ever pretends to be current when it is not.
 
@@ -38,7 +38,7 @@ Restart Claude Code, type `/limpet` in any project, and just work:
 
 - **It knows when it is wrong.** Memories anchor to AST hashes, follow renames and file moves, go stale on real edits with the reason attached, and heal on revert. → [the anchor lifecycle](#-the-anchor-lifecycle)
 - **It shows you what it saved.** Every recall is priced against the file reads it replaced: 4.0x fewer tokens on the benchmark, and a live per-project ledger via `limpet stats`. → [the receipts](#-the-receipts-token-savings-measured)
-- **It anchors the whole repository.** Eleven grammars for symbol-level anchoring; every other file — templates, styles, configs — anchorable at file level. → [whole repo indexed](#-whole-repo-indexed-thin-on-purpose)
+- **It anchors the whole repository.** Eleven grammars for symbol-level anchoring; every other file (templates, styles, configs) anchorable at file level. → [whole repo indexed](#-whole-repo-indexed-thin-on-purpose)
 - **It never lies by omission.** Every response carries an honesty envelope: matched vs returned, what was dropped and why, how fresh the index is, how much is stale. The benchmark gate has killed limpet's own features when they crossed that line.
 
 It is not a vector database, a code-search engine, or a call-graph oracle; it is the layer that remembers *why*, tied to the code, and tells you when the why no longer holds. → [what limpet is not](#-what-limpet-is-not) · design principles with the scars that earned them: [PHILOSOPHY.md](PHILOSOPHY.md)
@@ -52,7 +52,7 @@ Code indexers answer "what is where". The expensive knowledge is not in any file
 - which method names are frozen because customers hook them
 - what that weird cron job actually protects against
 
-Agents re-derive or re-ask this every session, burning tokens — or worse, they guess. limpet gives that knowledge the same lifecycle engineers give it:
+Agents re-derive or re-ask this every session, burning tokens, or worse, they guess. limpet gives that knowledge the same lifecycle engineers give it:
 
 ```
 valid -> code changed -> stale (reason attached, confidence drops) -> re-verified or superseded
@@ -66,7 +66,7 @@ Three properties make it work, and nobody else combines them: **anchored** (AST 
 |---|---|
 | **Solo dev with an AI agent** | The first session spends tens of thousands of tokens learning your codebase; afterward it is one `recall` away. Survives `/clear`, compaction, new machines. |
 | **A team** | `admin export` writes `.limpet/memory.jsonl` for git; teammates import after pulling. Onboarding knowledge travels with the repo and, unlike a wiki, flags itself when the code moves on. `affected` shows which documented decisions a diff just put at risk. |
-| **Template-heavy stack** (Rails, Laravel, Vue, any CMS theme) | Every file is anchorable, so "this layout is locked to 480px" pins to the actual stylesheet and goes stale when someone edits it — exactly what symbol-only indexers cannot reach. |
+| **Template-heavy stack** (Rails, Laravel, Vue, any CMS theme) | Every file is anchorable, so "this layout is locked to 480px" pins to the actual stylesheet and goes stale when someone edits it, exactly what symbol-only indexers cannot reach. |
 | **Open-source maintainer** | `intent`/`decision` memories answer "why is this weird code here" before the PR that "fixes" it lands; `episode` memories stop the third contributor from re-attempting the refactor that already broke twice. |
 | **Agent builder** | A model-agnostic memory backend behind standard MCP: one binary, zero network, inspectable SQLite. Nothing to explain to a security review. |
 
@@ -115,9 +115,9 @@ move a trivial body    unique match, too small   stale (low_entropy), never re-p
 
 A multi-anchor memory dies only when **every** anchor dies. Losing one anchor while others still resolve degrades it to `stale:anchor_lost` so the surviving knowledge stays usable. And `remember` refuses an anchor it cannot resolve, loudly, at write time: no memory is ever born dead.
 
-Rename-following is evidence-gated: a unique match on a trivial body (an empty function, a bare delegation stub, a near-empty file) is refused as follow evidence and surfaces as `stale:low_entropy` instead of silently re-pointing the anchor at a look-alike twin — and it heals the moment the original code returns.
+Rename-following is evidence-gated: a unique match on a trivial body (an empty function, a bare delegation stub, a near-empty file) is refused as follow evidence and surfaces as `stale:low_entropy` instead of silently re-pointing the anchor at a look-alike twin, and it heals the moment the original code returns.
 
-Staleness is also symmetric: revert the code (a rolled-back experiment, a `git checkout`) and the memory heals back to active on the next call, because the anchor hash matches again. No re-verification ritual for changes that un-happened. The same applies to invalidation: a branch switch, `git stash`, or mid-rebase state that makes files vanish briefly is not a death sentence — when the code comes back and the anchors resolve, the memory recovers. The only final state is `superseded`, which records a deliberate human decision rather than filesystem churn.
+Staleness is also symmetric: revert the code (a rolled-back experiment, a `git checkout`) and the memory heals back to active on the next call, because the anchor hash matches again. No re-verification ritual for changes that un-happened. The same applies to invalidation: a branch switch, `git stash`, or mid-rebase state that makes files vanish briefly is not a death sentence: when the code comes back and the anchors resolve, the memory recovers. The only final state is `superseded`, which records a deliberate human decision rather than filesystem churn.
 
 Contradictions are explicit links: when a new memory contradicts an old one, both stay visible with the conflict flagged until one `supersedes` the other. History is never silently overwritten.
 
@@ -200,7 +200,7 @@ irm https://raw.githubusercontent.com/KSym04/limpet/main/install.ps1 | iex
 
 Then restart Claude Code and type `/limpet` in any project. That is the whole setup. (`LIMPET_INSTALL_DIR` overrides the install location; `LIMPET_VERSION` pins a release tag.)
 
-Prefer not to pipe a script into your shell? Every step below is the manual equivalent. Prebuilt binaries ship for Apple Silicon macOS, x86_64 Linux, and x86_64 Windows on the [latest release](https://github.com/KSym04/limpet/releases/latest); every asset has a published sha256 — verify it before you trust the binary.
+Prefer not to pipe a script into your shell? Every step below is the manual equivalent. Prebuilt binaries ship for Apple Silicon macOS, x86_64 Linux, and x86_64 Windows on the [latest release](https://github.com/KSym04/limpet/releases/latest); every asset has a published sha256; verify it before you trust the binary.
 
 **macOS (Apple Silicon)**
 
@@ -231,7 +231,7 @@ limpet install
 ```powershell
 Invoke-WebRequest https://github.com/KSym04/limpet/releases/latest/download/limpet-x86_64-pc-windows-msvc.zip -OutFile limpet.zip
 Invoke-WebRequest https://github.com/KSym04/limpet/releases/latest/download/limpet-x86_64-pc-windows-msvc.zip.sha256 -OutFile limpet.zip.sha256
-# compare the two hashes — they must match
+# compare the two hashes; they must match
 (Get-FileHash limpet.zip -Algorithm SHA256).Hash
 Get-Content limpet.zip.sha256
 Expand-Archive limpet.zip -DestinationPath "$env:LOCALAPPDATA\limpet"   # extracts limpet.exe
@@ -240,7 +240,7 @@ Expand-Archive limpet.zip -DestinationPath "$env:LOCALAPPDATA\limpet"   # extrac
 limpet install
 ```
 
-**With Rust** ([rustup.rs](https://rustup.rs)) — the path for Intel macs, ARM Linux, and any platform without a prebuilt binary:
+**With Rust** ([rustup.rs](https://rustup.rs)), the path for Intel macs, ARM Linux, and any platform without a prebuilt binary:
 
 ```bash
 cargo install limpet
@@ -253,7 +253,7 @@ Restart Claude Code. Done. (`limpet install --dry-run` previews the exact config
 
 ## 🚀 Day-to-day usage
 
-`/limpet` in any project indexes the code, recalls everything already known (stale items flagged), and switches the session to memory-first mode. From there the agent stores what it learns as it learns it — the [30-second story](#-30-seconds-to-running) above is the whole loop.
+`/limpet` in any project indexes the code, recalls everything already known (stale items flagged), and switches the session to memory-first mode. From there the agent stores what it learns as it learns it; the [30-second story](#-30-seconds-to-running) above is the whole loop.
 
 Everyday commands:
 
@@ -272,14 +272,14 @@ Everyday commands:
 
 Data lives under `~/.local/share/limpet/`, one SQLite store per repository. Teammates run `limpet import` after pulling the JSONL.
 
-**Statusline on any platform.** `limpet statusline --root <project dir>` prints the shell segment (`| 🐚 13 · ↑32k tokens saved`, with the count hyperlinking to the project's graph when the UI is running) or nothing at all — it opens the store strictly read-only, never writes, and always exits 0, so it can sit in a prompt safely. Because the rendering lives in the binary, the same one-liner works from a bash statusline on macOS/Linux and a PowerShell or cmd statusline on Windows — no sqlite3 CLI, no bash required:
+**Statusline on any platform.** `limpet statusline --root <project dir>` prints the shell segment (`| 🐚 13 · ↑32k tokens saved`, with the count hyperlinking to the project's graph when the UI is running) or nothing at all: it opens the store strictly read-only, never writes, and always exits 0, so it can sit in a prompt safely. Because the rendering lives in the binary, the same one-liner works from a bash statusline on macOS/Linux and a PowerShell or cmd statusline on Windows, with no sqlite3 CLI and no bash required:
 
 ```powershell
 # inside a Claude Code statusline.ps1
 $limpetSeg = & limpet statusline --root $projectDir
 ```
 
-The simplest setup is to let Claude Code call the binary directly as its whole statusline — add to `~/.claude/settings.json`:
+The simplest setup is to let Claude Code call the binary directly as its whole statusline; add to `~/.claude/settings.json`:
 
 ```json
 {
@@ -290,11 +290,11 @@ The simplest setup is to let Claude Code call the binary directly as its whole s
 }
 ```
 
-Already have a custom statusline? Append the binary's output as one segment — do **not** query `store.db` with `sqlite3` yourself. The per-repo store key scheme changes between versions (it moved from a path hash to a portable git-remote identity in v0.9.0), so a hand-rolled query silently stops matching and the segment just disappears. Only `limpet statusline` tracks the current scheme. Run `limpet doctor` to check how your statusline is wired: it reports `ok` when it delegates to the binary, `warn` when it hand-rolls a store query that will drift, and the exact line to add when nothing is wired.
+Already have a custom statusline? Append the binary's output as one segment, but do **not** query `store.db` with `sqlite3` yourself. The per-repo store key scheme changes between versions (it moved from a path hash to a portable git-remote identity in v0.9.0), so a hand-rolled query silently stops matching and the segment just disappears. Only `limpet statusline` tracks the current scheme. Run `limpet doctor` to check how your statusline is wired: it reports `ok` when it delegates to the binary, `warn` when it hand-rolls a store query that will drift, and the exact line to add when nothing is wired.
 
 Toggle it off with `/limpet statusline` (writes `~/.claude/.limpet-statusline-off`; the command honors the flag).
 
-**Auto-recall at session start.** Without any hook, memory-first behavior depends on the agent remembering to type `/limpet`. With a SessionStart hook, every new session in an already-indexed project opens with a one-line brief injected into context — "This project has limpet memory: 13 active memories, 2 stale…" — and the agent recalls before it reads. Add to `~/.claude/settings.json`:
+**Auto-recall at session start.** Without any hook, memory-first behavior depends on the agent remembering to type `/limpet`. With a SessionStart hook, every new session in an already-indexed project opens with a one-line brief injected into context ("This project has limpet memory: 13 active memories, 2 stale…") and the agent recalls before it reads. Add to `~/.claude/settings.json`:
 
 ```json
 {
@@ -367,7 +367,7 @@ An optional `.limpet.json` at the repository root tunes two things. It is a plai
 
 ## 🧭 Roadmap
 
-See [ROADMAP.md](ROADMAP.md) for what has shipped (portable repo identity, the statusline doctor, the structural lineage graph, grammar wave 2 — eleven languages — and the 0.13 freshness pass: anchored-first sweep priority plus the evidence-gated low-entropy follow guard) and what is next (FQN disambiguation, then the 1.0 stability contract). One rule governs all of it: a feature ships only if it feeds a receipt (`limpet stats`, the benchmark, rework-avoided) or the honesty envelope.
+See [ROADMAP.md](ROADMAP.md) for what has shipped (portable repo identity, the statusline doctor, the structural lineage graph, grammar wave 2 with eleven languages, and the 0.13 freshness pass: anchored-first sweep priority plus the evidence-gated low-entropy follow guard) and what is next (FQN disambiguation, then the 1.0 stability contract). One rule governs all of it: a feature ships only if it feeds a receipt (`limpet stats`, the benchmark, rework-avoided) or the honesty envelope.
 
 ## ⚖️ Reliance and license
 

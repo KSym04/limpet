@@ -171,7 +171,7 @@ that reaches the network, and only when you run it.";
 /// Statusline segment: `| 🐚 <count> (<n> stale) · ↑<n>k tokens saved`,
 /// with the count linking to the project's UI graph via OSC 8 when the UI
 /// is running. Prints nothing (and always exits 0) when the store is
-/// absent, the memory is empty, or the off-flag exists — a statusline must
+/// absent, the memory is empty, or the off-flag exists: a statusline must
 /// never be able to break the prompt. This replaces the bash+sqlite3 block
 /// statusline scripts used to carry, so Windows statuslines (PowerShell,
 /// cmd) render the identical segment by shelling out to one command.
@@ -187,7 +187,7 @@ fn print_statusline(args: &[String]) {
 /// project already has limpet memory, so it works memory-first without
 /// being asked. Same never-break contract as the statusline: prints
 /// nothing and exits 0 when there is no store, the memory is empty, or
-/// anything goes wrong; strictly read-only. Plain text, no ANSI — the
+/// anything goes wrong; strictly read-only. Plain text, no ANSI; the
 /// output is injected into the model's context, not a terminal.
 fn print_hook_brief(args: &[String]) {
     if let Ok(brief) = hook_brief(args) {
@@ -348,7 +348,7 @@ fn skill_path() -> Result<PathBuf> {
 
 /// Claude Code user config dir: `$CLAUDE_CONFIG_DIR` or `~/.claude`. Home to
 /// `settings.json` (where the `statusLine` command lives) and the
-/// `.limpet-statusline-off` toggle — distinct from the `~/.claude.json` MCP
+/// `.limpet-statusline-off` toggle, distinct from the `~/.claude.json` MCP
 /// registration handled by [`claude_config_path`].
 fn claude_dir() -> Result<PathBuf> {
     std::env::var_os("CLAUDE_CONFIG_DIR")
@@ -449,7 +449,7 @@ fn doctor_run(args: &[String], post_update: bool) -> Result<bool> {
                         "mcp registration",
                         false,
                         format!(
-                            "no mcpServers.limpet in {} — run `limpet install`, then \
+                            "no mcpServers.limpet in {}; run `limpet install`, then \
                              restart Claude Code",
                             cfg_path.display()
                         ),
@@ -459,7 +459,7 @@ fn doctor_run(args: &[String], post_update: bool) -> Result<bool> {
             Err(_) => check(
                 "mcp registration",
                 false,
-                format!("{} not found — run `limpet install`", cfg_path.display()),
+                format!("{} not found; run `limpet install`", cfg_path.display()),
             ),
         },
         Err(e) => check("mcp registration", false, format!("{e}")),
@@ -473,13 +473,13 @@ fn doctor_run(args: &[String], post_update: bool) -> Result<bool> {
             if p.exists() {
                 format!("{}", p.display())
             } else {
-                format!("{} missing — run `limpet install`", p.display())
+                format!("{} missing; run `limpet install`", p.display())
             },
         ),
         Err(e) => check("skill", false, format!("{e}")),
     }
 
-    // 3b. Statusline segment wiring. Advisory only — an unwired statusline is a
+    // 3b. Statusline segment wiring. Advisory only: an unwired statusline is a
     // missing convenience, not a broken install, so this never flips `ok`. Its
     // purpose is to end the silent-vanish failure mode: a statusline that
     // hand-rolls a sqlite3 query against the store drifts the instant the store
@@ -538,7 +538,7 @@ fn doctor_run(args: &[String], post_update: bool) -> Result<bool> {
                         settings.display()
                     ),
                     // Reads store.db (or drives sqlite3 against limpet) instead
-                    // of the binary — leave it wired and it silently breaks on
+                    // of the binary; leave it wired and it silently breaks on
                     // the next store key-scheme change.
                     (_, Some(false)) => println!(
                         "warn statusline: {} hand-rolls a store query; the store key \
@@ -599,7 +599,7 @@ fn doctor_run(args: &[String], post_update: bool) -> Result<bool> {
                     format!("{files} files, {entries} memories for {}", root.display())
                 } else {
                     format!(
-                        "empty index for {} — run `limpet index` here or `/limpet` \
+                        "empty index for {}; run `limpet index` here or `/limpet` \
                          in a session",
                         root.display()
                     )
