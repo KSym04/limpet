@@ -12,6 +12,12 @@ confident answers about code that moved on; a deterministic AST-hash anchor is
 the only thing that flags the lie. Everything below deepens that edge or it does
 not ship.
 
+**Current focus (post-0.13): adoption before features.** The core promise is
+built and receipted; the bottleneck is people using it. Between 0.13 and 0.14
+the work is documentation sharpness, a short demo of the anchor lifecycle
+(anchor → edit → stale → heal), and getting limpet in front of MCP users.
+Feature work resumes with the evidence gates below unchanged.
+
 ## Shipped
 
 Delivered releases in brief (full detail lives in git history, `limpet stats`,
