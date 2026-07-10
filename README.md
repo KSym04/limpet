@@ -11,9 +11,9 @@
 **Persistent memory for AI coding agents that knows when it has gone stale.** Everything your agent learns about a codebase (decisions, verified facts, failed approaches, gotchas) survives every session, anchored to the actual code it describes, and flips to `stale` the moment that code changes. One Rust binary, one SQLite file, standard MCP, zero network calls.
 
 <p align="center">
-  <img src="docs/limpet-ui.png" alt="limpet visual memory graph: memories colored by health, clamped to code symbols" width="820">
+  <img src="docs/limpet-demo.svg" alt="animated demo: recall answers from memory, an edit flips it to stale with the reason, a revert heals it" width="860">
   <br>
-  <em>limpet ui: green memories are trustworthy, amber went stale when their code changed, squares are the symbols they clamp onto</em>
+  <em>the anchor lifecycle, real output: recall answers instantly, an edit flips the memory stale, a revert heals it</em>
 </p>
 
 The failure mode that kills AI coding assistants is not forgetting; it is remembering something that is no longer true. Vector stores, RAG pipelines, and markdown notes trust what they wrote forever, so an agent that still believes last month's version of a function is not unhelpful, it is confidently wrong. limpet anchors each memory to a normalized AST hash of the code it describes: rename or move the code and the memory follows, edit it and the memory goes visibly stale with a reason, revert and it heals. Noticing its own staleness is the entire premise, and no other open memory layer does it.
@@ -179,6 +179,12 @@ limpet ui --port 9748
 ```
 
 The UI is its own command, separate from the MCP server. `limpet serve` (stdio) is what Claude Code launches for you automatically after `limpet install`; nothing listens on a port until you start `limpet ui` yourself. If http://127.0.0.1:9748 refuses connections, the MCP server is not broken; the UI just is not running.
+
+<p align="center">
+  <img src="docs/limpet-ui.png" alt="limpet visual memory graph: memories colored by health, clamped to code symbols" width="820">
+  <br>
+  <em>limpet ui: green memories are trustworthy, amber went stale when their code changed, squares are the symbols they clamp onto</em>
+</p>
 
 Open http://127.0.0.1:9748 for a live force-directed view of the knowledge graph: memories sized by confidence and colored by health (green active, amber stale, red invalidated), clamped to the files and symbols they describe, with contradiction and supersession edges drawn. The "needs attention" filter shows exactly what went stale and why, with the re-verify command one click away. Where other tools visualize code structure, limpet visualizes what your agent knows and whether it is still true. Served by the same single binary, bound to 127.0.0.1 only.
 
