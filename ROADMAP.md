@@ -35,20 +35,25 @@ built.
   bring coverage to eleven grammars, each gated by the I7 fixture and the
   hash-identity checks. Adding the ABI-15 grammars (Go, Bash) bumped the vendored
   tree-sitter core to 0.25; the original six (ABI 14) keep loading unchanged.
+- **v0.13.0 — sweep priority + low-entropy follow guard.** Files carrying
+  anchors reindex first inside the unchanged 32-file sweep budget, so staleness
+  lands where memories live. Rename/move following is evidence-gated: schema v5
+  stores each symbol's normalization-buffer length beside its hash, and a
+  unique match under a measured floor (calibrated across all 11 grammars)
+  surfaces as `stale:low_entropy` instead of silently re-pointing the anchor at
+  a trivial twin; it heals the moment the original returns. On pre-v5 stores
+  the guard hardens progressively as the sweep refills.
 
-## v0.13.0 — freshness at scale
+## v0.14.0 — freshness at scale, part 2
 
-- **FS-event watcher** (notify) replacing the on-call sweep for very large
-  repositories, where the 32-file sweep budget starts to lag.
-- **Sweep prioritization:** files carrying anchors reindex first, so staleness
-  is instant where it matters most.
 - **Full FQN disambiguation** (deferred from grammar wave 2): trait impls, C++
   overloads, and nested modules currently share FQNs; the `(fqn, hash)`
   existence check shipped in 0.7.2 stops the flapping, but true uniqueness needs
   schema work.
-- **Low-entropy follow guard** (deferred from grammar wave 2): trivial duplicate
-  bodies (empty functions, delegating one-liners) must not be silently followed
-  to the wrong twin.
+- **FS-event watcher** (notify) replacing the on-call sweep for very large
+  repositories — gated on evidence: build a lag bench on a genuinely large repo
+  first; if sweep prioritization keeps anchored-file staleness latency
+  acceptable, the watcher (and its per-platform risk surface) stays unbuilt.
 
 ## v1.0 — the stability contract (not features)
 
