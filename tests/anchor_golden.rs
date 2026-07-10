@@ -480,7 +480,7 @@ fn cpp_rename_is_followed() {
 fn file_anchor_follows_a_move() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
-    fs::write(root.join("hero.twig"), "{% block hero %}x{% endblock %}\n").unwrap();
+    fs::write(root.join("hero.twig"), "{% block hero %}This is a substantial hero block with meaningful content that exceeds the low-entropy threshold{% endblock %}\n").unwrap();
     let store = Store::open_in_memory().unwrap();
     index::full_index(&store, root).unwrap();
     let result = memory::remember(
@@ -561,4 +561,219 @@ fn hash_properties_hold_per_language() {
         assert_eq!(h(original), h(cosmetic), "{lang:?}: cosmetic change altered hash");
         assert_ne!(h(original), h(real_edit), "{lang:?}: real edit did not alter hash");
     }
+}
+
+#[test]
+fn body_hashes_carry_normalization_length() {
+    // Two identical bodies under different names: same hash, same len, len > 0.
+    let src = "def alpha():\n    return compute(1)\n\ndef beta():\n    return compute(1)\n";
+    let facts = index::extract::extract(Lang::Py, src).unwrap();
+    let ranges: Vec<(usize, usize)> = facts.symbols.iter().map(|s| s.byte_range).collect();
+    let out = anchor::ast_body_hashes(Lang::Py, src, &ranges).unwrap();
+    assert_eq!(out.len(), 2);
+    assert_eq!(out[0].0, out[1].0, "identical bodies must hash identically");
+    assert_eq!(out[0].1, out[1].1, "identical bodies must measure identically");
+    assert!(out[0].1 > 0, "normalization buffer is never empty");
+}
+
+/// Seed a store with an entry anchored to a trivial `orig` symbol in a.py,
+/// plus an identical-bodied `twin` symbol already living in b.py. Both
+/// bodies measure well under MIN_FOLLOW_BODY_BYTES (76B, see
+/// entropy_calibration.rs for the Python trivial floor).
+fn seed_trivial_twin(root: &std::path::Path) -> (Store, String) {
+    fs::write(root.join("a.py"), "def orig():\n    pass\n").unwrap();
+    fs::write(root.join("b.py"), "def twin():\n    pass\n").unwrap();
+    let store = Store::open_in_memory().unwrap();
+    index::full_index(&store, root).unwrap();
+    let result = memory::remember(
+        &store,
+        "fact",
+        "orig is a placeholder awaiting implementation",
+        "explicit",
+        None,
+        &[AnchorSpec { file: "a.py".into(), symbol: Some("orig".into()) }],
+        None,
+        &[],
+        None,
+        false,
+        None,
+    )
+    .unwrap();
+    (store, result.id)
+}
+
+#[test]
+fn trivial_unique_twin_is_refused_as_low_entropy() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    let (store, id) = seed_trivial_twin(root);
+
+    // orig disappears from a.py; twin's identical trivial body in b.py is
+    // the only remaining body-hash match. It is a real UNIQUE match, but an
+    // empty `pass` body is not evidence of identity: refuse to follow it.
+    fs::write(root.join("a.py"), "def unrelated():\n    return 1\n").unwrap();
+    let report = mutate_and_resolve(&store, root);
+    assert_eq!(report.stale, 1, "trivial unique match must not silently follow");
+    assert_eq!(report.followed, 0, "the anchor must not be re-pointed at the twin");
+    let (status, reason) = status_of(&store, &id);
+    assert_eq!(status, "stale");
+    assert_eq!(reason.as_deref(), Some("low_entropy"));
+    let fqn: String = store
+        .conn
+        .query_row("SELECT symbol_fqn FROM anchors WHERE entry_id = ?1", [&id], |r| r.get(0))
+        .unwrap();
+    assert_eq!(fqn, "a.orig", "anchor must still point at the original, never re-pointed");
+}
+
+#[test]
+fn low_entropy_refusal_heals_when_the_original_returns() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    let (store, id) = seed_trivial_twin(root);
+
+    fs::write(root.join("a.py"), "def unrelated():\n    return 1\n").unwrap();
+    let _ = mutate_and_resolve(&store, root);
+    assert_eq!(status_of(&store, &id).0, "stale", "precondition: refusal must have staled it");
+
+    // orig comes back exactly as it was (branch switch, stash pop, etc).
+    fs::write(root.join("a.py"), "def orig():\n    pass\n").unwrap();
+    let _ = mutate_and_resolve(&store, root);
+    assert_eq!(
+        status_of(&store, &id).0,
+        "active",
+        "the original returning must heal a low_entropy refusal (symmetric staleness)"
+    );
+    let fqn: String = store
+        .conn
+        .query_row("SELECT symbol_fqn FROM anchors WHERE entry_id = ?1", [&id], |r| r.get(0))
+        .unwrap();
+    assert_eq!(fqn, "a.orig", "anchor was never touched through the whole cycle");
+}
+
+#[test]
+fn null_body_len_keeps_legacy_follow() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    // A real (non-trivial) body, well clear of the follow floor (343B
+    // measured for this shape in tests/entropy_calibration.rs's sibling
+    // fixtures), so the only variable under test is body_len itself.
+    let real = "def orig(x):\n    y = x + 1\n    if y > 2:\n        return y * 3\n    return y\n";
+    fs::write(root.join("a.py"), real).unwrap();
+    fs::write(root.join("b.py"), real.replace("orig", "twin")).unwrap();
+    let store = Store::open_in_memory().unwrap();
+    index::full_index(&store, root).unwrap();
+    let result = memory::remember(
+        &store,
+        "fact",
+        "orig triples y once it clears 2",
+        "explicit",
+        None,
+        &[AnchorSpec { file: "a.py".into(), symbol: Some("orig".into()) }],
+        None,
+        &[],
+        None,
+        false,
+        None,
+    )
+    .unwrap();
+
+    // orig disappears from a.py; twin is the unique body-hash match. Simulate
+    // a pre-v5 row that never got a body_len backfill.
+    fs::write(root.join("a.py"), "def unrelated():\n    return 1\n").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    index::sweep(&store, root, &Default::default()).unwrap();
+    store
+        .conn
+        .execute("UPDATE symbols SET body_len = NULL WHERE name = 'twin'", [])
+        .unwrap();
+    let report = anchor::resolve_all(&store).unwrap();
+
+    assert_eq!(report.followed, 1, "NULL body_len must keep legacy grace and follow");
+    let (status, _reason) = status_of(&store, &result.id);
+    assert_eq!(status, "active");
+    let (fqn, file): (String, String) = store
+        .conn
+        .query_row("SELECT symbol_fqn, file FROM anchors WHERE entry_id = ?1", [&result.id], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .unwrap();
+    assert_eq!(fqn, "b.twin");
+    assert_eq!(file, "b.py");
+}
+
+#[test]
+fn tiny_file_move_is_refused_as_low_entropy() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    let tiny_content = "# stub\n";
+    fs::write(root.join("tiny.md"), tiny_content).unwrap();
+    let store = Store::open_in_memory().unwrap();
+    index::full_index(&store, root).unwrap();
+    let result = memory::remember(
+        &store,
+        "insight",
+        "stub documentation",
+        "explicit",
+        None,
+        &[AnchorSpec { file: "tiny.md".into(), symbol: None }],
+        None,
+        &[],
+        None,
+        false,
+        None,
+    )
+    .unwrap();
+
+    // Low-entropy file move: content hash matches but size < MIN_FOLLOW_FILE_BYTES
+    // so it refuses to follow. Anchor stays at original path, entry goes stale.
+    fs::create_dir_all(root.join("docs")).unwrap();
+    fs::rename(root.join("tiny.md"), root.join("docs/renamed.md")).unwrap();
+    let _ = mutate_and_resolve(&store, root);
+    let (status, reason) = status_of(&store, &result.id);
+    assert_eq!(status, "stale", "tiny file move must be refused as stale");
+    assert_eq!(reason, Some("low_entropy".into()), "stale reason must be low_entropy");
+    let file: String = store
+        .conn
+        .query_row("SELECT file FROM anchors WHERE entry_id = ?1", [&result.id], |r| r.get(0))
+        .unwrap();
+    assert_eq!(file, "tiny.md", "anchor must not re-point for low-entropy file");
+}
+
+#[test]
+fn real_file_move_still_follows() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    let real_content = "# Real Documentation\n\nThis is a substantial file with enough content to exceed the low-entropy threshold. \
+        It should have multiple paragraphs and meaningful size so that when it moves to a new location, \
+        the anchor system will recognize it as a high-confidence follow and update the file path in the anchors table. \
+        This ensures that large, meaningful files are not mistakenly refused as low-entropy when they change locations.";
+    fs::write(root.join("docs.md"), real_content).unwrap();
+    let store = Store::open_in_memory().unwrap();
+    index::full_index(&store, root).unwrap();
+    let result = memory::remember(
+        &store,
+        "insight",
+        "real documentation",
+        "explicit",
+        None,
+        &[AnchorSpec { file: "docs.md".into(), symbol: None }],
+        None,
+        &[],
+        None,
+        false,
+        None,
+    )
+    .unwrap();
+
+    // Real file move: substantial content, size >= MIN_FOLLOW_FILE_BYTES,
+    // so anchor follows the moved file to its new location.
+    fs::create_dir_all(root.join("archives")).unwrap();
+    fs::rename(root.join("docs.md"), root.join("archives/docs.md")).unwrap();
+    let _ = mutate_and_resolve(&store, root);
+    assert_eq!(status_of(&store, &result.id).0, "active", "real file move must be followed");
+    let file: String = store
+        .conn
+        .query_row("SELECT file FROM anchors WHERE entry_id = ?1", [&result.id], |r| r.get(0))
+        .unwrap();
+    assert_eq!(file, "archives/docs.md", "anchor must re-point for high-entropy file");
 }

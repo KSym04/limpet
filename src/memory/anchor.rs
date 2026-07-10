@@ -85,6 +85,23 @@ fn own_name_node(node: Node) -> Option<Node> {
     }
 }
 
+/// Build the normalization buffer for the subtree rooted at `node`:
+/// kind names + parens + identity-leaf text, comments skipped, the
+/// symbol's own name node excluded. This buffer IS the hash input; its
+/// length is the body's entropy measure (schema v5 `symbols.body_len`).
+fn normalization_buffer(node: Node, src: &[u8]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(1024);
+    let own_name_id = own_name_node(node).map(|n| n.id());
+    buf.extend_from_slice(node.kind().as_bytes());
+    buf.push(b'(');
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        emit_excluding(child, src, &mut buf, own_name_id);
+    }
+    buf.push(b')');
+    buf
+}
+
 /// Hash the normalized AST subtree rooted at `node`.
 ///
 /// The symbol's own name node is excluded: a pure rename keeps the body
@@ -96,16 +113,7 @@ fn own_name_node(node: Node) -> Option<Node> {
 /// inside the body or adding a statement always does; identical bodies
 /// hash identically across files and names.
 pub fn ast_body_hash_node(node: Node, src: &[u8]) -> String {
-    let mut buf = Vec::with_capacity(1024);
-    let own_name_id = own_name_node(node).map(|n| n.id());
-    buf.extend_from_slice(node.kind().as_bytes());
-    buf.push(b'(');
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        emit_excluding(child, src, &mut buf, own_name_id);
-    }
-    buf.push(b')');
-    let digest = Sha256::digest(&buf);
+    let digest = Sha256::digest(normalization_buffer(node, src));
     hex32(&digest)
 }
 
@@ -143,16 +151,18 @@ fn hex32(digest: &[u8]) -> String {
 /// Parse `src` and hash the subtree covering `byte_range` (a symbol's
 /// defining node, as recorded by extraction).
 pub fn ast_body_hash(lang_id: Lang, src: &str, byte_range: (usize, usize)) -> Result<String> {
-    Ok(ast_body_hashes(lang_id, src, &[byte_range])?.remove(0))
+    Ok(ast_body_hashes(lang_id, src, &[byte_range])?.remove(0).0)
 }
 
 /// Hash many symbol ranges from ONE parse. Indexing previously reparsed the
 /// whole file once per symbol, O(symbols x full parse) on big files.
+/// Returns (hash, normalization-buffer byte length) per range; the length
+/// is the entropy signal behind the low-entropy follow guard.
 pub fn ast_body_hashes(
     lang_id: Lang,
     src: &str,
     ranges: &[(usize, usize)],
-) -> Result<Vec<String>> {
+) -> Result<Vec<(String, u32)>> {
     let mut parser = Parser::new();
     parser
         .set_language(&lang::ts_language(lang_id))
@@ -165,10 +175,30 @@ pub fn ast_body_hashes(
         .iter()
         .map(|&(s, e)| {
             let node = root.descendant_for_byte_range(s, e).unwrap_or(root);
-            ast_body_hash_node(node, src.as_bytes())
+            let buf = normalization_buffer(node, src.as_bytes());
+            let digest = Sha256::digest(&buf);
+            (hex32(&digest), buf.len() as u32)
         })
         .collect())
 }
+
+/// Entropy floor for rename/move following. A unique body-hash match whose
+/// normalization buffer is shorter than this is a trivial body (empty fn,
+/// bare delegation): refusing to follow beats silently re-pointing the
+/// anchor at a wrong twin. Calibrated in tests/entropy_calibration.rs from
+/// real buffer lengths across all 11 grammars (biased low: a missed follow
+/// heals as stale; a wrong follow lies forever). Measured floors: max
+/// trivial = 123B (TypeScript), min real = 265B (Ruby); 124 clears the
+/// TypeScript trivial fixture with a 141B margin below the Ruby real floor.
+pub const MIN_FOLLOW_BODY_BYTES: u32 = 124;
+
+/// Same floor for file-level (content-hash) follows, in file bytes;
+/// files.size is already stored so this costs no schema. Calibrated from an
+/// empty file (0B) and a lone-import line (33B) against the shortest real
+/// fixture source (Ruby, 63B) in tests/entropy_calibration.rs; the
+/// provisional 64B guess from the brief failed to clear Ruby's 63B real
+/// fixture, so this was lowered per the same max(trivial)+1 rule.
+pub const MIN_FOLLOW_FILE_BYTES: i64 = 34;
 
 /// Outcome of resolving one anchor against the current index.
 #[derive(Debug, PartialEq)]
@@ -247,20 +277,26 @@ pub fn resolve_all(store: &crate::store::Store) -> Result<ResolveReport> {
                     // by hash exactly like symbol anchors follow bodies.
                     let mut fstmt = store
                         .conn
-                        .prepare("SELECT path FROM files WHERE hash = ?1 LIMIT 3")?;
-                    let homes: Vec<String> = fstmt
-                        .query_map([h], |r| r.get(0))?
+                        .prepare("SELECT path, size FROM files WHERE hash = ?1 LIMIT 3")?;
+                    let homes: Vec<(String, i64)> = fstmt
+                        .query_map([h], |r| Ok((r.get(0)?, r.get(1)?)))?
                         .collect::<rusqlite::Result<_>>()?;
                     match homes.len() {
                         0 => AnchorFate::Invalidated,
+                        // A near-empty file's content hash matches every
+                        // stub like it; refusing beats guessing (heals if
+                        // the original path returns).
+                        1 if homes[0].1 < MIN_FOLLOW_FILE_BYTES => {
+                            AnchorFate::Stale { reason: "low_entropy" }
+                        }
                         1 => {
                             store.conn.execute(
                                 "UPDATE anchors SET file = ?1 WHERE id = ?2",
-                                params![homes[0], row.anchor_id],
+                                params![homes[0].0, row.anchor_id],
                             )?;
                             AnchorFate::Followed {
-                                new_fqn: homes[0].clone(),
-                                new_file: homes[0].clone(),
+                                new_fqn: homes[0].0.clone(),
+                                new_file: homes[0].0.clone(),
                             }
                         }
                         _ => AnchorFate::Stale { reason: "ambiguous_anchor" },
@@ -312,16 +348,25 @@ pub fn resolve_all(store: &crate::store::Store) -> Result<ResolveReport> {
             (false, false) => {
                 // FQN gone: search for the body elsewhere (rename/move).
                 let mut fstmt = store.conn.prepare(
-                    "SELECT fqn, file FROM symbols WHERE body_hash = ?1 LIMIT 3",
+                    "SELECT fqn, file, body_len FROM symbols WHERE body_hash = ?1 LIMIT 3",
                 )?;
-                let matches: Vec<(String, String)> = fstmt
-                    .query_map([anchor_hash], |r| Ok((r.get(0)?, r.get(1)?)))?
+                let matches: Vec<(String, String, Option<i64>)> = fstmt
+                    .query_map([anchor_hash], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
                     .collect::<rusqlite::Result<_>>()?;
                 match matches.len() {
                     0 => AnchorFate::Invalidated,
-                    1 => AnchorFate::Followed {
-                        new_fqn: matches[0].0.clone(),
-                        new_file: matches[0].1.clone(),
+                    1 => match matches[0].2 {
+                        // A trivial body is not evidence: an empty fn or bare
+                        // delegation hashes identically to every twin, and a
+                        // wrong follow lies forever. Stale heals if the
+                        // original returns; NULL (pre-v5) keeps legacy grace.
+                        Some(len) if len < i64::from(MIN_FOLLOW_BODY_BYTES) => {
+                            AnchorFate::Stale { reason: "low_entropy" }
+                        }
+                        _ => AnchorFate::Followed {
+                            new_fqn: matches[0].0.clone(),
+                            new_file: matches[0].1.clone(),
+                        },
                     },
                     _ => AnchorFate::Stale { reason: "ambiguous_anchor" },
                 }

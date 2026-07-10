@@ -17,7 +17,7 @@ use crate::store::{ImportReport, Store};
 use anyhow::Result;
 use rusqlite::params;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Instant;
 
@@ -177,8 +177,10 @@ fn index_file_parsed(
     )?;
 
     let ranges: Vec<(usize, usize)> = facts.symbols.iter().map(|s| s.byte_range).collect();
-    let hashes = anchor::ast_body_hashes(lang_id, src, &ranges)
-        .unwrap_or_else(|_| vec![String::from("unhashed"); ranges.len()]);
+    let hashes: Vec<(String, Option<u32>)> = match anchor::ast_body_hashes(lang_id, src, &ranges) {
+        Ok(v) => v.into_iter().map(|(h, l)| (h, Some(l))).collect(),
+        Err(_) => vec![(String::from("unhashed"), None); ranges.len()],
+    };
 
     let mut count = 0usize;
     for (ordinal, sym) in facts.symbols.iter().enumerate() {
@@ -190,18 +192,18 @@ fn index_file_parsed(
             let up = &parent_refs[..parent_refs.len() - 1];
             Some(fqn::fqn(rel, up, parent_refs[parent_refs.len() - 1]))
         };
-        let body_hash = hashes
+        let (body_hash, body_len) = hashes
             .get(ordinal)
             .cloned()
-            .unwrap_or_else(|| String::from("unhashed"));
+            .unwrap_or_else(|| (String::from("unhashed"), None));
         store.conn.execute(
             "INSERT INTO symbols(fqn, name, kind, file, start_line, end_line,
-                                 body_hash, parent_fqn, ordinal)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                                 body_hash, parent_fqn, ordinal, body_len)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
             params![
                 sym_fqn, sym.name, sym.kind, rel,
                 sym.start_line as i64, sym.end_line as i64,
-                body_hash, parent_fqn, ordinal as i64
+                body_hash, parent_fqn, ordinal as i64, body_len
             ],
         )?;
         count += 1;
@@ -415,7 +417,6 @@ pub fn sweep(
         }
     }
 
-    use std::collections::HashSet;
     let known_set: HashSet<&String> = known.iter().map(|(p, _, _)| p).collect();
     let exclude = store_exclude_dir(store);
     for rel in discover(root, exclude.as_deref()) {
@@ -423,6 +424,19 @@ pub fn sweep(
             changed.push(rel);
         }
     }
+
+    // Anchored files first: staleness must land where memories live. Stale
+    // and invalidated entries are included — they re-resolve and heal, so
+    // their files matter just as much; only superseded is final. Stable
+    // sort preserves discovery order within each group.
+    let mut astmt = store.conn.prepare(
+        "SELECT DISTINCT a.file FROM anchors a
+         JOIN entries e ON e.id = a.entry_id
+         WHERE e.status != 'superseded'",
+    )?;
+    let anchored: HashSet<String> = astmt.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+    drop(astmt);
+    changed.sort_by_key(|rel| !anchored.contains(rel));
 
     for rel in changed.iter().take(SWEEP_REINDEX_BUDGET) {
         match index_file(store, root, rel, ext) {
@@ -675,5 +689,62 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM inherits WHERE file='a.rs'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 1, "no duplicate edges after reindex");
+    }
+
+    #[test]
+    fn parsed_symbols_carry_body_len() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("m.py"), "def f(x):\n    y = x + 1\n    return y * 2\n").unwrap();
+        let store = Store::open_in_memory().unwrap();
+        full_index(&store, root).unwrap();
+        let (len, hash): (Option<i64>, String) = store.conn.query_row(
+            "SELECT body_len, body_hash FROM symbols WHERE name='f'",
+            [], |r| Ok((r.get(0)?, r.get(1)?)),
+        ).unwrap();
+        assert_ne!(hash, "unhashed");
+        let len = len.expect("parsed symbol must carry body_len");
+        assert!(len > 0);
+    }
+
+    #[test]
+    fn sweep_reindexes_anchored_files_before_the_budget_cuts() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // 64 unanchored files created (and named) ahead of one anchored file,
+        // so a blind take(32) can never reach it whatever the walk order does
+        // within the first group.
+        for i in 0..64 {
+            std::fs::write(root.join(format!("a{i:03}.py")), format!("def f{i}():\n    return {i}\n"))
+                .unwrap();
+        }
+        std::fs::write(root.join("zz_anchored.py"), "def g():\n    return 41\n").unwrap();
+        let store = Store::open_in_memory().unwrap();
+        full_index(&store, root).unwrap();
+
+        // Anchor a live entry to zz_anchored.py (sweep reads the tables directly).
+        store
+            .conn
+            .execute(
+                "INSERT INTO entries(id, kind, body, created_at, updated_at, source, confidence, status)
+                 VALUES ('e1','fact','b','2026-07-11T00:00:00Z','2026-07-11T00:00:00Z','explicit',0.9,'active')",
+                [],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute("INSERT INTO anchors(entry_id, file) VALUES ('e1','zz_anchored.py')", [])
+            .unwrap();
+
+        // Touch everything: every file is now changed.
+        store.conn.execute("UPDATE files SET mtime_ns = 0", []).unwrap();
+
+        let report = sweep(&store, root, &Default::default()).unwrap();
+        assert_eq!(report.reindexed.len(), SWEEP_REINDEX_BUDGET);
+        assert!(
+            report.reindexed.contains(&"zz_anchored.py".to_string()),
+            "anchored file must be inside the budget, got dirty tail of {} files",
+            report.dirty.len()
+        );
     }
 }

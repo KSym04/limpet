@@ -10,7 +10,7 @@ use rusqlite::Connection;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 pub struct Store {
     pub conn: Connection,
@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS symbols (
   start_line INTEGER,
   end_line INTEGER,
   body_hash TEXT NOT NULL,
+  body_len INTEGER,
   parent_fqn TEXT,
   ordinal INTEGER NOT NULL DEFAULT 0
 );
@@ -241,6 +242,31 @@ fn migrate_to_v4(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Schema v5 (lazy migration): additive `symbols.body_len` — the byte length
+/// of the normalization buffer behind `body_hash`, the entropy signal for the
+/// low-entropy follow guard. Gate on the ACTUAL table state (pragma), never
+/// the version stamp: migrations run on every open and must no-op on re-run.
+/// The one-time branch also zeroes files.mtime_ns so the bounded sweep
+/// re-parses every file and fills the column; without it, unchanged files
+/// keep NULL forever (the v4 lesson).
+fn migrate_to_v5(conn: &Connection) -> Result<()> {
+    let present: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('symbols') WHERE name = 'body_len'",
+        [],
+        |r| r.get(0),
+    )?;
+    if present == 0 {
+        conn.execute_batch("ALTER TABLE symbols ADD COLUMN body_len INTEGER")?;
+        conn.execute("UPDATE files SET mtime_ns = 0", [])?;
+    }
+    conn.execute(
+        "INSERT INTO meta_kv(k, v) VALUES('schema_version', ?1)
+         ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+        [SCHEMA_VERSION.to_string()],
+    )?;
+    Ok(())
+}
+
 impl Store {
     /// Open (creating if needed) the store at an explicit database path.
     pub fn open(db_path: &Path) -> Result<Store> {
@@ -257,6 +283,7 @@ impl Store {
         migrate_to_v2(&conn)?;
         migrate_to_v3(&conn)?;
         migrate_to_v4(&conn)?;
+        migrate_to_v5(&conn)?;
         Ok(Store { conn, session_base: std::cell::Cell::new(Ledger::default()) })
     }
 
@@ -268,6 +295,7 @@ impl Store {
         migrate_to_v2(&conn)?;
         migrate_to_v3(&conn)?;
         migrate_to_v4(&conn)?;
+        migrate_to_v5(&conn)?;
         Ok(Store { conn, session_base: std::cell::Cell::new(Ledger::default()) })
     }
 
@@ -1106,7 +1134,7 @@ mod tests {
             .unwrap();
         assert_eq!(private, 0, "pre-existing rows default to not-private");
         assert_eq!(origin, None);
-        assert_eq!(s.kv_get("schema_version").unwrap().as_deref(), Some("4"));
+        assert_eq!(s.kv_get("schema_version").unwrap().as_deref(), Some("5"));
     }
 
     #[test]
@@ -1209,7 +1237,7 @@ mod tests {
             .conn
             .query_row("SELECT v FROM meta_kv WHERE k='schema_version'", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(ver, "4");
+        assert_eq!(ver, "5");
         // Insert + read back an edge (CHECK constraint honored).
         store
             .conn
@@ -1248,7 +1276,7 @@ mod tests {
             .conn
             .query_row("SELECT v FROM meta_kv WHERE k='schema_version'", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(ver, "4");
+        assert_eq!(ver, "5");
         for rel in ["embeds", "mixin", "extends"] {
             store
                 .conn
@@ -1297,6 +1325,94 @@ mod tests {
             1,
             "inherits must survive a store reopen (migrate_to_v4 must not wipe it every open)"
         );
+    }
+
+    #[test]
+    fn fresh_store_has_body_len_column() {
+        let s = Store::open_in_memory().unwrap();
+        let present: i64 = s.conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('symbols') WHERE name = 'body_len'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(present, 1, "fresh DDL must carry body_len");
+        assert_eq!(s.kv_get("schema_version").unwrap().as_deref(), Some("5"));
+    }
+
+    #[test]
+    fn v5_migration_adds_column_and_marks_files_for_reindex() {
+        // Build a v4-shaped store by hand: symbols WITHOUT body_len, one file
+        // with a live mtime. Mirror the raw-conn setup of the v3/v4 migration
+        // tests at src/store.rs:1243+.
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("memory.db");
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE meta_kv (k TEXT PRIMARY KEY, v TEXT NOT NULL);
+                 CREATE TABLE files (path TEXT PRIMARY KEY, lang TEXT, mtime_ns INTEGER NOT NULL,
+                   size INTEGER NOT NULL, hash TEXT NOT NULL, parse_ok INTEGER NOT NULL DEFAULT 1);
+                 CREATE TABLE symbols (
+                   id INTEGER PRIMARY KEY, fqn TEXT NOT NULL, name TEXT NOT NULL,
+                   kind TEXT NOT NULL, file TEXT NOT NULL,
+                   start_line INTEGER, end_line INTEGER,
+                   body_hash TEXT NOT NULL, parent_fqn TEXT,
+                   ordinal INTEGER NOT NULL DEFAULT 0);
+                 CREATE TABLE inherits (
+                   child_fqn TEXT NOT NULL, parent_name TEXT NOT NULL,
+                   rel TEXT NOT NULL CHECK(rel IN ('extends','implements','impl_trait','embeds','mixin')),
+                   file TEXT NOT NULL);",
+            ).unwrap();
+            conn.execute("INSERT INTO meta_kv(k,v) VALUES('schema_version','4')", []).unwrap();
+            conn.execute(
+                "INSERT INTO files(path,lang,mtime_ns,size,hash) VALUES('a.py','python',12345,10,'h')",
+                [],
+            ).unwrap();
+            conn.execute(
+                "INSERT INTO symbols(fqn,name,kind,file,body_hash) VALUES('a.f','f','function','a.py','bh')",
+                [],
+            ).unwrap();
+        }
+        let s = Store::open(&db).unwrap();
+        let present: i64 = s.conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('symbols') WHERE name = 'body_len'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(present, 1, "migration must add body_len");
+        let mtime: i64 = s.conn
+            .query_row("SELECT mtime_ns FROM files WHERE path='a.py'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mtime, 0, "one-time widen must mark files dirty so the sweep refills body_len");
+        let kept: i64 = s.conn
+            .query_row("SELECT COUNT(*) FROM symbols", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kept, 1, "migration must not touch existing symbol rows");
+    }
+
+    #[test]
+    fn body_len_survives_store_reopen() {
+        // The refill marker must fire ONCE: a second open must not re-zero
+        // mtimes or disturb data (the v4 lesson: single-open tests hid a wipe).
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("memory.db");
+        {
+            let s = Store::open(&db).unwrap();
+            s.conn.execute(
+                "INSERT INTO files(path,lang,mtime_ns,size,hash) VALUES('a.py','python',999,10,'h')",
+                [],
+            ).unwrap();
+            s.conn.execute(
+                "INSERT INTO symbols(fqn,name,kind,file,body_hash,body_len)
+                 VALUES('a.f','f','function','a.py','bh',77)",
+                [],
+            ).unwrap();
+        }
+        let s = Store::open(&db).unwrap();
+        let (mtime, len): (i64, i64) = s.conn.query_row(
+            "SELECT f.mtime_ns, s.body_len FROM files f JOIN symbols s ON s.file=f.path",
+            [], |r| Ok((r.get(0)?, r.get(1)?)),
+        ).unwrap();
+        assert_eq!(mtime, 999, "re-open must not re-fire the refill marker");
+        assert_eq!(len, 77, "re-open must not disturb body_len");
     }
 
     #[test]

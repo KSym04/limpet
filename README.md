@@ -114,9 +114,12 @@ duplicate bodies       multiple matches          stale (ambiguous_anchor)
 edit anchored file     file content hash differs stale (file_edited), conf drops
 delete anchored file   file row gone             invalidated (kept as history)
 lose SOME anchors      others still resolve      stale (anchor_lost), never killed
+move a trivial body    unique match, too small   stale (low_entropy), never re-pointed
 ```
 
 A multi-anchor memory dies only when **every** anchor dies. Losing one anchor while others still resolve degrades it to `stale:anchor_lost` so the surviving knowledge stays usable. And `remember` refuses an anchor it cannot resolve, loudly, at write time: no memory is ever born dead.
+
+Rename-following is evidence-gated: a unique match on a trivial body (an empty function, a bare delegation stub, a near-empty file) is refused as follow evidence and surfaces as `stale:low_entropy` instead of silently re-pointing the anchor at a look-alike twin — and it heals the moment the original code returns.
 
 Staleness is also symmetric: revert the code (a rolled-back experiment, a `git checkout`) and the memory heals back to active on the next call, because the anchor hash matches again. No re-verification ritual for changes that un-happened. The same applies to invalidation: a branch switch, `git stash`, or mid-rebase state that makes files vanish briefly is not a death sentence — when the code comes back and the anchors resolve, the memory recovers. The only final state is `superseded`, which records a deliberate human decision rather than filesystem churn.
 

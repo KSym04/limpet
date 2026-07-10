@@ -1,3 +1,45 @@
+# SPEC — freshness at scale, branch 1: sweep priority + low-entropy guard — v0.13.0
+
+Status: APPROVED (2026-07-11). Full spec:
+docs/superpowers/specs/2026-07-11-freshness-at-scale-design.md
+
+Two freshness-correctness fixes that feed the honesty envelope. Sweep order
+stops being arbitrary: files carrying anchors reindex first inside the same
+32-file budget, so staleness lands where memories live. Follow stops trusting
+uniqueness alone: a trivial body (empty fn, delegating one-liner) is refused as
+follow evidence and surfaces as `Stale{low_entropy}` instead of silently
+re-pointing to the wrong twin.
+
+| Item | Target | Summary |
+|---|---|---|
+| Sweep prioritization | v0.13.0 | stable-partition `changed` anchored-first before the budget cut; report shape unchanged |
+| schema v5 `symbols.body_len` | v0.13.0 | normalization-buffer byte length beside the hash; additive ALTER, table_info self-gate, mtime_ns=0 refill |
+| Low-entropy follow guard | v0.13.0 | both follow sites: unique match under measured threshold -> `Stale{low_entropy}`; NULL = legacy grace; heals when original returns |
+
+Locked: hash recipe byte-identical (length is a read of the same buffer);
+thresholds calibrated from real buffer lengths across all 11 grammars before
+the constants are set, biased low (never misclassify a real body); stale not
+invalidated; two-process release-binary dogfood mandatory for the migration.
+
+## Task Implementation Checklist — freshness branch 1
+
+- [x] Calibration harness: print normalization-buffer lengths for trivial +
+      real fixture bodies across all 11 grammars; pick both thresholds
+      (BODY=124, FILE=34; max trivial 123 vs min real 265)
+- [x] `ast_body_hashes`/`ast_body_hash_node` return (hash, len); all callers
+- [x] schema v5: ALTER + table_info self-gate + refill + reopen/refill tests
+- [x] `index_file_parsed` writes `body_len`
+- [x] Sweep prioritization + budget-boundary test
+- [x] Symbol-site guard + NULL grace + healing round-trip tests
+- [x] File-site guard (`files.size`) + tests
+- [x] Docs: `low_entropy` stale reason; README fate table + prose
+- [x] Full suite (163) + clippy clean + bench 4.0x/5.4x + two-process dogfood
+      (real v4 store migrated, inherits intact, anchored files refilled first,
+      guard fired live stale:low_entropy and healed on restore)
+- [ ] Whole-branch review -> PR -> merge -> /deploy-limpet 0.13.0 (Ken pre-authorized 2026-07-11)
+
+---
+
 # SPEC — grammar wave 2 (Go, Java, Ruby, C#, Bash) — v0.12.0
 
 Status: APPROVED (design, 2026-07-08). Full spec:
