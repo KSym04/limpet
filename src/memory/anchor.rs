@@ -182,6 +182,24 @@ pub fn ast_body_hashes(
         .collect())
 }
 
+/// Entropy floor for rename/move following. A unique body-hash match whose
+/// normalization buffer is shorter than this is a trivial body (empty fn,
+/// bare delegation): refusing to follow beats silently re-pointing the
+/// anchor at a wrong twin. Calibrated in tests/entropy_calibration.rs from
+/// real buffer lengths across all 11 grammars (biased low: a missed follow
+/// heals as stale; a wrong follow lies forever). Measured floors: max
+/// trivial = 123B (TypeScript), min real = 265B (Ruby); 124 clears the
+/// TypeScript trivial fixture with a 141B margin below the Ruby real floor.
+pub const MIN_FOLLOW_BODY_BYTES: u32 = 124;
+
+/// Same floor for file-level (content-hash) follows, in file bytes;
+/// files.size is already stored so this costs no schema. Calibrated from an
+/// empty file (0B) and a lone-import line (33B) against the shortest real
+/// fixture source (Ruby, 63B) in tests/entropy_calibration.rs; the
+/// provisional 64B guess from the brief failed to clear Ruby's 63B real
+/// fixture, so this was lowered per the same max(trivial)+1 rule.
+pub const MIN_FOLLOW_FILE_BYTES: i64 = 34;
+
 /// Outcome of resolving one anchor against the current index.
 #[derive(Debug, PartialEq)]
 pub enum AnchorFate {
