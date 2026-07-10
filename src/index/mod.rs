@@ -177,8 +177,10 @@ fn index_file_parsed(
     )?;
 
     let ranges: Vec<(usize, usize)> = facts.symbols.iter().map(|s| s.byte_range).collect();
-    let hashes: Vec<(String, u32)> = anchor::ast_body_hashes(lang_id, src, &ranges)
-        .unwrap_or_else(|_| vec![(String::from("unhashed"), 0); ranges.len()]);
+    let hashes: Vec<(String, Option<u32>)> = match anchor::ast_body_hashes(lang_id, src, &ranges) {
+        Ok(v) => v.into_iter().map(|(h, l)| (h, Some(l))).collect(),
+        Err(_) => vec![(String::from("unhashed"), None); ranges.len()],
+    };
 
     let mut count = 0usize;
     for (ordinal, sym) in facts.symbols.iter().enumerate() {
@@ -190,18 +192,18 @@ fn index_file_parsed(
             let up = &parent_refs[..parent_refs.len() - 1];
             Some(fqn::fqn(rel, up, parent_refs[parent_refs.len() - 1]))
         };
-        let (body_hash, _body_len) = hashes
+        let (body_hash, body_len) = hashes
             .get(ordinal)
             .cloned()
-            .unwrap_or_else(|| (String::from("unhashed"), 0));
+            .unwrap_or_else(|| (String::from("unhashed"), None));
         store.conn.execute(
             "INSERT INTO symbols(fqn, name, kind, file, start_line, end_line,
-                                 body_hash, parent_fqn, ordinal)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                                 body_hash, parent_fqn, ordinal, body_len)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
             params![
                 sym_fqn, sym.name, sym.kind, rel,
                 sym.start_line as i64, sym.end_line as i64,
-                body_hash, parent_fqn, ordinal as i64
+                body_hash, parent_fqn, ordinal as i64, body_len
             ],
         )?;
         count += 1;
@@ -675,5 +677,21 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM inherits WHERE file='a.rs'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 1, "no duplicate edges after reindex");
+    }
+
+    #[test]
+    fn parsed_symbols_carry_body_len() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("m.py"), "def f(x):\n    y = x + 1\n    return y * 2\n").unwrap();
+        let store = Store::open_in_memory().unwrap();
+        full_index(&store, root).unwrap();
+        let (len, hash): (Option<i64>, String) = store.conn.query_row(
+            "SELECT body_len, body_hash FROM symbols WHERE name='f'",
+            [], |r| Ok((r.get(0)?, r.get(1)?)),
+        ).unwrap();
+        assert_ne!(hash, "unhashed");
+        let len = len.expect("parsed symbol must carry body_len");
+        assert!(len > 0);
     }
 }
