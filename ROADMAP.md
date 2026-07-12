@@ -8,8 +8,9 @@ own staleness does not ship. That discipline is the product.
 
 The wedge is one capability no adjacent tool has: limpet notices when its own
 context goes stale. A vector index or a hand-written architecture doc returns
-confident answers about code that moved on; a deterministic AST-hash anchor is
-the only thing that flags the lie. Everything below deepens that edge or it does
+confident answers about code that moved on, and time-based decay does not fix
+that: age is not truth, and a schedule cannot name which memory an edit broke.
+A deterministic AST-hash anchor is the only thing that flags the lie. Everything below deepens that edge or it does
 not ship.
 
 **Current focus (post-0.13): adoption before features.** The core promise is
