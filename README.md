@@ -16,7 +16,7 @@
   <em>the anchor lifecycle, real output: recall answers instantly, an edit flips the memory stale, a revert heals it</em>
 </p>
 
-The failure mode that kills AI coding assistants is not forgetting; it is remembering something that is no longer true. Vector stores, RAG pipelines, and markdown notes trust what they wrote forever, so an agent that still believes last month's version of a function is not unhelpful, it is confidently wrong. limpet anchors each memory to a normalized AST hash of the code it describes: rename or move the code and the memory follows, edit it and the memory goes visibly stale with a reason, revert and it heals. Noticing its own staleness is the entire premise, and no other open memory layer does it.
+The failure mode that kills AI coding assistants is not forgetting; it is remembering something that is no longer true. Vector stores trust similarity, time-decay tools trust the calendar, markdown notes trust forever, so an agent that still believes last month's version of a function is not unhelpful, it is confidently wrong. limpet anchors each memory to a normalized AST hash of the code it describes: rename or move the code and the memory follows, edit it and the memory goes visibly stale with a reason, revert and it heals. Noticing its own staleness is the entire premise, and no other open memory layer does it.
 
 ## ⏱️ 30 seconds to running
 
@@ -120,6 +120,20 @@ Rename-following is evidence-gated: a unique match on a trivial body (an empty f
 Staleness is also symmetric: revert the code (a rolled-back experiment, a `git checkout`) and the memory heals back to active on the next call, because the anchor hash matches again. No re-verification ritual for changes that un-happened. The same applies to invalidation: a branch switch, `git stash`, or mid-rebase state that makes files vanish briefly is not a death sentence: when the code comes back and the anchors resolve, the memory recovers. The only final state is `superseded`, which records a deliberate human decision rather than filesystem churn.
 
 Contradictions are explicit links: when a new memory contradicts an old one, both stay visible with the conflict flagged until one `supersedes` the other. History is never silently overwritten.
+
+## 🔬 Staleness models, compared
+
+Every memory tool eventually faces the same question: is this still true? Four answers dominate the market, and none of them can see a silent code change.
+
+| Staleness model | Typical of | What it cannot see |
+|---|---|---|
+| Time-based decay: memories age toward "needs review" on a schedule | memory tools with decay policies | Age is not truth. A calendar cannot name which memory a refactor broke five minutes ago, and it nags about stable knowledge that never changed. |
+| LLM-judged invalidation: a model decides new input contradicts an old fact | conversation memory layers | Fires only when something new is said. Code that drifts between sessions triggers nothing, so the memory stays confidently wrong. |
+| Embedding similarity | vector stores and RAG pipelines | A contradiction and a near-duplicate look identical to cosine similarity. |
+| Manual curation: "review your learnings periodically" | review-bot knowledge bases, wikis | A human garbage-collecting prose, on human time, after the damage. |
+| **Deterministic AST anchors (limpet)** | | Staleness is a fact computed from the code itself: the exact memory, the exact reason (`body_edited`, `anchor_lost`, `low_entropy`), on the next tool call after the edit. Reverting the code heals it. |
+
+The first four expire knowledge by guessing. limpet checks.
 
 ## 🪙 The receipts: token savings, measured
 
@@ -373,7 +387,7 @@ An optional `.limpet.json` at the repository root tunes two things. It is a plai
 
 ## 🧭 Roadmap
 
-See [ROADMAP.md](ROADMAP.md) for what has shipped (portable repo identity, the statusline doctor, the structural lineage graph, grammar wave 2 with eleven languages, and the 0.13 freshness pass: anchored-first sweep priority plus the evidence-gated low-entropy follow guard) and what is next (FQN disambiguation, then the 1.0 stability contract). One rule governs all of it: a feature ships only if it feeds a receipt (`limpet stats`, the benchmark, rework-avoided) or the honesty envelope.
+See [ROADMAP.md](ROADMAP.md) for what has shipped (portable repo identity, the statusline doctor, the structural lineage graph, grammar wave 2 with eleven languages, and the 0.13 freshness pass: anchored-first sweep priority plus the evidence-gated low-entropy follow guard) and what is next (FQN disambiguation, the refinement loop that closes the re-verification cycle, then the 1.0 stability contract). One rule governs all of it: a feature ships only if it feeds a receipt (`limpet stats`, the benchmark, rework-avoided) or the honesty envelope.
 
 ## ⚖️ Reliance and license
 
