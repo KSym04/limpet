@@ -8,7 +8,7 @@
 [![Platforms](https://img.shields.io/badge/macOS%20%7C%20Linux%20%7C%20Windows-supported-lightgrey.svg)](https://github.com/KSym04/limpet/actions/workflows/ci.yml)
 [![100% local](https://img.shields.io/badge/network%20calls-zero-blue.svg)](SECURITY.md)
 
-**Persistent memory for AI coding agents that knows when it has gone stale.** Everything your agent learns about a codebase (decisions, verified facts, failed approaches, gotchas) survives every session, anchored to the actual code it describes, and flips to `stale` the moment that code changes. One Rust binary, one SQLite file, standard MCP, zero network calls.
+**Memory for AI coding agents that goes stale when your code does.** Everything your agent learns about a codebase (decisions, verified facts, failed approaches, gotchas) survives every session, anchored to the actual code it describes, and flips to `stale` with the reason attached the moment that code moves on. One Rust binary, one SQLite file, standard MCP, zero network calls.
 
 <p align="center">
   <img src="docs/limpet-demo.svg" alt="animated demo: recall answers from memory, an edit flips it to stale with the reason, a revert heals it" width="860">
