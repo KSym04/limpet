@@ -45,7 +45,7 @@ fn seed() -> (TempDir, Store, Vec<(String, &'static str)>) {
                 }]
             })
             .unwrap_or_default();
-        let r = memory::remember(&store, kind, body, "explicit", None, &anchors, None, &[], None, false, None)
+        let r = memory::remember(&store, kind, body, "explicit", None, &anchors, None, &[], None, false, None, false)
             .unwrap();
         ids.push((r.id, body));
     };

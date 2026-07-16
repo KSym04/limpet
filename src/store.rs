@@ -10,7 +10,7 @@ use rusqlite::Connection;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 pub struct Store {
     pub conn: Connection,
@@ -127,6 +127,13 @@ CREATE TABLE IF NOT EXISTS inherits (
 CREATE INDEX IF NOT EXISTS idx_inherits_child  ON inherits(child_fqn);
 CREATE INDEX IF NOT EXISTS idx_inherits_parent ON inherits(parent_name);
 CREATE INDEX IF NOT EXISTS idx_inherits_file   ON inherits(file);
+
+-- Archival sidecar (schema v6): a row here hides the entry from recall, the
+-- verify queue, and map, without touching its status. See migrate_to_v6.
+CREATE TABLE IF NOT EXISTS archived (
+  entry_id    TEXT PRIMARY KEY,
+  archived_at TEXT NOT NULL
+);
 "#;
 
 /// Schema v2 (lazy migration): `private` marks a memory that must never
@@ -267,6 +274,28 @@ fn migrate_to_v5(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Schema v6 (lazy migration): the additive `archived` sidecar table.
+/// Archival is deliberately NOT a status value: admitting 'archived' into the
+/// entries.status CHECK would force a rebuild of the core table, and status
+/// must keep tracking reality (stale/heal) while an entry is shelved. A row
+/// here means "hidden from recall, the verify queue, and map"; deleting the
+/// row restores the entry with its CURRENT, truthful status. Same idempotent
+/// CREATE TABLE IF NOT EXISTS pattern as v3; no data is touched.
+fn migrate_to_v6(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS archived (
+           entry_id    TEXT PRIMARY KEY,
+           archived_at TEXT NOT NULL
+         );",
+    )?;
+    conn.execute(
+        "INSERT INTO meta_kv(k, v) VALUES('schema_version', ?1)
+         ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+        [SCHEMA_VERSION.to_string()],
+    )?;
+    Ok(())
+}
+
 impl Store {
     /// Open (creating if needed) the store at an explicit database path.
     pub fn open(db_path: &Path) -> Result<Store> {
@@ -284,6 +313,7 @@ impl Store {
         migrate_to_v3(&conn)?;
         migrate_to_v4(&conn)?;
         migrate_to_v5(&conn)?;
+        migrate_to_v6(&conn)?;
         Ok(Store { conn, session_base: std::cell::Cell::new(Ledger::default()) })
     }
 
@@ -296,6 +326,7 @@ impl Store {
         migrate_to_v3(&conn)?;
         migrate_to_v4(&conn)?;
         migrate_to_v5(&conn)?;
+        migrate_to_v6(&conn)?;
         Ok(Store { conn, session_base: std::cell::Cell::new(Ledger::default()) })
     }
 
@@ -495,12 +526,13 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT id, kind, body, created_at, updated_at, source, confidence,
                     status, stale_reason, branch, evidence_cmd, evidence_digest,
-                    evidence_ran_at, origin
+                    evidence_ran_at, origin,
+                    EXISTS(SELECT 1 FROM archived a WHERE a.entry_id = entries.id)
              FROM entries WHERE private = 0 ORDER BY id",
         )?;
         let ids: Vec<serde_json::Value> = stmt
             .query_map([], |r| {
-                Ok(serde_json::json!({
+                let mut obj = serde_json::json!({
                     "id": r.get::<_, String>(0)?,
                     "kind": r.get::<_, String>(1)?,
                     "body": r.get::<_, String>(2)?,
@@ -515,7 +547,13 @@ impl Store {
                     "evidence_digest": r.get::<_, Option<String>>(11)?,
                     "evidence_ran_at": r.get::<_, Option<String>>(12)?,
                     "origin": r.get::<_, Option<String>>(13)?,
-                }))
+                });
+                // Archival travels with the export (hidden is not lost), but
+                // only archived entries pay for the field on the wire.
+                if r.get::<_, bool>(14)? {
+                    obj["archived"] = serde_json::json!(true);
+                }
+                Ok(obj)
             })?
             .collect::<rusqlite::Result<_>>()?;
 
@@ -599,12 +637,18 @@ impl Store {
             let id = obj["id"].as_str().context("entry missing id")?.to_string();
             let incoming_updated = obj["updated_at"].as_str().unwrap_or_default();
 
-            // A future timestamp would win the LWW merge against every honest
-            // later update forever (denial-of-correction). Treat future or
-            // unparseable stamps as lowest priority.
+            // A far-future timestamp would win the LWW merge against every
+            // honest later update forever (denial-of-correction). Treat such
+            // stamps, and unparseable ones, as lowest priority. A bounded
+            // skew allowance is deliberate: peers' wall clocks genuinely
+            // differ, and archive/restore mint a strictly-newer stamp that
+            // can sit a second ahead of this machine's clock. An hour of
+            // skew cannot poison the merge durably; it ages out within the
+            // hour.
+            const MAX_FUTURE_SKEW_SECS: i64 = 3600;
             if let Some(secs) = crate::memory::parse_iso_secs(incoming_updated) {
                 if let Some(now_secs) = crate::memory::parse_iso_secs(&now) {
-                    if secs > now_secs {
+                    if secs > now_secs + MAX_FUTURE_SKEW_SECS {
                         report.rejected += 1;
                         continue;
                     }
@@ -624,6 +668,40 @@ impl Store {
                 continue;
             }
             if body.len() > crate::memory::MAX_BODY_BYTES {
+                report.rejected += 1;
+                continue;
+            }
+
+            // Provenance is enforced on this write path too (truth layer,
+            // 0.14). An unknown source would abort the WHOLE import at the
+            // schema CHECK; reject just the line. `verified` is earned, not
+            // claimed: a line asserting it with no evidence command would
+            // mint the verified ranking boost with nothing to re-verify, so
+            // it is rejected the same way `remember` refuses it.
+            let source = obj["source"].as_str().unwrap_or("explicit");
+            if !crate::memory::SOURCES.contains(&source) {
+                report.rejected += 1;
+                continue;
+            }
+            if source == "verified" && ev_cmd.is_empty() {
+                report.rejected += 1;
+                continue;
+            }
+            // Same per-line rule for kind, status, and an empty body: any of
+            // these would otherwise reach a schema CHECK (or store a blank
+            // memory remember refuses) and abort the whole batch, including
+            // the silent first-run bootstrap import.
+            let kind = obj["kind"].as_str().unwrap_or("insight");
+            if !crate::memory::KINDS.contains(&kind) {
+                report.rejected += 1;
+                continue;
+            }
+            let status = obj["status"].as_str().unwrap_or("active");
+            if !["active", "stale", "invalidated", "superseded"].contains(&status) {
+                report.rejected += 1;
+                continue;
+            }
+            if body.trim().is_empty() {
                 report.rejected += 1;
                 continue;
             }
@@ -689,9 +767,16 @@ impl Store {
                             report.links_dropped += 1;
                             continue;
                         }
+                        let rel = l["rel"].as_str().unwrap_or("supports");
+                        if !["supports", "contradicts", "supersedes"].contains(&rel) {
+                            // An unknown rel would abort the batch at the
+                            // schema CHECK; drop and count it instead.
+                            report.links_dropped += 1;
+                            continue;
+                        }
                         tx.execute(
                             "INSERT OR IGNORE INTO links(src, dst, rel) VALUES (?1,?2,?3)",
-                            rusqlite::params![id, dst, l["rel"].as_str().unwrap_or("supports")],
+                            rusqlite::params![id, dst, rel],
                         )?;
                     }
                 }
@@ -714,15 +799,22 @@ impl Store {
                    origin=COALESCE(excluded.origin, origin)",
                 rusqlite::params![
                     id,
-                    obj["kind"].as_str().unwrap_or("insight"),
-                    obj["body"].as_str().unwrap_or_default(),
+                    kind,
+                    body,
                     obj["created_at"].as_str().unwrap_or_default(),
                     incoming_updated,
-                    obj["source"].as_str().unwrap_or("explicit"),
-                    // Clamp: an imported 1e300 would pin a hostile memory to
-                    // the top of every recall (schema has no CHECK on this).
-                    crate::memory::quantize_confidence(obj["confidence"].as_f64().unwrap_or(0.5)),
-                    obj["status"].as_str().unwrap_or("active"),
+                    source,
+                    // Clamp AND cap per source: an imported 1e300 would pin a
+                    // hostile memory to the top of every recall (schema has no
+                    // CHECK on this), and an explicit claim typed at 1.0 must
+                    // respect the same ceiling the live remember path enforces.
+                    crate::memory::quantize_confidence(
+                        obj["confidence"]
+                            .as_f64()
+                            .unwrap_or(0.5)
+                            .min(crate::memory::import_confidence_cap(source)),
+                    ),
+                    status,
                     obj["stale_reason"].as_str(),
                     obj["branch"].as_str(),
                     obj["evidence_cmd"].as_str(),
@@ -731,6 +823,18 @@ impl Store {
                     origin,
                 ],
             )?;
+            // Archival travels with the line: a winning (added/updated) line
+            // dictates visibility on this machine too. Absent or false means
+            // visible, so a restore propagates the same way an archive does.
+            if obj["archived"].as_bool() == Some(true) {
+                tx.execute(
+                    "INSERT INTO archived(entry_id, archived_at) VALUES (?1, ?2)
+                     ON CONFLICT(entry_id) DO NOTHING",
+                    rusqlite::params![id, now],
+                )?;
+            } else {
+                tx.execute("DELETE FROM archived WHERE entry_id = ?1", [&id])?;
+            }
             tx.execute("DELETE FROM anchors WHERE entry_id = ?1", [&id])?;
             if let Some(anchors) = obj["anchors"].as_array() {
                 for a in anchors {
@@ -779,9 +883,16 @@ impl Store {
                         report.links_dropped += 1;
                         continue;
                     }
+                    let rel = l["rel"].as_str().unwrap_or("supports");
+                    if !["supports", "contradicts", "supersedes"].contains(&rel) {
+                        // An unknown rel would abort the batch at the schema
+                        // CHECK; drop and count it instead.
+                        report.links_dropped += 1;
+                        continue;
+                    }
                     tx.execute(
                         "INSERT OR IGNORE INTO links(src, dst, rel) VALUES (?1,?2,?3)",
-                        rusqlite::params![id, dst, l["rel"].as_str().unwrap_or("supports")],
+                        rusqlite::params![id, dst, rel],
                     )?;
                 }
             }
@@ -1134,7 +1245,7 @@ mod tests {
             .unwrap();
         assert_eq!(private, 0, "pre-existing rows default to not-private");
         assert_eq!(origin, None);
-        assert_eq!(s.kv_get("schema_version").unwrap().as_deref(), Some("5"));
+        assert_eq!(s.kv_get("schema_version").unwrap().as_deref(), Some("6"));
     }
 
     #[test]
@@ -1237,7 +1348,7 @@ mod tests {
             .conn
             .query_row("SELECT v FROM meta_kv WHERE k='schema_version'", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(ver, "5");
+        assert_eq!(ver, "6");
         // Insert + read back an edge (CHECK constraint honored).
         store
             .conn
@@ -1276,7 +1387,7 @@ mod tests {
             .conn
             .query_row("SELECT v FROM meta_kv WHERE k='schema_version'", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(ver, "5");
+        assert_eq!(ver, "6");
         for rel in ["embeds", "mixin", "extends"] {
             store
                 .conn
@@ -1335,7 +1446,7 @@ mod tests {
             [], |r| r.get(0),
         ).unwrap();
         assert_eq!(present, 1, "fresh DDL must carry body_len");
-        assert_eq!(s.kv_get("schema_version").unwrap().as_deref(), Some("5"));
+        assert_eq!(s.kv_get("schema_version").unwrap().as_deref(), Some("6"));
     }
 
     #[test]

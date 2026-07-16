@@ -76,12 +76,12 @@ Three properties make it work, and nobody else combines them: **anchored** (AST 
 
 | Tool | What it does |
 |---|---|
-| `recall` | Task description in, token-budgeted ranked memory pack out. Stale and contradicted items are always flagged, never hidden. |
-| `remember` | Store a memory: `fact`, `decision`, `episode`, `insight`, or `intent`. Anchor it to code. Attach evidence to make it verified. `private: true` keeps a memory local (recalled here, withheld from export); `origin` makes writes idempotent for seeding flows. |
+| `recall` | Task description in, token-budgeted ranked memory pack out. Stale and contradicted items are always flagged, never hidden. Verified facts outrank unverified claims at equal relevance; an item without a `source` field is an unverified claim, not a proof. |
+| `remember` | Store a memory: `fact`, `decision`, `episode`, `insight`, or `intent`. Anchor it to code. Attach evidence to make it verified. A near-identical body on the same anchor is refused (naming the existing id to supersede; `force: true` overrides), and a same-anchor memory asserting a divergent value comes back as `possible_conflicts` so contradictions are caught at write time. `private: true` keeps a memory local (recalled here, withheld from export); `origin` makes writes idempotent for seeding flows. |
 | `map` | Structural outline of a file or symbol plus every memory attached to it. For a symbol target it also returns `lineage` (ancestors, descendants, callers) with each edge labeled `unique`/`ambiguous`/`unresolved`. Code and knowledge in one answer. |
 | `affected` | What does my uncommitted diff touch: symbols, memories now at risk, and decisions constraining the code being edited. |
 | `verify_queue` | Verified facts whose anchored code changed, each with the exact command that originally proved it. |
-| `admin` | index, status, forget, export / import (guarded), ledger / ledger_reset (the savings receipt). Export reports `private_withheld` so callers know how many memories stayed local. |
+| `admin` | index, status, forget, archive / restore, export / import (guarded), ledger / ledger_reset (the savings receipt). Archive shelves a memory without deleting it: hidden from recall while its staleness keeps tracking the code, restored with its current truthful status, and still exported (flagged) so nothing hidden is ever lost. Export reports `private_withheld` so callers know how many memories stayed local. |
 
 Every response is wrapped in the honesty envelope:
 
@@ -289,8 +289,12 @@ Everyday commands:
 | `limpet statusline` | the statusline segment (memories + tokens saved), read-only and instant |
 | `limpet hook` | one-line SessionStart brief for Claude Code hooks, read-only |
 | `limpet update` | self-update to the latest release, checksum-verified (the only networked command) |
+| `limpet demo` | the anchor lifecycle (active → stale → healed) on a throwaway repo, self-verifying |
+| `limpet seed <file>` | ingest an existing MEMORY.md / CLAUDE.md into anchored memory; re-runs are no-ops |
 
-Data lives under `~/.local/share/limpet/`, one SQLite store per repository. Teammates run `limpet import` after pulling the JSONL.
+Data lives under `~/.local/share/limpet/`, one SQLite store per repository. Teammates run `limpet import` after pulling the JSONL (`--path <repo-relative file>` imports a different export).
+
+**Keep your MEMORY.md.** `limpet seed MEMORY.md` chunks a plain notes file into individual memories: bullets and paragraphs become entries, a chunk that names a repo file is anchored to it (so it goes stale when that file changes), and everything seeds as `mined` (lower trust than verified facts until re-confirmed). Re-running on an unchanged file is a no-op. A **reworded** note is different: its old wording is already stored, so the write-path dedup refuses the new one and the report says so; re-run with `--force` to store the new wording too, then supersede the old from the agent side.
 
 **Statusline on any platform.** `limpet statusline --root <project dir>` prints the shell segment (`| 🐚 13 · ↑32k tokens saved`, with the count hyperlinking to the project's graph when the UI is running) or nothing at all: it opens the store strictly read-only, never writes, and always exits 0, so it can sit in a prompt safely. Because the rendering lives in the binary, the same one-liner works from a bash statusline on macOS/Linux and a PowerShell or cmd statusline on Windows, with no sqlite3 CLI and no bash required:
 
@@ -342,7 +346,7 @@ Toggle it off with `/limpet statusline` (writes `~/.claude/.limpet-statusline-of
 
 Legacy encodings degrade gracefully: a grammar-matched file that is not valid UTF-8 (CP949 or UTF-16 source in an old C++ engine, say) keeps its file-level anchor instead of disappearing from the index. A grammar can only ever upgrade a file, never make it less anchorable.
 
-What the walk skips, deliberately: everything in `.gitignore`, everything in an optional `.limpetignore` (gitignore syntax, works even outside a git repo), `node_modules`/`vendor`/`target`/`dist`/`build`, hidden junk, `*.min.*` assets, and files over 8MB. Source files over 512KB are indexed at file level but never parsed for symbols: the cap protects tree-sitter from generated bundles, and a giant hand-written translation unit stays anchorable instead of vanishing. Those bounds are what keep a large vendored dependency tree with no `.gitignore` from pegging your CPU; use `.limpetignore` to opt out anything else.
+What the walk skips, deliberately: everything in `.gitignore`, everything in an optional `.limpetignore` (gitignore syntax, works even outside a git repo), and a built-in set of near-universally generated or vendored trees (`node_modules`, `vendor`, `target`, `dist`, `build`, `__pycache__`, `.venv`/`venv`, Python caches, `.next`/`.nuxt`/`.svelte-kit`, `Pods`, `.gradle`, `bower_components`, `coverage`, `.terraform`), hidden junk, `*.min.*` assets, and files over 8MB. Source files over 512KB are indexed at file level but never parsed for symbols: the cap protects tree-sitter from generated bundles, and a giant hand-written translation unit stays anchorable instead of vanishing. Those bounds are what keep a large vendored dependency tree with no `.gitignore` from pegging your CPU; use `.limpetignore` to opt out anything else.
 
 There is no LSP, no type inference, and no claim of a publishable call graph: the index exists to give memory anchor points, invalidation, and recall locality. Every shipped grammar has fixture coverage in the test suite; languages are added when they can be tested, not when they pad a number.
 
@@ -387,7 +391,7 @@ An optional `.limpet.json` at the repository root tunes two things. It is a plai
 
 ## 🧭 Roadmap
 
-See [ROADMAP.md](ROADMAP.md) for what has shipped (portable repo identity, the statusline doctor, the structural lineage graph, grammar wave 2 with eleven languages, and the 0.13 freshness pass: anchored-first sweep priority plus the evidence-gated low-entropy follow guard) and what is next (FQN disambiguation, the refinement loop that closes the re-verification cycle, then the 1.0 stability contract). One rule governs all of it: a feature ships only if it feeds a receipt (`limpet stats`, the benchmark, rework-avoided) or the honesty envelope.
+See [ROADMAP.md](ROADMAP.md) for what has shipped (portable repo identity, the statusline doctor, the structural lineage graph, grammar wave 2 with eleven languages, and the 0.13 freshness pass: anchored-first sweep priority plus the evidence-gated low-entropy follow guard), what this release carries (the 0.14 truth layer: verification as a ranking signal, contradictions surfaced and duplicates refused at write time), and what is next (FQN disambiguation, the refinement loop that closes the re-verification cycle, then the 1.0 stability contract). One rule governs all of it: a feature ships only if it feeds a receipt (`limpet stats`, the benchmark, rework-avoided) or the honesty envelope.
 
 ## ⚖️ Reliance and license
 

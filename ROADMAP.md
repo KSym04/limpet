@@ -14,10 +14,11 @@ A deterministic AST-hash anchor is the only thing that flags the lie. Everything
 not ship.
 
 **Current focus (post-0.13): adoption before features.** The core promise is
-built and receipted; the bottleneck is people using it. Between 0.13 and 0.14
-the work is documentation sharpness, a short demo of the anchor lifecycle
-(anchor → edit → stale → heal), and getting limpet in front of MCP users.
-Feature work resumes with the evidence gates below unchanged.
+built and receipted; the bottleneck is people using it. The 0.14 truth-layer
+release carries that focus in the binary: `limpet demo` is the reproducible
+anchor-lifecycle proof (anchor → edit → stale → heal, self-verifying), and
+`limpet seed` lets a working MEMORY.md come along instead of being abandoned.
+Feature work continues under the evidence gates below, unchanged.
 
 ## Shipped
 
@@ -51,7 +52,37 @@ built.
   a trivial twin; it heals the moment the original returns. On pre-v5 stores
   the guard hardens progressively as the sweep refills.
 
-## v0.14.0: freshness at scale, part 2
+## v0.14.0: the truth layer (in flight)
+
+A claim and a proven fact used to look identical at recall, so the tool could
+confidently repeat a past mistake. This release makes verification a
+first-class signal on both the read and write paths, and ships the adoption
+bridge.
+
+- **Verification ranks.** `verified` (evidence on file) earns a ranking boost;
+  an unverified explicit claim is downranked, so truth wins ties. Typed
+  confidence on unverified memories is capped below what `verified` earns:
+  swagger cannot outrank proof. Gate held: the token bench stayed over 4.0x
+  and the recall-quality suite pins the behavior.
+- **Contradiction surfacing at write** (pulled forward from the refinement
+  loop). A new memory landing on an anchor whose existing memory asserts a
+  divergent value (a flipped number, an added negation) returns
+  `possible_conflicts` naming the old id, so the writer supersedes
+  deliberately. Surfaced, never auto-linked: invariant I4 holds.
+- **Dedup enforced at write.** A near-identical body on the same anchor is
+  refused, naming the existing id and the supersede path; `force: true` stores
+  anyway. A correction with a new value is never refused: blocking it would
+  freeze a past mistake in place.
+- **Archival.** `admin archive` shelves a memory without deleting it: hidden
+  from recall, the verify queue, and map, while its staleness keeps tracking
+  the code underneath; `restore` brings it back with its current, truthful
+  status. Archived entries still export (flagged), so hidden is never lost.
+- **Adoption bridge.** `limpet demo` (the self-verifying lifecycle proof, also
+  a CI smoke test on every platform) and `limpet seed` (ingest a MEMORY.md as
+  `mined`, idempotently). Plus wider default ignores for generated trees and a
+  hot-path panic ratchet in CI.
+
+## v0.15: freshness at scale, part 2
 
 - **Full FQN disambiguation** (deferred from grammar wave 2): trait impls, C++
   overloads, and nested modules currently share FQNs; the `(fqn, hash)`
@@ -62,13 +93,14 @@ built.
   first; if sweep prioritization keeps anchored-file staleness latency
   acceptable, the watcher (and its per-platform risk surface) stays unbuilt.
 
-## v0.15: the refinement loop
+## v0.16: the refinement loop
 
 The staleness engine closes the detect half of refinement: rot is flagged
-deterministically and nothing goes stale silently. This milestone closes the
-write-back half, so a flagged memory has a first-class path back to trusted
-instead of a manual supersede. It must land before the v1.0 freeze because
-`reverify` adds a tool op and the tool API freezes at 1.0.
+deterministically and nothing goes stale silently. The 0.14 truth layer closed
+the write-time half (conflicts surfaced, duplicates refused). This milestone
+closes the re-verification half, so a flagged memory has a first-class path
+back to trusted instead of a manual supersede. It must land before the v1.0
+freeze because `reverify` adds a tool op and the tool API freezes at 1.0.
 
 - **`reverify` op.** `verify_queue` hands out the proving command but nothing
   accepts the result; the only closure today is a new entry plus a supersedes
@@ -83,11 +115,6 @@ instead of a manual supersede. It must land before the v1.0 freeze because
   pre-stale confidence and restore it when the same hash returns. Gate: a
   fixture proving a branch-switch round trip is confidence-neutral. This is
   the "decay once per reason" principle applied to reasons that evaporate.
-- **Anchor-collision surfacing at write.** `remember` surfaces FTS
-  near-duplicates, but a new memory landing on an anchor that already holds
-  an active decision should surface that decision in the write result so the
-  writer links `contradicts` or `supersedes` deliberately. Gate: invariant I4
-  holds, surfaced never auto-linked.
 - **Assisted consolidation.** Episodes accumulate forever; there is no
   assisted path to distill a cluster (same anchor, high body overlap) into
   one insight that supersedes its parts. An admin op lists merge candidates;

@@ -34,7 +34,7 @@ fn remember_anchors_and_reports_duplicates() {
         &[],
         Some("main"),
         false,
-        None,
+        None, false,
     )
     .unwrap();
     assert_eq!(first.anchored, 1);
@@ -52,7 +52,7 @@ fn remember_anchors_and_reports_duplicates() {
         &[],
         Some("main"),
         false,
-        None,
+        None, false,
     )
     .unwrap();
     assert!(
@@ -82,7 +82,7 @@ fn unknown_symbol_fails_with_suggestions() {
         &[],
         None,
         false,
-        None,
+        None, false,
     )
     .unwrap_err();
     let msg = err.to_string();
@@ -111,7 +111,7 @@ fn unresolvable_anchor_fails_loud_and_writes_nothing() {
         &[],
         None,
         false,
-        None,
+        None, false,
     )
     .unwrap_err();
     let msg = err.to_string();
@@ -144,7 +144,7 @@ fn failed_symbol_anchor_leaves_no_orphan_entry() {
         &[],
         None,
         false,
-        None,
+        None, false,
     )
     .unwrap_err();
     let entries: i64 = store
@@ -170,7 +170,7 @@ fn file_anchor_stores_content_hash_at_write_time() {
         &[],
         None,
         false,
-        None,
+        None, false,
     )
     .unwrap();
     assert_eq!(r.anchored, 1);
@@ -191,7 +191,7 @@ fn verified_without_evidence_is_refused() {
     let dir = TempDir::new().unwrap();
     let store = seeded_store(dir.path());
     let err = memory::remember(
-        &store, "fact", "claims to be proven", "verified", None, &[], None, &[], None, false, None,
+        &store, "fact", "claims to be proven", "verified", None, &[], None, &[], None, false, None, false,
     )
     .unwrap_err();
     assert!(err.to_string().contains("evidence"), "{err}");
@@ -217,7 +217,7 @@ fn ambiguous_bare_name_is_refused_with_candidates() {
         &[],
         None,
         false,
-        None,
+        None, false,
     )
     .unwrap_err();
     let msg = err.to_string();
@@ -229,16 +229,16 @@ fn ambiguous_bare_name_is_refused_with_candidates() {
 fn kind_and_source_validation() {
     let dir = TempDir::new().unwrap();
     let store = seeded_store(dir.path());
-    assert!(memory::remember(&store, "vibe", "x", "explicit", None, &[], None, &[], None, false, None).is_err());
-    assert!(memory::remember(&store, "fact", "", "explicit", None, &[], None, &[], None, false, None).is_err());
-    assert!(memory::remember(&store, "fact", "x", "psychic", None, &[], None, &[], None, false, None).is_err());
+    assert!(memory::remember(&store, "vibe", "x", "explicit", None, &[], None, &[], None, false, None, false).is_err());
+    assert!(memory::remember(&store, "fact", "", "explicit", None, &[], None, &[], None, false, None, false).is_err());
+    assert!(memory::remember(&store, "fact", "x", "psychic", None, &[], None, &[], None, false, None, false).is_err());
 }
 
 #[test]
 fn mined_confidence_is_capped() {
     let dir = TempDir::new().unwrap();
     let store = seeded_store(dir.path());
-    let r = memory::remember(&store, "episode", "tried X, failed", "mined", Some(0.9), &[], None, &[], None, false, None)
+    let r = memory::remember(&store, "episode", "tried X, failed", "mined", Some(0.9), &[], None, &[], None, false, None, false)
         .unwrap();
     let conf: f64 = store
         .conn
@@ -251,7 +251,7 @@ fn mined_confidence_is_capped() {
 fn contradiction_keeps_both_supersede_resolves() {
     let dir = TempDir::new().unwrap();
     let store = seeded_store(dir.path());
-    let old = memory::remember(&store, "fact", "timeout is 30 seconds", "explicit", None, &[], None, &[], None, false, None)
+    let old = memory::remember(&store, "fact", "timeout is 30 seconds", "explicit", None, &[], None, &[], None, false, None, false)
         .unwrap();
     let new = memory::remember(
         &store,
@@ -264,7 +264,7 @@ fn contradiction_keeps_both_supersede_resolves() {
         &[LinkSpec { target: old.id.clone(), rel: "contradicts".into() }],
         None,
         false,
-        None,
+        None, false,
     )
     .unwrap();
 
@@ -310,7 +310,7 @@ fn contradiction_keeps_both_supersede_resolves() {
 fn link_to_missing_target_fails() {
     let dir = TempDir::new().unwrap();
     let store = seeded_store(dir.path());
-    let r = memory::remember(&store, "fact", "x", "explicit", None, &[], None, &[], None, false, None).unwrap();
+    let r = memory::remember(&store, "fact", "x", "explicit", None, &[], None, &[], None, false, None, false).unwrap();
     assert!(memory::add_link(&store, &r.id, "01НЕСУЩЕСТВУЕТ", "supports").is_err());
     assert!(memory::add_link(&store, &r.id, &r.id, "invalid_rel").is_err());
 }
@@ -347,6 +347,121 @@ fn import_rejects_secrets_future_dates_and_clamps_confidence() {
     assert!(conf <= 1.0, "confidence must be clamped, got {conf}");
 }
 
+/// The evidence COMMAND persists raw and exports verbatim into a git-committed
+/// JSONL, so it gets the same secret guard as the body. The output is only
+/// ever stored as a digest; the command is the one evidence field that can
+/// leak. An empty command is refused too: it would be unverifiable by
+/// construction while still earning the verified ranking boost.
+#[test]
+fn evidence_command_is_guarded_like_the_body() {
+    let dir = TempDir::new().unwrap();
+    let store = seeded_store(dir.path());
+
+    let secret_cmd = memory::Evidence {
+        command: "curl -H 'Authorization: Bearer ghp_1234567890abcdefghijklmnopqrstuvwxyz' https://api.example.com".into(),
+        output: "200".into(),
+    };
+    let err = memory::remember(
+        &store, "fact", "the api answers 200 when healthy", "explicit", None, &[],
+        Some(&secret_cmd), &[], None, false, None, false,
+    )
+    .expect_err("a credential in the evidence command must be refused");
+    assert!(format!("{err:#}").contains("evidence command"), "unexpected: {err:#}");
+
+    let empty_cmd = memory::Evidence { command: "   ".into(), output: "200".into() };
+    let err = memory::remember(
+        &store, "fact", "the api answers 200 when healthy", "explicit", None, &[],
+        Some(&empty_cmd), &[], None, false, None, false,
+    )
+    .expect_err("an empty evidence command is unverifiable and must be refused");
+    assert!(format!("{err:#}").contains("evidence command"), "unexpected: {err:#}");
+}
+
+/// Import is the second write path; the truth layer must hold there too. A
+/// hostile line claiming `verified` with no evidence would otherwise mint the
+/// ranking boost with nothing to re-verify; a typed confidence above the
+/// explicit cap would rank as if earned; an unknown source string would abort
+/// the WHOLE import at the schema CHECK instead of rejecting one line.
+#[test]
+fn import_enforces_the_truth_layer_on_the_second_write_path() {
+    use std::io::BufReader;
+    let dir = TempDir::new().unwrap();
+    let mut store = seeded_store(dir.path());
+
+    let lines = concat!(
+        // Forged provenance: verified without evidence. Must be rejected.
+        r#"{"id":"01FORGED0000000000000000AA","kind":"fact","body":"trust me it is proven","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","source":"verified","confidence":1.0,"status":"active","anchors":[],"links":[]}"#, "\n",
+        // Typed swagger on an unverified claim: stored, but capped at the
+        // explicit ceiling so it can never rank at verified levels.
+        r#"{"id":"01SWAGGER000000000000000BB","kind":"fact","body":"swaggering unverified claim","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","source":"explicit","confidence":1.0,"status":"active","anchors":[],"links":[]}"#, "\n",
+        // Unknown source: reject the LINE, not the whole import.
+        r#"{"id":"01BADSRC0000000000000000CC","kind":"fact","body":"claims a source that does not exist","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","source":"psychic","confidence":0.5,"status":"active","anchors":[],"links":[]}"#, "\n",
+        // Legit verified WITH evidence: stored, confidence at most 0.95.
+        r#"{"id":"01LEGITV0000000000000000DD","kind":"fact","body":"honestly proven elsewhere","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","source":"verified","confidence":1.0,"status":"active","evidence_cmd":"echo ok","evidence_digest":"abc","evidence_ran_at":"2026-01-01T00:00:00Z","anchors":[],"links":[]}"#, "\n",
+        // Mined stays at its documented 0.5 ceiling.
+        r#"{"id":"01MINED00000000000000000EE","kind":"fact","body":"mined from history somewhere","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","source":"mined","confidence":0.9,"status":"active","anchors":[],"links":[]}"#, "\n",
+    );
+    let report = store
+        .import_jsonl(&mut BufReader::new(lines.as_bytes()))
+        .unwrap();
+    assert_eq!(report.rejected, 2, "forged-verified and unknown-source lines rejected: {report:?}");
+    assert_eq!(report.added, 3, "swagger (capped), legit verified, and mined applied: {report:?}");
+
+    let forged: i64 = store
+        .conn
+        .query_row("SELECT COUNT(*) FROM entries WHERE id = '01FORGED0000000000000000AA'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(forged, 0, "verified-without-evidence must never enter the store");
+
+    let swagger: f64 = store
+        .conn
+        .query_row("SELECT confidence FROM entries WHERE id = '01SWAGGER000000000000000BB'", [], |r| r.get(0))
+        .unwrap();
+    assert!(swagger <= 0.85, "imported explicit confidence must respect the cap, got {swagger}");
+
+    let legit: f64 = store
+        .conn
+        .query_row("SELECT confidence FROM entries WHERE id = '01LEGITV0000000000000000DD'", [], |r| r.get(0))
+        .unwrap();
+    assert!(legit <= 0.95, "imported verified confidence caps at the earned ceiling, got {legit}");
+
+    let mined: f64 = store
+        .conn
+        .query_row("SELECT confidence FROM entries WHERE id = '01MINED00000000000000000EE'", [], |r| r.get(0))
+        .unwrap();
+    assert!(mined <= 0.5, "imported mined confidence caps at 0.5, got {mined}");
+}
+
+/// One malformed line must never abort the whole import: an unknown kind,
+/// unknown status, empty body, or unknown link rel would otherwise hit a
+/// schema CHECK constraint and roll back EVERY line, including during the
+/// silent first-run bootstrap import. Each is a per-line rejection.
+#[test]
+fn import_rejects_malformed_lines_without_aborting_the_batch() {
+    use std::io::BufReader;
+    let dir = TempDir::new().unwrap();
+    let mut store = seeded_store(dir.path());
+
+    let lines = concat!(
+        r#"{"id":"01BADKIND000000000000000AA","kind":"note","body":"claims a kind that does not exist","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","source":"explicit","confidence":0.5,"status":"active","anchors":[],"links":[]}"#, "\n",
+        r#"{"id":"01BADSTAT000000000000000BB","kind":"fact","body":"claims the archived pseudo status","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","source":"explicit","confidence":0.5,"status":"archived","anchors":[],"links":[]}"#, "\n",
+        r#"{"id":"01EMPTYB0000000000000000CC","kind":"fact","body":"","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","source":"explicit","confidence":0.5,"status":"active","anchors":[],"links":[]}"#, "\n",
+        r#"{"id":"01GOODLN0000000000000000DD","kind":"fact","body":"a perfectly ordinary imported fact","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","source":"explicit","confidence":0.5,"status":"active","anchors":[],"links":[{"dst":"01GOODLN0000000000000000DD","rel":"replaces"}]}"#, "\n",
+    );
+    let report = store
+        .import_jsonl(&mut BufReader::new(lines.as_bytes()))
+        .expect("a malformed line must not abort the import");
+    assert_eq!(report.rejected, 3, "bad kind, bad status, empty body: {report:?}");
+    assert_eq!(report.added, 1, "the good line still applies: {report:?}");
+    assert_eq!(report.links_dropped, 1, "the unknown link rel is dropped, not fatal: {report:?}");
+
+    let good: i64 = store
+        .conn
+        .query_row("SELECT COUNT(*) FROM entries WHERE id = '01GOODLN0000000000000000DD'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(good, 1, "the good line must survive its bad neighbors");
+}
+
 #[test]
 fn import_reresolves_anchor_hash_against_local_index() {
     use std::io::BufReader;
@@ -378,7 +493,7 @@ fn oversize_body_is_refused() {
     let dir = TempDir::new().unwrap();
     let store = seeded_store(dir.path());
     let huge = "x".repeat(70 * 1024);
-    let err = memory::remember(&store, "fact", &huge, "explicit", None, &[], None, &[], None, false, None)
+    let err = memory::remember(&store, "fact", &huge, "explicit", None, &[], None, &[], None, false, None, false)
         .unwrap_err();
     assert!(err.to_string().contains("limit"), "{err}");
 }
@@ -393,7 +508,7 @@ fn penalized_confidence_stays_clean_and_roundtrips() {
     index::full_index(&store, root).unwrap();
     let a = memory::remember(
         &store, "fact", "f body", "explicit", Some(0.8),
-        &[AnchorSpec { file: "s.py".into(), symbol: Some("f".into()) }], None, &[], None, false, None,
+        &[AnchorSpec { file: "s.py".into(), symbol: Some("f".into()) }], None, &[], None, false, None, false,
     )
     .unwrap();
     // Edit the body several times to drive repeated resolution/penalty.
@@ -429,7 +544,7 @@ fn jsonl_roundtrip_is_lossless() {
         &[],
         Some("main"),
         false,
-        None,
+        None, false,
     )
     .unwrap();
     let _b = memory::remember(
@@ -443,7 +558,7 @@ fn jsonl_roundtrip_is_lossless() {
         &[LinkSpec { target: a.id.clone(), rel: "supports".into() }],
         None,
         false,
-        None,
+        None, false,
     )
     .unwrap();
 
@@ -483,12 +598,12 @@ fn origin_dedup_rejects_second_write_naming_existing_id() {
     let store = seeded_store(dir.path());
     let first = memory::remember(
         &store, "decision", "auth uses JWT", "explicit", None, &[], None, &[], None,
-        false, Some("scan:git:abc123"),
+        false, Some("scan:git:abc123"), false,
     )
     .unwrap();
     let err = memory::remember(
         &store, "decision", "different body, same source commit", "explicit", None, &[], None, &[], None,
-        false, Some("scan:git:abc123"),
+        false, Some("scan:git:abc123"), false,
     )
     .unwrap_err()
     .to_string();
@@ -506,7 +621,7 @@ fn empty_origin_is_refused() {
     let dir = TempDir::new().unwrap();
     let store = seeded_store(dir.path());
     let err = memory::remember(
-        &store, "fact", "x", "explicit", None, &[], None, &[], None, false, Some("  "),
+        &store, "fact", "x", "explicit", None, &[], None, &[], None, false, Some("  "), false,
     )
     .unwrap_err()
     .to_string();
@@ -519,7 +634,7 @@ fn private_and_origin_are_stored() {
     let store = seeded_store(dir.path());
     let r = memory::remember(
         &store, "insight", "kept off the shared export", "explicit", None, &[], None, &[], None,
-        true, Some("scan:mem:notes.md"),
+        true, Some("scan:mem:notes.md"), false,
     )
     .unwrap();
     let (private, origin): (i64, Option<String>) = store
@@ -538,8 +653,8 @@ fn private_and_origin_are_stored() {
 fn export_withholds_private_and_reports_count() {
     let dir = TempDir::new().unwrap();
     let store = seeded_store(dir.path());
-    memory::remember(&store, "fact", "public knowledge", "explicit", None, &[], None, &[], None, false, None).unwrap();
-    memory::remember(&store, "insight", "machine-local secret sauce", "explicit", None, &[], None, &[], None, true, None).unwrap();
+    memory::remember(&store, "fact", "public knowledge", "explicit", None, &[], None, &[], None, false, None, false).unwrap();
+    memory::remember(&store, "insight", "machine-local secret sauce", "explicit", None, &[], None, &[], None, true, None, false).unwrap();
 
     let mut out = Vec::new();
     let report = store.export_jsonl(&mut out).unwrap();
@@ -554,7 +669,7 @@ fn export_withholds_private_and_reports_count() {
 fn origin_roundtrips_and_import_rejects_forged_origin_collision() {
     let dir = TempDir::new().unwrap();
     let store = seeded_store(dir.path());
-    memory::remember(&store, "decision", "seeded from PR 12", "explicit", None, &[], None, &[], None, false, Some("scan:git:pr12")).unwrap();
+    memory::remember(&store, "decision", "seeded from PR 12", "explicit", None, &[], None, &[], None, false, Some("scan:git:pr12"), false).unwrap();
 
     let mut out = Vec::new();
     store.export_jsonl(&mut out).unwrap();
@@ -588,7 +703,7 @@ fn origin_credential_shape_is_refused() {
     // Split with concat! so external scanners do not flag this test file.
     let aws_key = concat!("AKIAIOSFOD", "NN7EXAMPLE");
     let err = memory::remember(
-        &store, "fact", "some fact", "explicit", None, &[], None, &[], None, false, Some(aws_key),
+        &store, "fact", "some fact", "explicit", None, &[], None, &[], None, false, Some(aws_key), false,
     )
     .unwrap_err()
     .to_string();
@@ -598,7 +713,7 @@ fn origin_credential_shape_is_refused() {
     let long_origin = "x".repeat(300);
     let err2 = memory::remember(
         &store, "fact", "some other fact", "explicit", None, &[], None, &[], None,
-        false, Some(long_origin.as_str()),
+        false, Some(long_origin.as_str()), false,
     )
     .unwrap_err()
     .to_string();
@@ -634,7 +749,7 @@ fn lww_import_preserves_local_origin() {
     // without tripping the future-timestamp guard.
     let r = memory::remember(
         &store, "fact", "original body", "explicit", None, &[], None, &[], None,
-        false, Some("scan:git:orig"),
+        false, Some("scan:git:orig"), false,
     )
     .unwrap();
     store

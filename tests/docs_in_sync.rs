@@ -29,7 +29,7 @@ fn every_shipped_tool_is_documented() {
 fn every_admin_op_is_documented() {
     let readme = readme();
     // The ops tool_admin actually handles; keep the README admin row honest.
-    for op in ["index", "status", "forget", "export", "import", "ledger"] {
+    for op in ["index", "status", "forget", "archive", "restore", "export", "import", "ledger"] {
         assert!(
             readme.contains(op),
             "admin op '{op}' is handled but not documented in README.md"
@@ -61,7 +61,7 @@ fn documented_cli_commands_exist() {
     // command set is a subset of it.
     let help = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs"))
         .expect("main.rs");
-    for cmd in ["serve", "index", "status", "stats", "doctor", "export", "import", "install", "uninstall", "update", "ui", "statusline", "hook"] {
+    for cmd in ["serve", "index", "status", "stats", "doctor", "export", "import", "install", "uninstall", "update", "ui", "statusline", "hook", "demo", "seed"] {
         assert!(
             help.contains(&format!("\"{cmd}\"")),
             "README documents `limpet {cmd}` but main.rs has no such match arm"
