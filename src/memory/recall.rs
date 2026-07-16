@@ -141,7 +141,8 @@ pub fn recall(
         let row = store.conn.query_row(
             "SELECT kind, body, source, status, confidence, created_at,
                     stale_reason, evidence_cmd
-             FROM entries WHERE id = ?1",
+             FROM entries WHERE id = ?1
+               AND NOT EXISTS (SELECT 1 FROM archived a WHERE a.entry_id = entries.id)",
             [id],
             |r| {
                 Ok((
@@ -207,6 +208,20 @@ pub fn recall(
             "fact" | "decision" => 0.05,
             "episode" => -0.05,
             _ => 0.0,
+        };
+        // Verification is a ranking signal, not just a label: an unverified
+        // claim must never tie a proven fact. `verified` (evidence on file)
+        // earns a boost; `explicit` (someone typed it, nothing re-runnable) is
+        // downranked so truth wins ties. `mined` is imported, lower-trust.
+        // The boost is earned by LIVE evidence: once the anchor rots (stale /
+        // invalidated) the proof is rotten too, so the boost dies with it and
+        // fresh knowledge outranks it (the I-A1 principle: no signal ranks rot
+        // above fresh). The item still surfaces, still flagged (I3).
+        score += match source.as_str() {
+            "verified" if status == "active" => 0.10,
+            "verified" => 0.0,
+            "mined" => -0.05,
+            _ => -0.05, // explicit / unverified
         };
 
         let mut flags = Vec::new();

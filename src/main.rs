@@ -2,22 +2,29 @@
 //!
 //! CLI surface:
 //!   limpet serve   [--root <path>]        MCP stdio server
+//!   limpet ui      [--root <path>] [--port <n>]  visual memory graph
 //!   limpet index   [--root <path>]        full index
 //!   limpet status  [--root <path>]        counts + freshness
+//!   limpet stats   [--root <path>]        token-savings ledger
 //!   limpet export  [--root <path>]        memory -> .limpet/memory.jsonl
-//!   limpet import  [--root <path>]        .limpet/memory.jsonl -> memory
+//!   limpet import  [--root <path>] [--path <file>]  jsonl export -> memory
 //!   limpet install [--dry-run]            register with Claude Code
 //!   limpet uninstall                      remove registration
 //!   limpet doctor  [--root <path>]        diagnose install/store health
 //!   limpet statusline [--root <path>]     statusline segment, read-only
 //!   limpet hook    [--root <path>]        SessionStart brief, read-only
 //!   limpet update  [--check]              self-update to the latest release
+//!   limpet demo                           anchor lifecycle on a throwaway repo
+//!   limpet seed <file> [--anchor auto|file|none] [--kind <kind>] [--force] [--root <path>]
+//!                                         ingest notes into anchored memory
 
 use anyhow::{bail, Context, Result};
 use limpet::{index, mcp, memory, store, tools, ui};
 use std::path::PathBuf;
 
 mod update;
+mod demo;
+mod seed;
 
 fn main() {
     if let Err(e) = run() {
@@ -90,18 +97,29 @@ fn run() -> Result<()> {
             );
             Ok(())
         }
-        "status" | "export" | "import" => {
+        "status" | "export" => {
             let root = root_from(&args)?;
             let mut st = store::Store::open(&store::Store::default_db_path(&root))?;
-            let op = match cmd {
-                "status" => "status",
-                "export" => "export",
-                _ => "import",
-            };
+            let op = if cmd == "status" { "status" } else { "export" };
             let out = tools::dispatch(&mut st, &root, "admin", &serde_json::json!({ "op": op }))?;
             println!("{}", serde_json::to_string_pretty(&out)?);
             Ok(())
         }
+        "import" => {
+            let root = root_from(&args)?;
+            let mut st = store::Store::open(&store::Store::default_db_path(&root))?;
+            // `tool_admin`'s import already accepts an optional `path`; forward
+            // `--path` so `limpet import` is not hardcoded to the default file.
+            let mut op = serde_json::json!({ "op": "import" });
+            if let Some(p) = arg_value(&args, "--path") {
+                op["path"] = serde_json::json!(p);
+            }
+            let out = tools::dispatch(&mut st, &root, "admin", &op)?;
+            println!("{}", serde_json::to_string_pretty(&out)?);
+            Ok(())
+        }
+        "demo" => demo::run(),
+        "seed" => seed::run(&args),
         "doctor" => doctor(&args),
         "statusline" => {
             print_statusline(&args);
@@ -160,7 +178,10 @@ USAGE:
   limpet statusline [--root <path>]   render the statusline segment (read-only)
   limpet hook    [--root <path>]   SessionStart brief for Claude Code hooks (read-only)
   limpet export  [--root <path>]   write memory to .limpet/memory.jsonl
-  limpet import  [--root <path>]   read memory from .limpet/memory.jsonl
+  limpet import  [--root <path>] [--path <repo-relative file>]   read memory from a jsonl export
+  limpet demo                      run the anchor lifecycle on a throwaway repo
+  limpet seed <file> [--anchor auto|file|none] [--kind <kind>] [--force] [--root <path>]
+                                   ingest a MEMORY.md/CLAUDE.md into anchored memory
   limpet install [--dry-run]       register with Claude Code (user scope)
   limpet uninstall                 remove the registration
   limpet update  [--check]         update to the latest release binary
@@ -208,15 +229,33 @@ fn hook_brief(args: &[String]) -> Result<String> {
         &db,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
-    let (active, stale, reverify): (i64, i64, i64) = conn.query_row(
-        "SELECT COALESCE(SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN status = 'stale' THEN 1 ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN status = 'stale' AND source = 'verified'
-                              THEN 1 ELSE 0 END), 0)
-         FROM entries",
-        [],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    )?;
+    // Archived entries are invisible to recall/verify_queue/map, so counting
+    // them here would tell the agent to chase memories it can never see. The
+    // filtered query fails on a pre-v6 store (this path is read-only and
+    // never migrates, so the archived table may not exist yet); fall back to
+    // the unfiltered count rather than printing nothing.
+    let (active, stale, reverify): (i64, i64, i64) = conn
+        .query_row(
+            "SELECT COALESCE(SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN status = 'stale' THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN status = 'stale' AND source = 'verified'
+                                  THEN 1 ELSE 0 END), 0)
+             FROM entries
+             WHERE NOT EXISTS (SELECT 1 FROM archived a WHERE a.entry_id = entries.id)",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .or_else(|_| {
+            conn.query_row(
+                "SELECT COALESCE(SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN status = 'stale' THEN 1 ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN status = 'stale' AND source = 'verified'
+                                      THEN 1 ELSE 0 END), 0)
+                 FROM entries",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+        })?;
     if active + stale == 0 {
         return Ok(String::new());
     }
@@ -264,13 +303,26 @@ fn statusline_segment(args: &[String]) -> Result<String> {
         &db,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
-    let (total, stale): (i64, i64) = conn.query_row(
-        "SELECT COUNT(*),
-                COALESCE(SUM(CASE WHEN status = 'stale' THEN 1 ELSE 0 END), 0)
-         FROM entries WHERE status IN ('active', 'stale')",
-        [],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )?;
+    // Same archived exclusion (and same pre-v6 fallback) as the hook brief:
+    // the statusline must agree with what recall can actually serve.
+    let (total, stale): (i64, i64) = conn
+        .query_row(
+            "SELECT COUNT(*),
+                    COALESCE(SUM(CASE WHEN status = 'stale' THEN 1 ELSE 0 END), 0)
+             FROM entries WHERE status IN ('active', 'stale')
+               AND NOT EXISTS (SELECT 1 FROM archived a WHERE a.entry_id = entries.id)",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .or_else(|_| {
+            conn.query_row(
+                "SELECT COUNT(*),
+                        COALESCE(SUM(CASE WHEN status = 'stale' THEN 1 ELSE 0 END), 0)
+                 FROM entries WHERE status IN ('active', 'stale')",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        })?;
     if total == 0 {
         return Ok(String::new());
     }

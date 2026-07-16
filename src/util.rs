@@ -78,10 +78,14 @@ fn process_seed() -> u64 {
 /// by per-process entropy. Cryptographic strength is not required here;
 /// uniqueness and ordering are.
 pub fn ulid() -> String {
+    // A clock set before 1970 is absurd, but this runs on the remember hot path
+    // and a panic there kills the live MCP session. Degrade to ms=0 instead: the
+    // per-process sequence and entropy still keep the id unique; only ordering
+    // for that one impossible case is lost.
     let ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .expect("system clock before 1970")
-        .as_millis() as u64;
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
 
     let seq = LAST_ULID_STATE.fetch_add(1, Ordering::SeqCst);
     let mixed = splitmix64(ms ^ process_seed() ^ seq.rotate_left(17));
@@ -102,7 +106,10 @@ pub fn ulid() -> String {
         out[i] = CROCKFORD[(r & 0x1F) as usize];
         r >>= 5;
     }
-    String::from_utf8(out.to_vec()).expect("crockford alphabet is ascii")
+    // Every byte comes from CROCKFORD, which is compile-time ASCII, so each is a
+    // valid single-byte codepoint. Build the string without a fallible UTF-8
+    // check so id generation can never panic the server.
+    out.iter().map(|&b| b as char).collect()
 }
 
 fn splitmix64(mut x: u64) -> u64 {

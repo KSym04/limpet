@@ -33,7 +33,7 @@ fn seed(root: &std::path::Path) -> (Store, String) {
         &[],
         None,
         false,
-        None,
+        None, false,
     )
     .unwrap();
     (store, result.id)
@@ -203,7 +203,7 @@ fn verified_fact_gets_reverify_flag_when_stale() {
         &[],
         None,
         false,
-        None,
+        None, false,
     )
     .unwrap();
 
@@ -249,7 +249,7 @@ fn file_anchor_goes_stale_on_edit_and_invalidated_on_delete() {
         &[],
         None,
         false,
-        None,
+        None, false,
     )
     .unwrap();
     assert_eq!(result.anchored, 1);
@@ -295,7 +295,7 @@ fn legacy_file_anchor_without_hash_is_backfilled_not_killed() {
         &[],
         None,
         false,
-        None,
+        None, false,
     )
     .unwrap();
     // Simulate a v0.4.0 store where file anchors carried no hash.
@@ -339,7 +339,7 @@ fn one_dead_anchor_degrades_multi_anchor_memory_instead_of_killing_it() {
         &[],
         None,
         false,
-        None,
+        None, false,
     )
     .unwrap();
     assert_eq!(result.anchored, 2);
@@ -397,7 +397,7 @@ fn superseded_never_resurrects() {
         &[memory::LinkSpec { target: id.clone(), rel: "supersedes".into() }],
         None,
         false,
-        None,
+        None, false,
     )
     .unwrap();
     let _ = mutate_and_resolve(&store, dir.path());
@@ -455,7 +455,7 @@ fn cpp_rename_is_followed() {
         &[],
         None,
         false,
-        None,
+        None, false,
     )
     .unwrap();
 
@@ -494,7 +494,7 @@ fn file_anchor_follows_a_move() {
         &[],
         None,
         false,
-        None,
+        None, false,
     )
     .unwrap();
 
@@ -596,7 +596,7 @@ fn seed_trivial_twin(root: &std::path::Path) -> (Store, String) {
         &[],
         None,
         false,
-        None,
+        None, false,
     )
     .unwrap();
     (store, result.id)
@@ -673,7 +673,7 @@ fn null_body_len_keeps_legacy_follow() {
         &[],
         None,
         false,
-        None,
+        None, false,
     )
     .unwrap();
 
@@ -720,7 +720,7 @@ fn tiny_file_move_is_refused_as_low_entropy() {
         &[],
         None,
         false,
-        None,
+        None, false,
     )
     .unwrap();
 
@@ -761,7 +761,7 @@ fn real_file_move_still_follows() {
         &[],
         None,
         false,
-        None,
+        None, false,
     )
     .unwrap();
 

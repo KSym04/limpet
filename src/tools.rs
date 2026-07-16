@@ -199,6 +199,7 @@ fn tool_remember(
     };
     let private = args.get("private").and_then(Value::as_bool).unwrap_or(false);
     let origin = args.get("origin").and_then(Value::as_str);
+    let force = args.get("force").and_then(Value::as_bool).unwrap_or(false);
     let branch = current_branch(root);
 
     let result = memory::remember(
@@ -213,6 +214,7 @@ fn tool_remember(
         branch.as_deref(),
         private,
         origin,
+        force,
     )?;
     let meta = build_meta(
         store,
@@ -326,6 +328,7 @@ fn tool_map(store: &Store, sweep: &SweepReport, args: &Value) -> Result<Value> {
             "SELECT DISTINCT e.id, e.kind, e.body, e.status, e.stale_reason
              FROM entries e JOIN anchors a ON a.entry_id = e.id
              WHERE (a.file = ?1 OR a.symbol_fqn = ?1) AND e.status != 'superseded'
+               AND NOT EXISTS (SELECT 1 FROM archived ar WHERE ar.entry_id = e.id)
              ORDER BY e.id DESC LIMIT 20",
         )?;
         let mut seen = std::collections::HashSet::new();
@@ -429,7 +432,8 @@ fn tool_affected(store: &Store, root: &Path, sweep: &SweepReport) -> Result<Valu
         let mut mem_stmt = store.conn.prepare(
             "SELECT DISTINCT e.id, e.kind, e.body, e.status, e.stale_reason
              FROM entries e JOIN anchors a ON a.entry_id = e.id
-             WHERE a.file = ?1 AND e.status != 'superseded'",
+             WHERE a.file = ?1 AND e.status != 'superseded'
+               AND NOT EXISTS (SELECT 1 FROM archived ar WHERE ar.entry_id = e.id)",
         )?;
         let mut seen = std::collections::HashSet::new();
         for f in &changed {
@@ -508,6 +512,7 @@ fn tool_verify_queue(store: &Store, sweep: &SweepReport) -> Result<Value> {
         "SELECT id, body, evidence_cmd, evidence_ran_at, stale_reason
          FROM entries
          WHERE source = 'verified' AND status = 'stale'
+           AND NOT EXISTS (SELECT 1 FROM archived a WHERE a.entry_id = entries.id)
          ORDER BY evidence_ran_at ASC",
     )?;
     let queue: Vec<Value> = stmt
@@ -530,6 +535,28 @@ fn tool_verify_queue(store: &Store, sweep: &SweepReport) -> Result<Value> {
         0,
     );
     Ok(envelope(json!(queue), meta))
+}
+
+/// Stamp an entry's `updated_at` STRICTLY newer than its current value, so a
+/// deliberate state change (archive/restore) always wins the export/import
+/// LWW merge on peers. `max(now, current + 1s)` covers the same-wall-clock-
+/// second case, where an equal stamp would be skipped as already-synced.
+fn bump_updated_at(tx: &rusqlite::Transaction<'_>, id: &str) -> Result<()> {
+    let current: String = tx.query_row(
+        "SELECT updated_at FROM entries WHERE id = ?1",
+        [id],
+        |r| r.get(0),
+    )?;
+    let now_secs = crate::memory::parse_iso_secs(&crate::index::now_iso()).unwrap_or(0);
+    let next = match crate::memory::parse_iso_secs(&current) {
+        Some(cur) => now_secs.max(cur + 1),
+        None => now_secs,
+    };
+    tx.execute(
+        "UPDATE entries SET updated_at = ?2 WHERE id = ?1",
+        rusqlite::params![id, crate::index::iso_from_secs(next.max(0) as u64)],
+    )?;
+    Ok(())
 }
 
 fn tool_admin(store: &mut Store, root: &Path, sweep: &SweepReport, args: &Value) -> Result<Value> {
@@ -564,9 +591,13 @@ fn tool_admin(store: &mut Store, root: &Path, sweep: &SweepReport, args: &Value)
                     .collect::<rusqlite::Result<_>>()?;
                 rows
             };
+            let archived: i64 = store
+                .conn
+                .query_row("SELECT COUNT(*) FROM archived", [], |r| r.get(0))?;
             json!({
                 "files": files, "symbols": symbols, "entries": entries,
                 "private": private,
+                "archived": archived,
                 "entries_by_status": by_status,
                 "root": root.to_string_lossy(),
             })
@@ -575,6 +606,49 @@ fn tool_admin(store: &mut Store, root: &Path, sweep: &SweepReport, args: &Value)
             let id = str_arg(args, "id")?;
             let deleted = memory::forget(store, id)?;
             json!({ "deleted": deleted, "id": id })
+        }
+        "archive" => {
+            let id = str_arg(args, "id")?;
+            let exists: bool = store.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM entries WHERE id = ?1)",
+                [id],
+                |r| r.get(0),
+            )?;
+            if !exists {
+                bail!("no memory with id {id}");
+            }
+            let tx = store.conn.unchecked_transaction()?;
+            // Refuse the silent no-op: a double archive usually means the
+            // caller's view of the store is stale, which is worth surfacing.
+            let changed = tx.execute(
+                "INSERT INTO archived(entry_id, archived_at) VALUES (?1, ?2)
+                 ON CONFLICT(entry_id) DO NOTHING",
+                rusqlite::params![id, crate::index::now_iso()],
+            )?;
+            if changed == 0 {
+                bail!("memory {id} is already archived");
+            }
+            // Archival is a deliberate state change and must win the LWW
+            // merge on peers: without this bump, an already-synced machine
+            // skips the exported line and the archive silently never
+            // propagates.
+            bump_updated_at(&tx, id)?;
+            tx.commit()?;
+            json!({ "archived": id })
+        }
+        "restore" => {
+            let id = str_arg(args, "id")?;
+            let tx = store.conn.unchecked_transaction()?;
+            let changed = tx.execute("DELETE FROM archived WHERE entry_id = ?1", [id])?;
+            if changed == 0 {
+                bail!("memory {id} is not archived (nothing to restore)");
+            }
+            // Same LWW rule as archive: the restored line must win on peers,
+            // whose import then clears their sidecar row (an absent archived
+            // field on a winning line means visible).
+            bump_updated_at(&tx, id)?;
+            tx.commit()?;
+            json!({ "restored": id })
         }
         "export" => {
             let default_path = root.join(".limpet/memory.jsonl");
@@ -607,7 +681,7 @@ fn tool_admin(store: &mut Store, root: &Path, sweep: &SweepReport, args: &Value)
             store.ledger_session_start()?;
             json!({ "reset": true })
         }
-        other => bail!("unknown admin op '{other}' (index|status|forget|export|import|ledger|ledger_reset)"),
+        other => bail!("unknown admin op '{other}' (index|status|forget|archive|restore|export|import|ledger|ledger_reset)"),
     };
     let meta = build_meta(
         store,
@@ -698,7 +772,7 @@ pub fn tool_schemas() -> Value {
     json!([
         {
             "name": "recall",
-            "description": "Retrieve project memories relevant to a task. Returns a token-budgeted, ranked pack of facts, decisions, insights, episodes, and intents, each flagged if stale or contradicted. Always check meta.staleness and item flags before trusting a memory.",
+            "description": "Retrieve project memories relevant to a task. Returns a token-budgeted, ranked pack of facts, decisions, insights, episodes, and intents, each flagged if stale or contradicted. Always check meta.staleness and item flags before trusting a memory. Provenance is on the `source` field: `verified` = proven with evidence on file (outranks everything at equal relevance); `mined` = imported, lower trust; a MISSING `source` field means an unverified explicit claim (someone typed it, nothing re-runnable, and it cannot be trusted like a proof). Prefer verified memories for anything you must not get wrong.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -711,7 +785,7 @@ pub fn tool_schemas() -> Value {
         },
         {
             "name": "remember",
-            "description": "Store a durable memory. kinds: fact (verified behavior), decision (choice + why), episode (what worked/failed), insight (gotcha), intent (what a module is for). Anchor it to code so limpet can flag it when that code changes: symbol anchors track the function/class body, file anchors (no symbol) track the whole file's content; any indexed file works, including templates, styles, and configs. Every anchor must resolve or the call fails with the reason; nothing is stored half-anchored. Provide evidence {command, output} to make it a verified fact.",
+            "description": "Store a durable memory. kinds: fact (verified behavior), decision (choice + why), episode (what worked/failed), insight (gotcha), intent (what a module is for). Anchor it to code so limpet can flag it when that code changes: symbol anchors track the function/class body, file anchors (no symbol) track the whole file's content; any indexed file works, including templates, styles, and configs. Every anchor must resolve or the call fails with the reason; nothing is stored half-anchored. Provide evidence {command, output} to make it a verified fact. The result may carry `possible_conflicts`: existing same-anchor memories that assert a DIVERGENT value (a flipped number or negation). The write still succeeds; if a conflict is real, `supersede` the named id instead of stacking a silent contradiction.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -731,7 +805,8 @@ pub fn tool_schemas() -> Value {
                     "source": { "type": "string", "enum": ["explicit","mined"] },
                     "confidence": { "type": "number" },
                     "private": { "type": "boolean", "description": "Keep this memory on this machine only: it is recalled locally but withheld from admin export / .limpet/memory.jsonl. Default false." },
-                    "origin": { "type": "string", "description": "Optional dedup key naming the memory's source (e.g. scan:git:<sha>). A second remember with the same origin is rejected, which makes scan re-runs idempotent." }
+                    "origin": { "type": "string", "description": "Optional dedup key naming the memory's source (e.g. scan:git:<sha>). A second remember with the same origin is rejected, which makes scan re-runs idempotent." },
+                    "force": { "type": "boolean", "description": "Store even when a near-identical memory already exists on the same anchor. Default false: such a write is refused, naming the existing id, so the writer chooses to supersede it or force a distinct entry. A correction with a different value is never refused." }
                 },
                 "required": ["kind", "body"]
             }
@@ -759,11 +834,11 @@ pub fn tool_schemas() -> Value {
         },
         {
             "name": "admin",
-            "description": "Maintenance: op=index (full reindex), status (includes private count), forget (id), export / import (JSONL at .limpet/memory.jsonl for team sharing via git; private memories are withheld from export and counted in private_withheld), ledger (token-savings receipt: session + lifetime + methodology) / ledger_reset.",
+            "description": "Maintenance: op=index (full reindex), status (includes private and archived counts), forget (id, permanent), archive / restore (id: archive hides a memory from recall, the verify queue, and map without deleting it; its staleness keeps tracking the code underneath, and restore brings it back with its current, truthful status), export / import (JSONL at .limpet/memory.jsonl for team sharing via git; private memories are withheld from export and counted in private_withheld; archived entries export with an archived flag), ledger (token-savings receipt: session + lifetime + methodology) / ledger_reset.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "op": { "type": "string", "enum": ["index","status","forget","export","import","ledger","ledger_reset"] },
+                    "op": { "type": "string", "enum": ["index","status","forget","archive","restore","export","import","ledger","ledger_reset"] },
                     "id": { "type": "string" },
                     "path": { "type": "string" }
                 },

@@ -1,0 +1,23 @@
+# Per-file ceiling for panic sites on the MCP hot path.
+# Format: <max-count> <file>
+# This number can only go DOWN. Lower it every time you convert a site to `?`.
+#
+# Counts EXCLUDE `#[cfg(test)]` modules: a panic in a test cannot kill a live
+# MCP session, only a panic reachable from tools::dispatch can. Regenerate with:
+#   pat='\.unwrap\(\)|\.expect\(|panic!|unreachable!|unimplemented!|todo!'
+#   awk 'BEGIN{p=1} /#\[cfg\(test\)\]/{p=0} p' <file> | grep -cE "$pat"
+1 src/tools.rs
+0 src/store.rs
+0 src/memory/mod.rs
+0 src/memory/anchor.rs
+0 src/memory/recall.rs
+0 src/index/mod.rs
+0 src/index/extract.rs
+1 src/index/graph.rs
+0 src/util.rs
+0 src/envelope.rs
+0 src/mcp.rs
+0 src/config.rs
+0 src/secrets.rs
+0 src/index/fqn.rs
+0 src/index/lang.rs

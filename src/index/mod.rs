@@ -295,9 +295,35 @@ fn discover(root: &Path, exclude: Option<&Path>) -> Vec<String> {
         .add_custom_ignore_filename(".limpetignore")
         .filter_entry(|e| {
             let name = e.file_name().to_string_lossy();
+            // Hard-skip trees that are near-universally generated or vendored and
+            // never hold hand-authored source. Repos that forget to gitignore
+            // these (the boost/RanThirdParty class) would otherwise burn the
+            // sweep budget and ship thousands of paths in the honesty envelope.
+            // Project-specific vendored dirs still opt out via `.limpetignore`.
             !matches!(
                 name.as_ref(),
-                "node_modules" | "vendor" | "target" | "dist" | "build" | ".git" | ".limpet"
+                "node_modules"
+                    | "vendor"
+                    | "target"
+                    | "dist"
+                    | "build"
+                    | ".git"
+                    | ".limpet"
+                    | "__pycache__"
+                    | ".venv"
+                    | "venv"
+                    | ".mypy_cache"
+                    | ".pytest_cache"
+                    | ".ruff_cache"
+                    | ".tox"
+                    | "Pods"
+                    | ".gradle"
+                    | ".next"
+                    | ".nuxt"
+                    | ".svelte-kit"
+                    | "bower_components"
+                    | "coverage"
+                    | ".terraform"
             )
         })
         .build();
@@ -461,6 +487,13 @@ pub fn now_iso() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
+    iso_from_secs(secs)
+}
+
+/// Unix seconds to the same RFC3339 UTC shape `now_iso` emits. Public so LWW
+/// participants (archive/restore) can mint a stamp strictly newer than an
+/// existing one when both land within the same wall-clock second.
+pub fn iso_from_secs(secs: u64) -> String {
     let days = secs / 86_400;
     let (y, m, d) = civil_from_days(days as i64);
     let rem = secs % 86_400;
@@ -526,6 +559,30 @@ mod tests {
             found,
             vec![".limpetignore".to_string(), "keep.php".to_string()],
             "unexpected: {found:?}"
+        );
+    }
+
+    #[test]
+    fn discover_skips_common_generated_dirs() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        fs::write(root.join("keep.php"), "<?php function a() {}\n").unwrap();
+        // Universally generated/vendored trees that a repo often forgets to
+        // gitignore (the boost/RanThirdParty class of feedback). None hold
+        // hand-authored source; walking them wastes the sweep budget and, worse,
+        // ships their paths in the honesty envelope's dirty list.
+        for junk in [
+            "__pycache__", ".venv", "venv", "Pods", ".next", ".nuxt",
+            "bower_components", ".gradle", "coverage", ".pytest_cache",
+        ] {
+            fs::create_dir_all(root.join(junk)).unwrap();
+            fs::write(root.join(junk).join("f.js"), "var a=1;\n").unwrap();
+        }
+        let found = discover(root, None);
+        assert_eq!(
+            found,
+            vec!["keep.php".to_string()],
+            "a generated/vendored dir leaked into discovery: {found:?}"
         );
     }
 

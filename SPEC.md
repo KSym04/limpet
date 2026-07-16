@@ -1,3 +1,205 @@
+# SPEC: Truth-Layer (Slice A), v0.14.0
+
+Status: IN PROGRESS (2026-07-17). Source: `IMPROVEMENTS-TRUTH-LAYER.md` (P0 + P1),
+triaged against real code + limpet memory. Ships **0.14.0** (feature = minor). Collides
+with roadmap 0.15 write-back (P1 == "anchor-collision surfacing at write"), so roadmap is
+reconciled in this drop. Adoption (demo/seed) and hardening (panic audit) are OUT of
+scope; separate later drops (Slice B, Slice C).
+
+Doctrine (limpet honesty scars): **flag and propose, never silently delete or merge.**
+
+## INVARIANTS (must not regress)
+
+| ID | Invariant | Source |
+|----|-----------|--------|
+| I3 | Nothing flagged (stale/contradicted/unverified) is ever score-hidden by the relevance floor. | mem 01KWM94SDB |
+| BENCH | `bench/token_savings.py` overall ratio stays >= 4.0x. Per-item token additions are the known killer (ledger died at 3.8x). | mem 01KX05ESTY |
+| CONF | Every confidence write passes through `quantize_confidence` (6-dp). | mem 01KWPA1G5S |
+| HONEST | verified > unverified on TIES; a far-more-relevant unverified memory still ranks (text_score dominates). | P0 acceptance |
+| POS | Roadmap/README contrast mechanisms, never competitor names. | mem 01KXABHGYP |
+
+## ATTACK SURFACE / HAZARDS
+
+- **P0.b bench death.** A `verified:` field on EVERY item = the ledger mistake (reverted
+  at 3.8x). MITIGATION: emit a single `unverified` flag ONLY on explicit-source items
+  (flags array already omitted-when-empty, survives compaction, only on the untrusted
+  subset). verified already emits `source:"verified"`, mined emits `source:"mined"`
+  (tools.rs:112 emits source when != explicit); the ONLY marker gap is explicit. Close
+  exactly that. Gate on BENCH before commit.
+- **P0.a floor interaction.** New source term is additive; must not push a flagged item
+  below the floor. I3 exempts flagged items; verify the exemption still fires.
+- **P0.c over-derivation.** Full derivation (corroboration/staleness) is roadmap-0.15
+  territory. Scope here = a hard CAP only.
+- **P1 false conflicts.** Duplicate-vs-conflict split on a similarity ratio; too low a
+  threshold spams. Tunable, documented.
+
+## CORE ARCHITECTURE
+
+- **P0.a** `src/memory/recall.rs` (~6 lines): after the kind boost (recall.rs:206), add
+  `source` term: `verified => 0.10`, `mined => -0.05`, `_ => -0.05`. `source` already
+  destructured (:159), unused in score today. Verify I3 exemption intact.
+- **P0.b** `src/tools.rs` (~4 lines): in `tool_recall` (:112), when `i.source ==
+  "explicit"`, push `"unverified"` into that item's `flags`. NO per-item field.
+- **P0.c** `src/memory/mod.rs` (1 line): line 34 `_ => requested.unwrap_or(0.8)` →
+  `.min(EXPLICIT_CONF_CAP)` with `EXPLICIT_CONF_CAP = 0.85`. Already quantized at :231.
+- **P1** `src/memory/mod.rs` + `src/tools.rs`: split `possible_duplicates` (mod.rs:278)
+  by body similarity: near-identical = duplicate, high-overlap-divergent = conflict. Add
+  `possible_conflicts: Vec<Value>` to `RememberResult` (:67), each `{id, body, hint}`. NO
+  auto-supersede/link. Surface only.
+- **TEST** `tests/recall_quality.rs`: land drop-in + add verified-wins case (P0.a) +
+  conflict-surfaced case (P1).
+- **ROADMAP** `ROADMAP.md`/`README.md`: reconcile numbering (Ken picks), honor POS.
+
+## DESIGN CHANGE (2026-07-17, bench-driven)
+
+P0.b was specced as a per-item `unverified` flag. MEASURED: it dropped
+`bench/token_savings.py` 4.0x → 3.8x (served 3386 → 3583, +197 tok), the exact
+ledger failure (mem 01KX05ESTY). Root cause: you cannot pay a per-item marker on
+the COMMON source type (explicit is the default). Pivot: mark the EXCEPTION, not
+the default. verified/mined already self-identify via `source` (cheap, rare); a
+MISSING `source` = unverified, documented in the recall tool description. Net bench
+after pivot: **4.1x** (P0.a ranking floored a marginal explicit item, served 3325).
+
+## SCOPE (Ken, 2026-07-17): ALL of A+B+C in 0.14, no phasing
+
+Personal tool, can't wait for adoption. Honesty caveat held: the 129-site panic
+audit (C item 5) lands incrementally behind the ratchet; everything else ships in
+the 0.14 release.
+
+## TASK IMPLEMENTATION CHECKLIST
+
+Slice A (truth layer):
+- [x] P0.a: source ranking term in recall.rs (verified +0.10, mined/explicit -0.05)
+- [x] P0.b: provenance convention (verified self-IDs via source; missing source =
+      unverified) + documented in recall tool description. NO per-item marker (bench).
+- [x] P0.c: `EXPLICIT_CONF_CAP = 0.85` cap in default_confidence
+- [x] `tests/recall_quality.rs` landed + compiles + 5 green (incl. col9/col10 guard)
+- [x] `bench/token_savings.py` = 4.1x (>= 4.0 gate) after pivot
+- [x] P1: `possible_conflicts` + value-divergence classifier + surface in tool_remember
+      + docs + 2 tests (divergence->conflict, restatement->not)
+- [x] P2a: ALREADY BUILT, envelope.rs:42 emits dirty count + 10-file sample cap
+- [x] P2b: widened `discover()` hard-skip (Python/JS/iOS/etc generated trees) + test +
+      README updated
+- [x] P3: pre-insert near-dup refuse (jaccard>=0.9 + same numbers + same negation;
+      corrections/conflicts exempt; blocking a correction would freeze col9/col10) +
+      `force` tool param + 3 TDD tests + 42 call sites migrated. Gates re-verified:
+      13/13 suites, clippy 0, ratchet ok, bench 4.1x all answers intact, demo exit 0.
+- [x] P4 archival DONE (2026-07-17): 5/5 TDD tests green first pass (hide/restore
+      with truthful status, export/import round trip, verify_queue exclusion, loud
+      nonsense refusals, forget cleanup + status count). Schema v6 additive sidecar;
+      4 version-assertion tests updated 5->6; admin archive/restore ops + tool schema
+      + README + ROADMAP + docs_in_sync. Design as below. Gates: 14/14 suites,
+      clippy 0, bench 4.1x, demo exit 0.
+      Original design note: NOT a status value. The
+      entries.status CHECK would need a core-table rebuild to admit 'archived';
+      instead a SIDECAR table `archived(entry_id PK, archived_at)` = additive
+      CREATE TABLE IF NOT EXISTS (v3 precedent), SCHEMA_VERSION 5->6. Archival
+      gates VISIBILITY ONLY: recall/verify_queue/map exclude flagged ids; sweep +
+      resolve_all UNTOUCHED so status keeps tracking reality underneath; restore =
+      delete sidecar row, original (current, truthful) status reappears for free.
+      admin ops archive/restore; export carries `archived: true` (omitted when
+      false); import re-applies the flag on added/updated lines; forget cleans the
+      sidecar. Old binaries reading a new export simply ignore the field (entry
+      imports visible; acceptable degradation). INVARIANT: archival is a USER
+      action, not an honesty flag; I3 does not apply (like superseded).
+- [ ] P5: `matched` field per recalled item (query∩body significant tokens); BENCH RISK
+
+Slice B (adoption):
+- [x] `src/demo.rs` drop-in + wire main.rs; `cargo run -- demo` exits 0 (verified)
+- [x] `src/seed.rs` drop-in + `source:"mined"` per P0 note + wire main.rs; idempotent
+      (seeded 3 -> 3 unchanged, verified)
+- [x] `import --path` forwarding + HELP hint; repo-relative works, absolute correctly
+      blocked by validate_rel_path security boundary (verified)
+
+Slice C (hardening):
+- [x] `scripts/check_hotpath_panics.sh` + baseline landed; passes at baseline (verified)
+- [x] CI wiring (`.github/workflows/ci.yml`): panic check + `cargo run -- demo`
+- [x] "129-site audit" was a PHANTOM: those counts were `#[cfg(test)]` unwraps. Fixed
+      the ratchet to exclude test modules; true hot-path = 4 sites. Hardened the 2 in
+      util.rs (clock, utf8); left tools.rs:415 + graph.rs:50 (invariant-proven).
+
+QA (2026-07-17, 7-dimension adversarial workflow: 20 raw findings, 15 refuted, 5
+confirmed, ALL FIXED):
+- [x] MAJOR recall.rs: stale-verified outranked fresh-explicit (+0.10 boost survived
+      evidence rot). Fixed: boost gated on status=="active" (I-A1 principle) + test.
+- [x] MAJOR seed.rs: reworded note dead-ended in opaque "rejected" counter after P3.
+      Fixed: separate refused_near_duplicate counter + printed fix hint + --force flag;
+      live smoke: refused with hint -> --force seeds 1.
+- [x] MINOR demo.rs: ScratchDir could silently reuse a crashed run's dir (flaky CI).
+      Fixed: create_dir (fails-on-exists) + suffix retry, never create_dir_all.
+- [x] MINOR README: seed "idempotently" overpromised post-P3. Fixed: no-op re-runs vs
+      reworded-refusal + --force documented.
+- [x] MINOR docs_in_sync: demo/seed missing from CLI guard. Fixed: added.
+
+QA ROUND 2 (full workflow result, 49 agents: 21 raw, 14 confirmed after adversarial
+verify, ALL FIXED):
+- [x] MAJOR store.rs import_jsonl bypassed the truth layer: forged verified-without-
+      evidence minted the +0.10 boost at conf 1.0; unknown source ABORTED whole import
+      at schema CHECK. Fixed: SOURCES validation + verified-requires-evidence reject +
+      per-source confidence caps (import_confidence_cap) + TDD test (5-line hostile
+      export fixture).
+- [x] MAJOR mod.rs dedup/conflict queries had no status filter: a SUPERSEDED twin
+      refused correcting-the-correction and got no-op supersede hints. Fixed: status
+      != 'superseded' on both queries + TDD test (A superseded by B, re-assert A).
+- [x] MAJOR demo.rs store lived INSIDE fixture root; store_exclude_dir = grandparent
+      = root, so step-1 index indexed NOTHING (passed via tool_remember's defensive
+      reindex). Fixed: repo/ + store/ siblings under scratch + map assertion that
+      scan_batch is actually in the symbol table.
+- [x] MAJOR seed.rs --kind unvalidated (all chunks rejected, exit 0) + fenced code
+      blocks chunked as prose. Fixed: up-front KINDS bail + fence state machine
+      (``` and ~~~, unclosed swallows to EOF) + 3 in-module tests.
+- [x] MINOR classifier trio: numbers() now extracts EMBEDDED digit runs (col9/col10,
+      the motivating case, now surfaces as conflict + test); Unicode-aware tokens
+      (CJK bodies no longer judged by ASCII scraps + test); bigram adjacency check
+      (reversed same-vocabulary claim is a correction, not refused + test).
+- [x] MINOR seed looks_like_path: +11 note/template extensions (.md .yml .toml .twig
+      .scss .vue .sh .sql etc) + test.
+- [x] MINOR baseline: +5 hot-path files pinned at 0 (mcp, config, secrets, fqn, lang).
+- [x] MINOR main.rs doc header: ui/stats added, import --path, seed --force.
+- [x] MINOR README pointer: 0.14 = "what this release carries", not "shipped".
+- [x] MINOR demo write_fixture comment no longer claims a nonexistent mtime call.
+- NOTE unverified (verifiers died on API overload): security flagged ScratchDir
+      temp-path squatting; the create_dir-fails-on-exists fix already covers it.
+
+WHOLE-BRANCH REVIEW (2026-07-17, 74 agents, gates GREEN, 21 confirmed findings, ALL
+FIXED; the seam pass earned its keep again):
+- [x] BLOCKER: remember never secret-scanned evidence.command (the one raw-persisted,
+      git-exported evidence field). Fixed: same guard as body + empty refused + test.
+- [x] BLOCKER: no .gitattributes; windows-latest autocrlf would CRLF the ratchet
+      script ('set -euo pipefail\r') and redden CI on first push. Fixed: .gitattributes
+      pinning *.sh + baseline to LF.
+- [x] MAJOR: archival never propagated to already-synced peers (archive/restore did
+      not bump updated_at; LWW skipped the line both directions, contradicting the
+      code comment). Fixed: strictly-monotonic bump_updated_at (max(now, cur+1s)) in
+      one tx + both-direction propagation test. GUARD COLLISION found by the test:
+      the +1s stamp tripped import's future-timestamp poison guard; resolved with a
+      bounded 3600s skew allowance (peers' clocks skew anyway; an hour cannot poison
+      the merge durably; 9999-poison still rejected, test held).
+- [x] MAJOR: import validated source but not kind/status/body/link-rel; one bad line
+      aborted the WHOLE batch at the schema CHECK (incl. first-run bootstrap). Fixed:
+      per-line rejects + links_dropped for bad rels + test.
+- [x] MAJOR test gaps: cap now pinned DIRECTLY on the wire (conf <= 0.85); negation
+      dimension of both classifiers pinned ('no timeout' correction stores + conflicts).
+- [x] MINOR x14: forget wrapped in one tx; hook brief + statusline exclude archived
+      (with pre-v6 read-only fallback); ratchet FAILs on missing baseline file; seed
+      strict arg parser (flag values never eaten as the file, '=' form and unknown
+      flags refused loudly, extra positionals refused, absolutized read-error, three
+      doc surfaces identical); map/affected archival exclusion pinned by test; both
+      new test suites moved store OUTSIDE repo root (the demo trap) + layout guard
+      assert; README 'shipped' vs 'this release carries' honesty fix (round 2 QA).
+
+Ship:
+- [x] Roadmap/README reconciled: 0.14 = the truth layer (Ken's pick), freshness-at-
+      scale-2 -> 0.15, refinement loop -> 0.16 (anchor-collision bullet marked pulled
+      forward); README six-tools table + CLI table + seed paragraph + pointer updated
+- [x] Final gates 2026-07-17 (post QA round 2): 13/13 suites (17 recall_quality/
+      memory_api truth tests), clippy 0, ratchet ok (15 files pinned), bench 4.1x,
+      lineage 5.4x, demo exit 0 + index self-verification, em-dash sweep clean
+- [ ] Whole-branch review (playbook item 14) before merge
+- [ ] Version 0.13.0 -> 0.14.0 via `/deploy-limpet` QA gate (no shortcut)
+
+---
+
 # SPEC: freshness at scale, branch 1: sweep priority + low-entropy guard, v0.13.0
 
 Status: APPROVED (2026-07-11). Full spec:

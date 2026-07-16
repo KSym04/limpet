@@ -1,0 +1,6 @@
+# Normalize text files. Windows CI runners check out with core.autocrlf=true;
+# a CRLF shell script breaks at its own `set -euo pipefail` line, so shell
+# scripts and the panic-ratchet baseline are pinned to LF everywhere.
+* text=auto
+*.sh text eol=lf
+scripts/hotpath_panic_baseline.txt text eol=lf

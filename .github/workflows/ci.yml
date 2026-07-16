@@ -19,3 +19,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --locked
       - run: cargo build --release --locked
+      # Ratchet: no new panic sites on the MCP hot path (count can only go down).
+      - run: bash scripts/check_hotpath_panics.sh
+      # Full read-path smoke test on every OS: active -> stale -> healed, exits
+      # non-zero on any unexpected state.
+      - run: cargo run --locked -- demo
