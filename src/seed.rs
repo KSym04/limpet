@@ -16,9 +16,11 @@
 //! Usage:
 //!   limpet seed <file> [--anchor auto|file|none] [--kind <kind>] [--force] [--root <path>]
 //!
-//! `<file>` resolves from the current directory; anchors and the store live
-//! under `--root` (default: the current directory). `--kind` accepts any
-//! memory kind (fact, decision, episode, insight, intent); default fact.
+//! `<file>` (when relative), the anchors, and the store all resolve under
+//! `--root` (default: the current directory), so the notes file is found in
+//! the same place its anchors point. An absolute `<file>` is used as-is.
+//! `--kind` accepts any memory kind (fact, decision, episode, insight,
+//! intent); default fact.
 //!
 //! Anchor modes:
 //!   auto (default)  anchor to a referenced file if one resolves, else store unanchored
@@ -127,19 +129,14 @@ pub fn run(args: &[String]) -> Result<()> {
     }
 
     let root = root_from(root_raw)?;
-    // The notes file resolves from the CURRENT DIRECTORY; anchors and the
-    // store resolve inside --root. Absolutize the path in the error so a miss
-    // under --root usage is self-explanatory.
-    let file_path = PathBuf::from(&file);
-    let text = std::fs::read_to_string(&file_path).with_context(|| {
-        let shown = std::env::current_dir()
-            .map(|cwd| cwd.join(&file_path))
-            .unwrap_or_else(|_| file_path.clone());
-        format!(
-            "reading notes file {} (the file resolves from the current directory, not --root)",
-            shown.display()
-        )
-    })?;
+    // The notes file, anchors, and store all resolve under one base: --root
+    // (default: the current directory). So `cd repo && limpet seed NOTES.md`
+    // and `limpet seed NOTES.md --root repo` both read repo/NOTES.md, with no
+    // surprising split between where the file is found and where anchors point.
+    // An absolute path is honored as-is.
+    let file_path = resolve_notes_path(&root, &file);
+    let text = std::fs::read_to_string(&file_path)
+        .with_context(|| format!("reading notes file {}", file_path.display()))?;
     let file_label = file_path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
@@ -393,6 +390,17 @@ fn hash64(s: &str) -> u64 {
     h.finish()
 }
 
+/// The notes file resolves under `root` when relative, so it is found in the
+/// same base its anchors point to; an absolute path is used verbatim.
+fn resolve_notes_path(root: &Path, file: &str) -> PathBuf {
+    let given = PathBuf::from(file);
+    if given.is_absolute() {
+        given
+    } else {
+        root.join(given)
+    }
+}
+
 fn root_from(root_raw: Option<String>) -> Result<PathBuf> {
     let root = root_raw
         .map(PathBuf::from)
@@ -445,5 +453,16 @@ mod tests {
             assert!(looks_like_path(t), "{t} should be anchorable");
         }
         assert!(!looks_like_path("just-a-word"));
+    }
+
+    #[test]
+    fn notes_path_resolves_under_root_but_honors_absolute() {
+        let root = Path::new("/repo");
+        // A relative notes file is found under --root, not the CWD, so the
+        // file and its anchors share one base (no split-brain trap).
+        assert_eq!(resolve_notes_path(root, "MEMORY.md"), PathBuf::from("/repo/MEMORY.md"));
+        assert_eq!(resolve_notes_path(root, "docs/NOTES.md"), PathBuf::from("/repo/docs/NOTES.md"));
+        // An absolute path is used verbatim.
+        assert_eq!(resolve_notes_path(root, "/etc/notes.md"), PathBuf::from("/etc/notes.md"));
     }
 }
