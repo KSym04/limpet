@@ -793,7 +793,7 @@ pub fn tool_schemas() -> Value {
                     "body": { "type": "string", "description": "The memory itself. Short, specific, standalone." },
                     "anchors": { "type": "array", "items": { "type": "object", "properties": {
                         "file": { "type": "string", "description": "Repo-relative path." },
-                        "symbol": { "type": "string", "description": "Function/class name or FQN in that file. Omit to anchor to the file itself (goes stale when the file's content changes)." }
+                        "symbol": { "type": "string", "description": "Function/class name or FQN in that file. Twins sharing one FQN take an @<disamb> suffix naming one trait impl, overload or accessor, spelled as the source writes it (\"go@A\", \"go@impl\", \"f@(int a)\", \"m@self.\"); a bare trailing @ names the twin with no discriminator. An ambiguous name is refused with the exact forms listed. Omit to anchor to the file itself (goes stale when the file's content changes)." }
                     }, "required": ["file"] } },
                     "evidence": { "type": "object", "properties": {
                         "command": { "type": "string" }, "output": { "type": "string" }

@@ -115,6 +115,16 @@ move a trivial body    unique match, too small   stale (low_entropy), never re-p
 
 A multi-anchor memory dies only when **every** anchor dies. Losing one anchor while others still resolve degrades it to `stale:anchor_lost` so the surviving knowledge stays usable. And `remember` refuses an anchor it cannot resolve, loudly, at write time: no memory is ever born dead.
 
+Twins (trait impls, overloads, accessor pairs) share one FQN, so a symbol spec takes an optional `@<disamb>` suffix naming the exact one, spelled as the source writes it: the Rust trait path (`impl` for an inherent impl), the Go receiver type (`func` for a package function), the Ruby receiver (`self.`, `<<self.`, `#` for an instance method), and the parameter list for C++, Java, C#, Python and JS/TS, generic arity included.
+
+```
+symbol: "go"      → refused: matches t.T.go@A, t.T.go@B, t.T.go@impl
+symbol: "go@A"    → anchors to the A impl's body, and only that one
+symbol: "go@impl" → anchors to the inherent impl, and only that one
+symbol: "x@"      → anchors to a twin that carries no discriminator at all
+                    (a type sharing its name with a method, say)
+```
+
 Rename-following is evidence-gated: a unique match on a trivial body (an empty function, a bare delegation stub, a near-empty file) is refused as follow evidence and surfaces as `stale:low_entropy` instead of silently re-pointing the anchor at a look-alike twin, and it heals the moment the original code returns.
 
 Staleness is also symmetric: revert the code (a rolled-back experiment, a `git checkout`) and the memory heals back to active on the next call, because the anchor hash matches again. No re-verification ritual for changes that un-happened. The same applies to invalidation: a branch switch, `git stash`, or mid-rebase state that makes files vanish briefly is not a death sentence: when the code comes back and the anchors resolve, the memory recovers. The only final state is `superseded`, which records a deliberate human decision rather than filesystem churn.

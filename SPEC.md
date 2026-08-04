@@ -1,6 +1,92 @@
+# SPEC: freshness at scale, part 2, v0.15.0
+
+Status: IN PROGRESS (2026-07-21). Full design:
+docs/superpowers/specs/2026-07-21-freshness-scale-2-design.md
+
+FQN disambiguation via an additive `disamb` discriminator (schema v7:
+symbols.disamb + anchors.disamb, NULL-safe, no UNIQUE) + a slot-first anchor
+resolution ladder that closes the twin-masking false-Fresh hole; NINE
+sanctioned FQN spelling changes (S1-S9 below); the FS-event-watcher lag bench
+and verdict; P5 matched-terms behind the 4.0x bench gate; removed-file purge
+transactionality.
+
+Key invariants: I-F1 (no twin masking), I-F2 (legacy anchors byte-exact),
+I-F3 (spelling byte-identical outside S1-S9, kind outside K1-K2, no symbol
+lost, runtime-proven), I-F4 (v7 no-op re-run, race-safe), I-F5 (recall wire
+untouched by disamb; P5 gated), I-F6 (entropy guards unweakened), I-F7 (set
+semantics only) + carried I3/BENCH/CONF/POS.
+
+## Task Implementation Checklist: 0.15.0
+
+- [ ] T1 store.rs: schema v7 (symbols.disamb + anchors.disamb ALTERs,
+      pragma self-gate, duplicate-column race tolerated, mtimes zeroed once,
+      SCHEMA_V1 fresh DDL updated, SCHEMA_VERSION 6->7, 4 hardcoded version
+      tests updated, reopen-idempotence test)
+- [ ] T2 extract.rs: SymbolFact.disamb + push_sym signature; per-grammar
+      disamb (Rust impl trait, Go receiver, C++/Java/C# param text); scope
+      fixes (Rust mod_item, PHP bracketed namespace, C++ qualified
+      out-of-line); fixtures per change verified via to_sexp; I-F3 runtime
+      proof across all 11 grammars
+- [ ] T2b extract.rs: close every REMAINING shape that filed two symbols in
+      one slot, adversarial-review follow-up. Scope fixes: C# block
+      `namespace_declaration` (file-scoped form deliberately untouched), TS
+      `internal_module`, Java `enum_declaration`/`record_declaration`, PHP
+      `enum_declaration`. New discriminators: Ruby receiver (`self.` /
+      `<<self.` / `#`), Python + JS/TS parameter list (property/setter and
+      get/set pairs), C# `type_parameters` (generic arity), C++ enclosing
+      `template_declaration` parameters and `template_function` arguments.
+      Totality: no NULL slot in a space where a twin can carry one (Rust
+      inherent `impl`, Go package `func`, Ruby instance `#`), because
+      anchors.disamb NULL also means "legacy" and took the 0.14 ladder.
+      Recovery: C++ `reference_declarator`/`parenthesized_declarator` have NO
+      declarator field, so every reference-returning definition extracted
+      nothing at all. `caller_fqn` now walks back to the innermost SYMBOL
+      frame so a module-level call keeps the `<file>` sentinel instead of
+      naming a scope with no row. Corpus scan (10,286 files / 399k symbols /
+      3.06M calls): 0 symbols lost, 87 strictly new, 0 phantom callers -- but
+      that corpus was C and C++ only, so it proved NOTHING about Java, C#,
+      TypeScript, PHP, Ruby or Python. I-F3 re-proven properly under T2d.
+- [ ] T2d I-F3 restated and re-proven with the COMPLETE sanctioned list
+      (S1-S9, K1-K2, R1-R2) over a 41-fixture, 11-grammar differential run
+      against the 2ab0afb baseline from one byte-identical harness. 42
+      spelling changes, all attributable, 0 unattributed, 0 rows lost. New
+      permanent pins in tests/index_langs.rs for every newly sanctioned scope
+      plus the negative bounds (C# file-scoped namespace, TS string-named
+      ambient module, Rust `mod x;`, PHP unbracketed namespace, Ruby
+      `class << self`, C++ `::f` and anonymous namespace).
+- [ ] T2c anchor.rs: ladder step 4.5 (scope respell). An FQN gone from the
+      index whose body is still in its file under the same last segment is a
+      respelled SCOPE, not a moved symbol: follow it. Without it every scope
+      fix above false-stales the anchors already pointing at those FQNs
+      (measured 16.3% permanent: low_entropy under the follow floor,
+      ambiguous_anchor on any duplicated body) for zero code change.
+      store.rs: one-time `v7_content_refill` marker so a store that reached v7
+      under an earlier build still gets its single reindex.
+- [ ] T3 index/mod.rs: persist disamb into symbols insert; purge tx fix (G)
+- [ ] T4 memory/mod.rs + tools.rs: resolve_anchor DISTINCT (fqn, disamb) +
+      @disamb spec parsing (last-@ split, verbatim retry) + anchors INSERT
+      disamb + tool description + README
+- [ ] T5 anchor.rs: slot-first ladder (5 steps) + legacy NULL path +
+      opportunistic backfill + follow rewrites disamb + twin-masking test +
+      trait-rename follow test + golden additions
+- [ ] T6 bench/lag_bench.py: synthetic repos 2k/10k/50k, walk/stat/reindex
+      cost separation, staleness latency in calls, drain; run on release
+      binary; verdict recorded in ROADMAP with numbers
+- [ ] T7 P5 matched terms: implement capped omit-when-empty field + bench;
+      keep only if >= 4.0x with ITEM_OVERHEAD parity, else revert + episode
+- [ ] T8 docs: README (disamb + @spec + bench receipt), ROADMAP (0.15 ->
+      Shipped + watcher verdict), main.rs doc header if touched
+- [ ] T9 QA: full suite green, clippy 0, panic ratchet, bench 4.0x+, demo,
+      two-process v6->v7 dogfood on the real store, adversarial review
+      workflows (task-level + whole-branch), em-dash sweep
+- [ ] Ship: version 0.15.0 sync (Cargo.toml + server.json) via /deploy-limpet
+
+---
+
 # SPEC: Truth-Layer (Slice A), v0.14.0
 
-Status: IN PROGRESS (2026-07-17). Source: `IMPROVEMENTS-TRUTH-LAYER.md` (P0 + P1),
+Status: SHIPPED 2026-07-17 (tag v0.14.0; crates.io, MCP registry, GitHub release
+12 assets all verified 2026-07-21). Source: `IMPROVEMENTS-TRUTH-LAYER.md` (P0 + P1),
 triaged against real code + limpet memory. Ships **0.14.0** (feature = minor). Collides
 with roadmap 0.15 write-back (P1 == "anchor-collision surfacing at write"), so roadmap is
 reconciled in this drop. Adoption (demo/seed) and hardening (panic audit) are OUT of
@@ -17,6 +103,48 @@ Doctrine (limpet honesty scars): **flag and propose, never silently delete or me
 | CONF | Every confidence write passes through `quantize_confidence` (6-dp). | mem 01KWPA1G5S |
 | HONEST | verified > unverified on TIES; a far-more-relevant unverified memory still ranks (text_score dominates). | P0 acceptance |
 | POS | Roadmap/README contrast mechanisms, never competitor names. | mem 01KXABHGYP |
+| I-F3 | No symbol the 0.14 extractor produced is lost, and FQN spelling (`parents` + `name`) is byte-identical pre/post outside the nine sanctioned changes S1-S9; `kind` is byte-identical outside K1-K2. Runtime-proven across all 11 grammars against the pre-branch baseline, never asserted from node-types.json. A tenth spelling change, a third kind rule, or one lost symbol is a breach. | 0.15 T2/T2b |
+
+### I-F3: the complete sanctioned set (measured, not collected)
+
+I-F3 originally named THREE scope fixes. The adversarial-review round added
+five more scopes and one naming change, so the three-item wording was false.
+This is the measured list. Every row names the grammar and the vendored-grammar
+node kind; every row with a sibling form that must NOT take the change names it,
+because the cheapest way to breach I-F3 is for an arm to grow one node kind
+wider. Full rationale and the measurement of record:
+docs/superpowers/specs/2026-07-21-freshness-scale-2-design.md.
+
+| # | Grammar | Node kind | Spelling change | Negative bound |
+|---|---------|-----------|-----------------|----------------|
+| S1 | Rust | `mod_item` with a `body` | one FQN segment, no symbol row | `mod x;` pushes nothing |
+| S2 | PHP | `namespace_definition` with a `body` | one segment, no symbol row | `namespace A;` pushes nothing |
+| S3 | C++ | `function_definition` reaching `qualified_identifier` | every `scope` segment becomes a parent, raw source text | `::f` has no `scope` field; anonymous `namespace` has no name |
+| S4 | C# | `namespace_declaration` with a `body` | the dotted name as ONE segment | `file_scoped_namespace_declaration` pushes nothing |
+| S5 | TS | `internal_module` with a `body` | one segment, no symbol row | string-named `module "x" { }` is the `module` node, pushes nothing; kind absent from the JS grammar |
+| S6 | Java | `enum_declaration` | `class` row + scopes members | -- |
+| S7 | Java | `record_declaration` | `class` row + scopes members | -- |
+| S8 | PHP | `enum_declaration` | `class` row + scopes members | -- |
+| S9 | C++ | `template_function` under `qualified_identifier` | name is the template's `name` (`f`), not the template id (`f<int>`); arguments move to `disamb` | -- |
+
+`kind` moves only under K1/K2, both from `parents.is_empty()` becoming
+`fn_kind(tdepth)` where `tdepth` counts TYPE scopes only:
+
+| # | Rule | Effect |
+|---|------|--------|
+| K1 | module/namespace frame is not a type scope | a free function inside a C++ `namespace` (or Rust `mod`, PHP/C# namespace, TS `internal_module`) is `function`, not `method` |
+| K2 | enclosing FUNCTION frame is not a type scope | a nested `def`/`fn` is `function`, not `method` |
+
+Two C++ recoveries ADD rows without respelling any existing one (so they cannot
+breach I-F3, but they shift later ordinals in their file):
+R1 `reference_declarator`/`parenthesized_declarator` (fieldless wrappers,
+previously extracted nothing), R2 unqualified `template_function` (ditto).
+
+Measured over a 41-fixture corpus covering every `parents.push` arm in BOTH
+trees: 218 baseline symbols, 231 branch symbols, 42 spelling changes ALL
+attributable, 0 unattributed, 7 kind changes, 13 rows added, 0 rows lost; JS,
+Go and Bash byte-identical. Pins live in `tests/index_langs.rs` under the
+`I-F3 sanctioned-scope pins` banner.
 
 ## ATTACK SURFACE / HAZARDS
 
@@ -103,6 +231,7 @@ Slice A (truth layer):
       imports visible; acceptable degradation). INVARIANT: archival is a USER
       action, not an honesty flag; I3 does not apply (like superseded).
 - [ ] P5: `matched` field per recalled item (query∩body significant tokens); BENCH RISK
+      -> DEFERRED out of 0.14; 0.15 candidate, ships only if the 4.0x bench gate holds
 
 Slice B (adoption):
 - [x] `src/demo.rs` drop-in + wire main.rs; `cargo run -- demo` exits 0 (verified)
@@ -195,8 +324,11 @@ Ship:
 - [x] Final gates 2026-07-17 (post QA round 2): 13/13 suites (17 recall_quality/
       memory_api truth tests), clippy 0, ratchet ok (15 files pinned), bench 4.1x,
       lineage 5.4x, demo exit 0 + index self-verification, em-dash sweep clean
-- [ ] Whole-branch review (playbook item 14) before merge
-- [ ] Version 0.13.0 -> 0.14.0 via `/deploy-limpet` QA gate (no shortcut)
+- [x] Whole-branch review (playbook item 14) before merge (74 agents, 21 confirmed
+      findings, all fixed; section above)
+- [x] Version 0.13.0 -> 0.14.0 via `/deploy-limpet` QA gate: PR #26 merged, tag
+      v0.14.0 pushed, crates.io 0.14.0, MCP registry isLatest, GitHub release 12
+      assets, local binary 0.14.0 (asset count re-listed and confirmed 2026-07-21)
 
 ---
 

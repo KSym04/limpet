@@ -10,7 +10,7 @@ use rusqlite::Connection;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 
 pub struct Store {
     pub conn: Connection,
@@ -43,7 +43,8 @@ CREATE TABLE IF NOT EXISTS symbols (
   body_hash TEXT NOT NULL,
   body_len INTEGER,
   parent_fqn TEXT,
-  ordinal INTEGER NOT NULL DEFAULT 0
+  ordinal INTEGER NOT NULL DEFAULT 0,
+  disamb TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_symbols_fqn ON symbols(fqn);
 CREATE INDEX IF NOT EXISTS idx_symbols_body ON symbols(body_hash);
@@ -87,7 +88,8 @@ CREATE TABLE IF NOT EXISTS anchors (
   file TEXT NOT NULL,
   symbol_fqn TEXT,
   ast_body_hash TEXT,
-  context_hint TEXT
+  context_hint TEXT,
+  disamb TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_anchors_entry ON anchors(entry_id);
 CREATE INDEX IF NOT EXISTS idx_anchors_file ON anchors(file);
@@ -296,6 +298,103 @@ fn migrate_to_v6(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Attempt an ADD COLUMN, tolerating exactly the multi-process race: two
+/// processes can both pass the pragma gate, SQLite serializes the ALTERs, and
+/// the loser fails with "duplicate column name". That failure means the column
+/// exists (already migrated) and maps to Ok(false); any other error
+/// propagates. Returns whether THIS call actually added the column, so the
+/// caller can run one-time side effects exactly once across processes.
+fn add_column_tolerating_race(conn: &Connection, ddl: &str) -> Result<bool> {
+    match conn.execute_batch(ddl) {
+        Ok(()) => Ok(true),
+        Err(e) if e.to_string().contains("duplicate column name") => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Schema v7 (lazy migration): additive `symbols.disamb` and `anchors.disamb`
+/// discriminator columns (trait name, receiver type, parameter list; NULL when
+/// no discriminator applies). No UNIQUE, no index: true duplicates stay legal
+/// rows and uniqueness is delivered at resolution. Each ALTER gates on its OWN
+/// table's ACTUAL state (pragma_table_info, the v5 precedent), never the
+/// version stamp: migrations run on every open and must no-op on re-run.
+/// Adding the symbols column also zeroes files.mtime_ns so the bounded sweep
+/// re-parses every file and refills disamb. That ALTER + UPDATE pair MUST be
+/// one transaction: the pragma gate keys off the column alone, so a crash
+/// between the two statements would leave the column present with live mtimes
+/// and every later open would skip the refill forever. SQLite DDL is
+/// transactional, so the pair commits or disappears together. A racing loser
+/// (duplicate-column ALTER failure) rolls back and skips the zeroing: the
+/// winner's commit already carried it. The anchors column zeroes nothing
+/// (anchors backfill via resolve, not re-parse), so its single ALTER is
+/// atomic on its own and needs no transaction.
+fn migrate_to_v7(conn: &Connection) -> Result<()> {
+    let present: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('symbols') WHERE name = 'disamb'",
+        [],
+        |r| r.get(0),
+    )?;
+    if present == 0 {
+        let tx = conn.unchecked_transaction()?;
+        if add_column_tolerating_race(&tx, "ALTER TABLE symbols ADD COLUMN disamb TEXT")? {
+            tx.commit()?;
+        } else {
+            tx.rollback()?;
+        }
+    }
+    let present: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('anchors') WHERE name = 'disamb'",
+        [],
+        |r| r.get(0),
+    )?;
+    if present == 0 {
+        add_column_tolerating_race(conn, "ALTER TABLE anchors ADD COLUMN disamb TEXT")?;
+    }
+    conn.execute(
+        "INSERT INTO meta_kv(k, v) VALUES('schema_version', ?1)
+         ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+        [SCHEMA_VERSION.to_string()],
+    )?;
+    Ok(())
+}
+
+/// One-time content refill for stores whose v7 columns were filled by an
+/// EARLIER v7 build, not a shape migration.
+///
+/// `migrate_to_v7` zeroes `files.mtime_ns` from inside the ALTER that adds
+/// `symbols.disamb`, so it fires exactly once per store and never again. A
+/// store that reached v7 under a mid-development build therefore already has
+/// the column, skips that refill forever, and keeps rows the shipping extractor
+/// would spell differently: FQNs missing the scope segments 0.15 added
+/// (C# block namespace, Java enum/record, PHP enum, TS namespace), `disamb`
+/// values from before the discriminator covered accessors and generic arity,
+/// and `calls.caller_fqn` values from before it carried the caller's full
+/// scope. Those rows heal only file by file as files happen to change, so a
+/// dogfood store can serve wrong lineage and unresolvable FQNs indefinitely.
+///
+/// The gate is its own `meta_kv` marker, not the version stamp: every migration
+/// stamps the same `SCHEMA_VERSION`, so the stamp cannot distinguish "reached
+/// v7 last week" from "reached v7 just now". `ON CONFLICT DO NOTHING` makes the
+/// insert the claim, so the refill runs once even across racing processes, and
+/// the marker plus the UPDATE share one transaction for the same reason
+/// `migrate_to_v7` pairs its own: a crash between them would skip the refill
+/// forever. No DDL, so `SCHEMA_VERSION` is unchanged; the shape is still v7.
+fn refill_v7_content_once(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    let claimed = tx.execute(
+        "INSERT INTO meta_kv(k, v) VALUES('v7_content_refill', '1')
+         ON CONFLICT(k) DO NOTHING",
+        [],
+    )?;
+    if claimed == 1 {
+        tx.execute("UPDATE files SET mtime_ns = 0", [])?;
+        tx.commit()?;
+    } else {
+        tx.rollback()?;
+    }
+    Ok(())
+}
+
 impl Store {
     /// Open (creating if needed) the store at an explicit database path.
     pub fn open(db_path: &Path) -> Result<Store> {
@@ -314,6 +413,8 @@ impl Store {
         migrate_to_v4(&conn)?;
         migrate_to_v5(&conn)?;
         migrate_to_v6(&conn)?;
+        migrate_to_v7(&conn)?;
+        refill_v7_content_once(&conn)?;
         Ok(Store { conn, session_base: std::cell::Cell::new(Ledger::default()) })
     }
 
@@ -327,6 +428,8 @@ impl Store {
         migrate_to_v4(&conn)?;
         migrate_to_v5(&conn)?;
         migrate_to_v6(&conn)?;
+        migrate_to_v7(&conn)?;
+        refill_v7_content_once(&conn)?;
         Ok(Store { conn, session_base: std::cell::Cell::new(Ledger::default()) })
     }
 
@@ -561,17 +664,25 @@ impl Store {
         for mut obj in ids {
             let id = obj["id"].as_str().unwrap_or_default().to_string();
             let mut astmt = self.conn.prepare(
-                "SELECT file, symbol_fqn, ast_body_hash, context_hint
+                "SELECT file, symbol_fqn, ast_body_hash, context_hint, disamb
                  FROM anchors WHERE entry_id = ?1 ORDER BY id",
             )?;
             let anchors: Vec<serde_json::Value> = astmt
                 .query_map([&id], |r| {
-                    Ok(serde_json::json!({
+                    let mut a = serde_json::json!({
                         "file": r.get::<_, String>(0)?,
                         "symbol_fqn": r.get::<_, Option<String>>(1)?,
                         "ast_body_hash": r.get::<_, Option<String>>(2)?,
                         "context_hint": r.get::<_, Option<String>>(3)?,
-                    }))
+                    });
+                    // The slot travels with the anchor, but only a
+                    // disambiguated anchor pays for the field on the wire
+                    // (same omit-when-null rule as `archived`), so exports
+                    // from before this column read back byte-identically.
+                    if let Some(d) = r.get::<_, Option<String>>(4)? {
+                        a["disamb"] = serde_json::Value::String(d);
+                    }
+                    Ok(a)
                 })?
                 .collect::<rusqlite::Result<_>>()?;
             let mut lstmt = self.conn.prepare(
@@ -704,6 +815,21 @@ impl Store {
             if body.trim().is_empty() {
                 report.rejected += 1;
                 continue;
+            }
+            // An anchor's `disamb` names the exact symbol slot (trait impl,
+            // overload) the memory belongs to. A line whose disamb is present
+            // but not a string is malformed: coercing it to NULL would
+            // silently widen the anchor back to "any twin with this FQN",
+            // exactly the nondeterminism slot resolution exists to kill.
+            // Reject the line, never the batch.
+            if let Some(anchors) = obj["anchors"].as_array() {
+                if anchors
+                    .iter()
+                    .any(|a| !a["disamb"].is_null() && !a["disamb"].is_string())
+                {
+                    report.rejected += 1;
+                    continue;
+                }
             }
 
             // An origin names ONE memory. A different id claiming an existing
@@ -840,17 +966,26 @@ impl Store {
                 for a in anchors {
                     let file = a["file"].as_str().unwrap_or_default();
                     let symbol_fqn = a["symbol_fqn"].as_str();
+                    let disamb = a["disamb"].as_str();
                     // Re-resolve the hash against the LOCAL index rather than
                     // trusting the imported one: a forged hash must not be
                     // able to fake "fresh" against code this machine does not
                     // have. If the anchored symbol/file exists here, adopt the
                     // local hash (honestly fresh); otherwise keep the imported
-                    // hash so normal follow/invalidate logic applies.
+                    // hash so normal follow/invalidate logic applies. A
+                    // disambiguated anchor re-resolves against ITS slot, so a
+                    // twin's body can never supply the hash. The file is
+                    // pinned too: an FQN is path-derived with the extension
+                    // stripped, so `util.js` and `util.ts` mint the same one
+                    // and an fqn-only lookup would adopt whichever sorts
+                    // first. The ordering keeps the rest deterministic.
                     let local_hash: Option<String> = match symbol_fqn {
                         Some(fqn) => tx
                             .query_row(
-                                "SELECT body_hash FROM symbols WHERE fqn = ?1 LIMIT 1",
-                                [fqn],
+                                "SELECT body_hash FROM symbols
+                                 WHERE fqn = ?1 AND (?2 IS NULL OR disamb = ?2) AND file = ?3
+                                 ORDER BY ordinal, body_hash LIMIT 1",
+                                rusqlite::params![fqn, disamb, file],
                                 |r| r.get(0),
                             )
                             .ok(),
@@ -862,9 +997,11 @@ impl Store {
                     };
                     let hash = local_hash.or_else(|| a["ast_body_hash"].as_str().map(str::to_string));
                     tx.execute(
-                        "INSERT INTO anchors(entry_id, file, symbol_fqn, ast_body_hash, context_hint)
-                         VALUES (?1,?2,?3,?4,?5)",
-                        rusqlite::params![id, file, symbol_fqn, hash, a["context_hint"].as_str()],
+                        "INSERT INTO anchors(entry_id, file, symbol_fqn, ast_body_hash, context_hint, disamb)
+                         VALUES (?1,?2,?3,?4,?5,?6)",
+                        rusqlite::params![
+                            id, file, symbol_fqn, hash, a["context_hint"].as_str(), disamb
+                        ],
                     )?;
                 }
             }
@@ -1245,7 +1382,7 @@ mod tests {
             .unwrap();
         assert_eq!(private, 0, "pre-existing rows default to not-private");
         assert_eq!(origin, None);
-        assert_eq!(s.kv_get("schema_version").unwrap().as_deref(), Some("6"));
+        assert_eq!(s.kv_get("schema_version").unwrap().as_deref(), Some("7"));
     }
 
     #[test]
@@ -1348,7 +1485,7 @@ mod tests {
             .conn
             .query_row("SELECT v FROM meta_kv WHERE k='schema_version'", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(ver, "6");
+        assert_eq!(ver, "7");
         // Insert + read back an edge (CHECK constraint honored).
         store
             .conn
@@ -1387,7 +1524,7 @@ mod tests {
             .conn
             .query_row("SELECT v FROM meta_kv WHERE k='schema_version'", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(ver, "6");
+        assert_eq!(ver, "7");
         for rel in ["embeds", "mixin", "extends"] {
             store
                 .conn
@@ -1446,7 +1583,7 @@ mod tests {
             [], |r| r.get(0),
         ).unwrap();
         assert_eq!(present, 1, "fresh DDL must carry body_len");
-        assert_eq!(s.kv_get("schema_version").unwrap().as_deref(), Some("6"));
+        assert_eq!(s.kv_get("schema_version").unwrap().as_deref(), Some("7"));
     }
 
     #[test]
@@ -1566,6 +1703,174 @@ mod tests {
             .query_row("SELECT mtime_ns FROM files WHERE path='a.go'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(mtime, 999, "already-wide open must not re-zero mtimes");
+    }
+
+    /// Build a v6-shaped store by hand at `db`: symbols and anchors WITHOUT
+    /// disamb, everything else already current (wide inherits CHECK, body_len
+    /// present) so ONLY the v7 branch can be the one zeroing mtimes. One file
+    /// row with a live mtime and one symbol row.
+    fn build_v6_shaped_store(db: &std::path::Path) {
+        let conn = rusqlite::Connection::open(db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE meta_kv (k TEXT PRIMARY KEY, v TEXT NOT NULL);
+             CREATE TABLE files (path TEXT PRIMARY KEY, lang TEXT, mtime_ns INTEGER NOT NULL,
+               size INTEGER NOT NULL, hash TEXT NOT NULL, parse_ok INTEGER NOT NULL DEFAULT 1);
+             CREATE TABLE symbols (
+               id INTEGER PRIMARY KEY, fqn TEXT NOT NULL, name TEXT NOT NULL,
+               kind TEXT NOT NULL, file TEXT NOT NULL,
+               start_line INTEGER, end_line INTEGER,
+               body_hash TEXT NOT NULL, body_len INTEGER, parent_fqn TEXT,
+               ordinal INTEGER NOT NULL DEFAULT 0);
+             CREATE TABLE anchors (
+               id INTEGER PRIMARY KEY, entry_id TEXT NOT NULL, file TEXT NOT NULL,
+               symbol_fqn TEXT, ast_body_hash TEXT, context_hint TEXT);
+             CREATE TABLE inherits (
+               child_fqn TEXT NOT NULL, parent_name TEXT NOT NULL,
+               rel TEXT NOT NULL CHECK(rel IN ('extends','implements','impl_trait','embeds','mixin')),
+               file TEXT NOT NULL);",
+        )
+        .unwrap();
+        conn.execute("INSERT INTO meta_kv(k,v) VALUES('schema_version','6')", []).unwrap();
+        conn.execute(
+            "INSERT INTO files(path,lang,mtime_ns,size,hash) VALUES('a.rs','rust',12345,10,'h')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO symbols(fqn,name,kind,file,body_hash,body_len)
+             VALUES('a.f','f','function','a.rs','bh',99)",
+            [],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn v7_migration_adds_disamb_and_marks_files_for_reindex() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("store.db");
+        build_v6_shaped_store(&db);
+        let s = Store::open(&db).unwrap();
+        for table in ["symbols", "anchors"] {
+            let present: i64 = s.conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = 'disamb'",
+                [table], |r| r.get(0),
+            ).unwrap();
+            assert_eq!(present, 1, "migration must add {table}.disamb");
+        }
+        let mtime: i64 = s.conn
+            .query_row("SELECT mtime_ns FROM files WHERE path='a.rs'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mtime, 0, "one-time widen must mark files dirty so the sweep refills disamb");
+        let kept: i64 = s.conn
+            .query_row("SELECT COUNT(*) FROM symbols", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kept, 1, "migration must not touch existing symbol rows");
+        assert_eq!(s.kv_get("schema_version").unwrap().as_deref(), Some("7"));
+    }
+
+    #[test]
+    fn v7_refill_marker_fires_once() {
+        // The v7 mtime zeroing must fire ONCE: migrations run on EVERY open
+        // from multiple processes, and a second open must not re-zero (the v4
+        // lesson: single-open tests hid a wipe).
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("store.db");
+        build_v6_shaped_store(&db);
+        {
+            let s = Store::open(&db).unwrap();
+            let mtime: i64 = s.conn
+                .query_row("SELECT mtime_ns FROM files WHERE path='a.rs'", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(mtime, 0, "first open must fire the refill marker");
+            s.conn.execute("UPDATE files SET mtime_ns = 999", []).unwrap();
+        }
+        let s = Store::open(&db).unwrap();
+        let mtime: i64 = s.conn
+            .query_row("SELECT mtime_ns FROM files WHERE path='a.rs'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mtime, 999, "re-open must not re-fire the disamb refill marker");
+    }
+
+    #[test]
+    fn a_store_already_at_v7_still_gets_one_content_refill() {
+        // The gap `migrate_to_v7` cannot see: a store that reached v7 under an
+        // EARLIER v7 build already has the columns, so the ALTER-gated refill
+        // never fires again, and it keeps FQNs, discriminators and caller_fqns
+        // the shipping extractor spells differently. Those rows heal only as
+        // files happen to change, so the store serves wrong answers
+        // indefinitely.
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("store.db");
+        build_v6_shaped_store(&db);
+        {
+            // Exactly what a mid-development v7 build left behind: both columns
+            // present, live mtimes, and no content-refill marker.
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "ALTER TABLE symbols ADD COLUMN disamb TEXT;
+                 ALTER TABLE anchors ADD COLUMN disamb TEXT;",
+            )
+            .unwrap();
+            conn.execute("UPDATE meta_kv SET v='7' WHERE k='schema_version'", []).unwrap();
+        }
+        {
+            let s = Store::open(&db).unwrap();
+            let mtime: i64 = s
+                .conn
+                .query_row("SELECT mtime_ns FROM files WHERE path='a.rs'", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(mtime, 0, "an already-v7 store must still be marked for one reindex");
+            s.conn.execute("UPDATE files SET mtime_ns = 777", []).unwrap();
+        }
+        let s = Store::open(&db).unwrap();
+        let mtime: i64 = s
+            .conn
+            .query_row("SELECT mtime_ns FROM files WHERE path='a.rs'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mtime, 777, "the content refill claims its marker once and never re-fires");
+    }
+
+    #[test]
+    fn fresh_store_has_disamb_columns() {
+        // Pin the CONST itself first: pragma inspection alone is tautological
+        // here, because migrate_to_v7 would add the columns in the same open
+        // if SCHEMA_V1 dropped them. Exactly two declarations, symbols and
+        // anchors.
+        assert_eq!(
+            SCHEMA_V1.matches("disamb TEXT").count(),
+            2,
+            "SCHEMA_V1 must declare disamb on symbols and anchors, not lean on migrate_to_v7",
+        );
+        // Fresh DDL carries disamb directly, so the v7 pragma gate skips both
+        // ALTERs and no migration work runs on a new store.
+        let s = Store::open_in_memory().unwrap();
+        for table in ["symbols", "anchors"] {
+            let present: i64 = s.conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = 'disamb'",
+                [table], |r| r.get(0),
+            ).unwrap();
+            assert_eq!(present, 1, "fresh DDL must carry {table}.disamb");
+        }
+    }
+
+    #[test]
+    fn duplicate_column_alter_is_tolerated_and_other_errors_propagate() {
+        // The migration-race loser: pragma gate passed stale, the column now
+        // exists, the ALTER fails with SQLite's "duplicate column name". That
+        // exact failure must map to Ok(false) (already migrated, no one-time
+        // side effects); anything else must propagate.
+        let s = Store::open_in_memory().unwrap();
+        let added = add_column_tolerating_race(
+            &s.conn,
+            "ALTER TABLE symbols ADD COLUMN disamb TEXT",
+        )
+        .unwrap();
+        assert!(!added, "loser must see already-migrated, not an error");
+        assert!(
+            add_column_tolerating_race(&s.conn, "ALTER TABLE no_such_table ADD COLUMN x TEXT")
+                .is_err(),
+            "non-race ALTER failures must propagate",
+        );
     }
 
     #[test]

@@ -13,10 +13,10 @@ that: age is not truth, and a schedule cannot name which memory an edit broke.
 A deterministic AST-hash anchor is the only thing that flags the lie. Everything below deepens that edge or it does
 not ship.
 
-**Current focus (post-0.13): adoption before features.** The core promise is
+**Current focus (post-0.14): adoption before features.** The core promise is
 built and receipted; the bottleneck is people using it. The 0.14 truth-layer
 release carries that focus in the binary: `limpet demo` is the reproducible
-anchor-lifecycle proof (anchor → edit → stale → heal, self-verifying), and
+anchor-lifecycle proof (anchor -> edit -> stale -> heal, self-verifying), and
 `limpet seed` lets a working MEMORY.md come along instead of being abandoned.
 Feature work continues under the evidence gates below, unchanged.
 
@@ -51,36 +51,17 @@ built.
   surfaces as `stale:low_entropy` instead of silently re-pointing the anchor at
   a trivial twin; it heals the moment the original returns. On pre-v5 stores
   the guard hardens progressively as the sweep refills.
-
-## v0.14.0: the truth layer (in flight)
-
-A claim and a proven fact used to look identical at recall, so the tool could
-confidently repeat a past mistake. This release makes verification a
-first-class signal on both the read and write paths, and ships the adoption
-bridge.
-
-- **Verification ranks.** `verified` (evidence on file) earns a ranking boost;
-  an unverified explicit claim is downranked, so truth wins ties. Typed
-  confidence on unverified memories is capped below what `verified` earns:
-  swagger cannot outrank proof. Gate held: the token bench stayed over 4.0x
-  and the recall-quality suite pins the behavior.
-- **Contradiction surfacing at write** (pulled forward from the refinement
-  loop). A new memory landing on an anchor whose existing memory asserts a
-  divergent value (a flipped number, an added negation) returns
-  `possible_conflicts` naming the old id, so the writer supersedes
-  deliberately. Surfaced, never auto-linked: invariant I4 holds.
-- **Dedup enforced at write.** A near-identical body on the same anchor is
-  refused, naming the existing id and the supersede path; `force: true` stores
-  anyway. A correction with a new value is never refused: blocking it would
-  freeze a past mistake in place.
-- **Archival.** `admin archive` shelves a memory without deleting it: hidden
-  from recall, the verify queue, and map, while its staleness keeps tracking
-  the code underneath; `restore` brings it back with its current, truthful
-  status. Archived entries still export (flagged), so hidden is never lost.
-- **Adoption bridge.** `limpet demo` (the self-verifying lifecycle proof, also
-  a CI smoke test on every platform) and `limpet seed` (ingest a MEMORY.md as
-  `mined`, idempotently). Plus wider default ignores for generated trees and a
-  hot-path panic ratchet in CI.
+- **v0.14.0: the truth layer.** Verification became a first-class signal on
+  both paths: `verified` evidence earns a ranking boost only while its anchor
+  is live (rotten proof loses the boost), typed confidence is capped below
+  what proof earns, value-divergent writes surface `possible_conflicts`,
+  near-identical bodies are refused with the supersede path named (`force`
+  overrides; corrections never refused), and archival shelves a memory without
+  deleting it while staleness keeps tracking the code underneath. The adoption
+  bridge shipped in the same binary: `limpet demo` (self-verifying lifecycle
+  proof, CI smoke on every platform), `limpet seed` (MEMORY.md ingest as
+  `mined`), `import --path`, wider default ignores, and a hot-path panic
+  ratchet in CI.
 
 ## v0.15: freshness at scale, part 2
 

@@ -99,61 +99,179 @@ pub struct RememberResult {
 struct ResolvedAnchor {
     file: String,
     symbol_fqn: Option<String>,
+    /// The discriminator of the exact symbol slot this anchor names (the
+    /// Rust trait, the Go receiver type, the C++/Java/C# parameter list).
+    /// NULL for file anchors and for symbols that cannot collide.
+    disamb: Option<String>,
     hash: String,
     context_hint: Option<String>,
+}
+
+/// How many ambiguous slots an error lists before it says there are more.
+/// The list is the caller's whole menu, so a silent truncation would hide the
+/// very choice they were about to make.
+const SLOT_LIST_MAX: usize = 5;
+
+/// What a symbol spec asks of the slot discriminator.
+enum SlotWant<'a> {
+    /// No `@` suffix: every slot the name offers.
+    Any,
+    /// A trailing bare `@`: the slot that carries NO discriminator. SQL
+    /// equality never matches NULL, so this needs its own filter or the
+    /// undiscriminated slot (an inherent method beside a trait impl of the
+    /// same name) has no typeable spelling at all.
+    Undiscriminated,
+    /// `@<text>`: exactly that discriminator.
+    Exact(&'a str),
+}
+
+/// Render a symbol slot the way a caller can type it straight back: the bare
+/// FQN when the symbol carries no discriminator, `fqn@disamb` when it does.
+fn slot_form(fqn: &str, disamb: Option<&str>) -> String {
+    match disamb {
+        Some(d) => format!("{fqn}@{d}"),
+        None => fqn.to_string(),
+    }
+}
+
+/// Render a whole list of slots as specs the caller can type back verbatim.
+/// Same as [`slot_form`] per slot, except that an undiscriminated slot whose
+/// FQN also has discriminated twins renders as `fqn@`: the bare FQN names
+/// every twin at once and would bounce straight back as ambiguous, so the
+/// empty suffix is the only spelling that reaches it.
+fn slot_forms(slots: &[(String, Option<String>)]) -> Vec<String> {
+    slots
+        .iter()
+        .map(|(fqn, d)| {
+            if d.is_none() && slots.iter().filter(|(f, _)| f == fqn).count() > 1 {
+                format!("{fqn}@")
+            } else {
+                slot_form(fqn, d.as_deref())
+            }
+        })
+        .collect()
+}
+
+/// Every distinct `(fqn, disamb)` slot one file offers for a name-or-FQN,
+/// narrowed by what the spec asked of the discriminator. Set-semantic and
+/// bounded: the caller only needs "none", "exactly one", or "several, here
+/// they are", plus one row past the list cap so a truncated menu can say so.
+/// Sorted so the listed choices are stable between runs.
+fn symbol_slots(
+    store: &Store,
+    name: &str,
+    file: &str,
+    want: SlotWant,
+) -> Result<Vec<(String, Option<String>)>> {
+    let filter = match want {
+        SlotWant::Any => "1",
+        SlotWant::Undiscriminated => "disamb IS NULL",
+        SlotWant::Exact(_) => "disamb = ?3",
+    };
+    let sql = format!(
+        "SELECT DISTINCT fqn, disamb FROM symbols
+         WHERE (fqn = ?1 OR name = ?1) AND file = ?2 AND {filter}
+         ORDER BY fqn, disamb LIMIT {}",
+        SLOT_LIST_MAX + 1
+    );
+    let mut stmt = store.conn.prepare(&sql)?;
+    fn row(r: &rusqlite::Row) -> rusqlite::Result<(String, Option<String>)> {
+        Ok((r.get(0)?, r.get(1)?))
+    }
+    let slots = match want {
+        SlotWant::Exact(d) => stmt
+            .query_map(params![name, file, d], row)?
+            .collect::<rusqlite::Result<_>>()?,
+        _ => stmt.query_map(params![name, file], row)?.collect::<rusqlite::Result<_>>()?,
+    };
+    Ok(slots)
 }
 
 fn resolve_anchor(store: &Store, spec: &AnchorSpec) -> Result<ResolvedAnchor> {
     match &spec.symbol {
         Some(symbol) => {
-            // Accept a bare name or a full FQN, but never guess between
-            // duplicates: two `push` methods in one file must surface as a
-            // choice, not a silently-picked LIMIT 1 (audit 2026-07).
-            let mut cstmt = store.conn.prepare(
-                "SELECT DISTINCT fqn FROM symbols
-                 WHERE (fqn = ?1 OR name = ?1) AND file = ?2 LIMIT 5",
-            )?;
-            let candidates: Vec<String> = cstmt
-                .query_map(params![symbol, spec.file], |r| r.get(0))?
-                .collect::<rusqlite::Result<_>>()?;
-            if candidates.len() > 1 {
+            // Accept a bare name or a full FQN, optionally suffixed with
+            // `@<disamb>` to name ONE slot ("go@A"); a trailing bare `@`
+            // names the slot with no discriminator. A discriminator is raw
+            // source text and can hold an `@` of its own (a Java parameter
+            // list carries `@NonNull`, a C# one carries `@class`), so the
+            // split is retried at each `@` from the right until one names
+            // something. A spec that names nothing after every split is
+            // looked up verbatim: a symbol can legitimately be spelled with
+            // an `@` (bash allows it) and must stay anchorable.
+            let mut slots: Vec<(String, Option<String>)> = Vec::new();
+            for (at, _) in symbol.rmatch_indices('@') {
+                if at == 0 {
+                    continue;
+                }
+                let (name, want) = (&symbol[..at], &symbol[at + 1..]);
+                let filter =
+                    if want.is_empty() { SlotWant::Undiscriminated } else { SlotWant::Exact(want) };
+                slots = symbol_slots(store, name, &spec.file, filter)?;
+                if !slots.is_empty() {
+                    break;
+                }
+            }
+            if slots.is_empty() {
+                slots = symbol_slots(store, symbol, &spec.file, SlotWant::Any)?;
+            }
+            // Never guess between duplicates: two `push` methods, or twin
+            // trait impls of one method, must surface as a choice rather
+            // than a silently-picked LIMIT 1 (audit 2026-07).
+            if slots.len() > 1 {
+                let forms = slot_forms(&slots);
+                let shown = &forms[..forms.len().min(SLOT_LIST_MAX)];
+                let more = if forms.len() > SLOT_LIST_MAX { ", and more" } else { "" };
                 bail!(
-                    "symbol '{symbol}' is ambiguous in {}: matches {candidates:?}. \
-                     Anchor with the full FQN instead.",
+                    "symbol '{symbol}' is ambiguous in {}: matches {shown:?}{more}. \
+                     Anchor with one of those exact forms instead (the `@` suffix \
+                     picks a single trait impl or overload; a bare trailing `@` \
+                     picks the one with no discriminator).",
                     spec.file
                 );
             }
-            let row: Option<(String, String, String)> = store
-                .conn
-                .query_row(
-                    "SELECT fqn, file, body_hash FROM symbols
-                     WHERE (fqn = ?1 OR name = ?1) AND file = ?2 LIMIT 1",
-                    params![symbol, spec.file],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-                )
-                .ok();
-            let Some((sym_fqn, file, hash)) = row else {
+            let Some((sym_fqn, disamb)) = slots.into_iter().next() else {
                 let mut near_stmt = store.conn.prepare(
-                    "SELECT fqn FROM symbols WHERE file = ?1 ORDER BY fqn LIMIT 10",
+                    "SELECT DISTINCT fqn, disamb FROM symbols
+                     WHERE file = ?1 ORDER BY fqn, disamb LIMIT 10",
                 )?;
-                let near: Vec<String> = near_stmt
-                    .query_map([&spec.file], |r| r.get(0))?
+                let near_slots: Vec<(String, Option<String>)> = near_stmt
+                    .query_map([&spec.file], |r| Ok((r.get(0)?, r.get(1)?)))?
                     .collect::<rusqlite::Result<_>>()?;
+                let near = slot_forms(&near_slots);
                 bail!(
                     "symbol '{symbol}' not found in {} (known there: {near:?})",
                     spec.file
                 );
             };
-            let hint: Option<String> = store
+            // Exactly one slot: read THAT slot's hash. True duplicates inside
+            // one slot stay legal rows (the column carries no UNIQUE), so the
+            // pick is ordered by position in the file: same source, same
+            // anchor, every time. The old bare-FQN LIMIT 1 could hand back an
+            // arbitrary twin's hash instead.
+            let (hash, hint): (String, Option<String>) = store
                 .conn
                 .query_row(
-                    "SELECT parent_fqn FROM symbols WHERE fqn = ?1 LIMIT 1",
-                    [&sym_fqn],
-                    |r| r.get(0),
+                    "SELECT body_hash, parent_fqn FROM symbols
+                     WHERE fqn = ?1 AND disamb IS ?2 AND file = ?3
+                     ORDER BY ordinal, body_hash LIMIT 1",
+                    params![sym_fqn, disamb, spec.file],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
                 )
-                .ok()
-                .flatten();
-            Ok(ResolvedAnchor { file, symbol_fqn: Some(sym_fqn), hash, context_hint: hint })
+                .with_context(|| {
+                    format!(
+                        "resolving symbol slot {} in {}",
+                        slot_form(&sym_fqn, disamb.as_deref()),
+                        spec.file
+                    )
+                })?;
+            Ok(ResolvedAnchor {
+                file: spec.file.clone(),
+                symbol_fqn: Some(sym_fqn),
+                disamb,
+                hash,
+                context_hint: hint,
+            })
         }
         None => {
             // File-level anchor: the file must be indexed, and its current
@@ -176,6 +294,7 @@ fn resolve_anchor(store: &Store, spec: &AnchorSpec) -> Result<ResolvedAnchor> {
             Ok(ResolvedAnchor {
                 file: spec.file.clone(),
                 symbol_fqn: None,
+                disamb: None,
                 hash,
                 context_hint: None,
             })
@@ -348,9 +467,9 @@ pub fn remember(
     let mut anchored = 0usize;
     for a in &resolved {
         store.conn.execute(
-            "INSERT INTO anchors(entry_id, file, symbol_fqn, ast_body_hash, context_hint)
-             VALUES (?1,?2,?3,?4,?5)",
-            params![id, a.file, a.symbol_fqn, a.hash, a.context_hint],
+            "INSERT INTO anchors(entry_id, file, symbol_fqn, ast_body_hash, context_hint, disamb)
+             VALUES (?1,?2,?3,?4,?5,?6)",
+            params![id, a.file, a.symbol_fqn, a.hash, a.context_hint, a.disamb],
         )?;
         anchored += 1;
     }

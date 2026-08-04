@@ -196,14 +196,17 @@ fn index_file_parsed(
             .get(ordinal)
             .cloned()
             .unwrap_or_else(|| (String::from("unhashed"), None));
+        // `disamb` is the overload/impl discriminator (schema v7). It is NULL
+        // for every symbol class that cannot collide, and it never enters the
+        // body hash, so persisting it changes no existing column.
         store.conn.execute(
             "INSERT INTO symbols(fqn, name, kind, file, start_line, end_line,
-                                 body_hash, parent_fqn, ordinal, body_len)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                                 body_hash, parent_fqn, ordinal, body_len, disamb)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
             params![
                 sym_fqn, sym.name, sym.kind, rel,
                 sym.start_line as i64, sym.end_line as i64,
-                body_hash, parent_fqn, ordinal as i64, body_len
+                body_hash, parent_fqn, ordinal as i64, body_len, sym.disamb
             ],
         )?;
         count += 1;
@@ -213,16 +216,18 @@ fn index_file_parsed(
             .conn
             .execute("INSERT INTO imports(file, target) VALUES (?1,?2)", params![rel, imp])?;
     }
-    for (caller, callee) in &facts.calls {
-        let parent_refs: Vec<&str> = vec![];
-        let caller_fqn = if caller == "<file>" {
-            fqn::fqn(rel, &parent_refs, "<file>")
-        } else {
-            fqn::fqn(rel, &parent_refs, caller)
-        };
+    // `caller_fqn` MUST equal the calling symbol's own `symbols.fqn`: that is
+    // the column `graph::lineage` joins on for the descendants (callee)
+    // direction. Building it from the full parents path is what makes a method
+    // inside a class, a C++ out-of-line definition, and a Rust inline-mod fn
+    // match; a flat name only ever matched top-level symbols. The `<file>`
+    // sentinel needs no special case: it carries no parents by construction.
+    for call in &facts.calls {
+        let parent_refs: Vec<&str> = call.parents.iter().map(String::as_str).collect();
+        let caller_fqn = fqn::fqn(rel, &parent_refs, &call.name);
         store.conn.execute(
             "INSERT INTO calls(caller_fqn, callee_name, file) VALUES (?1,?2,?3)",
-            params![caller_fqn, callee, rel],
+            params![caller_fqn, call.callee, rel],
         )?;
     }
     for inh in &facts.inherits {
@@ -406,6 +411,42 @@ fn maybe_auto_import(store: &mut Store, root: &Path) -> Result<Option<ImportRepo
     Ok(Some(store.import_jsonl(&mut reader)?))
 }
 
+/// Drop every row belonging to a file that no longer exists on disk.
+///
+/// One transaction per removed file, matching index_file's per-file idiom: a
+/// crash between the DELETEs would otherwise leave the `files` row gone while
+/// imports/calls/inherits rows survive, and nothing would ever collect them
+/// (the sweep only revisits paths the `files` table still knows about).
+/// `symbols` needs no DELETE of its own: it cascades off `files(path)`, which
+/// holds because both store openers set `PRAGMA foreign_keys = ON` (SQLite
+/// defaults the pragma OFF and scopes it per connection).
+fn purge_removed_file(store: &Store, rel: &str) -> Result<()> {
+    store.conn.execute_batch("BEGIN IMMEDIATE")?;
+    let outcome = (|| -> Result<()> {
+        store.conn.execute("DELETE FROM files WHERE path = ?1", [rel])?;
+        store.conn.execute("DELETE FROM imports WHERE file = ?1", [rel])?;
+        store.conn.execute("DELETE FROM calls WHERE file = ?1", [rel])?;
+        store.conn.execute("DELETE FROM inherits WHERE file = ?1", [rel])?;
+        Ok(())
+    })();
+    match outcome {
+        Ok(()) => {
+            // A failed COMMIT does not always end the transaction (SQLITE_BUSY
+            // explicitly leaves it open), so roll back rather than hand back a
+            // connection stuck mid-write for the rest of the process.
+            if let Err(e) = store.conn.execute_batch("COMMIT") {
+                let _ = store.conn.execute_batch("ROLLBACK");
+                return Err(e.into());
+            }
+            Ok(())
+        }
+        Err(e) => {
+            let _ = store.conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
+}
+
 /// Bounded incremental sweep: detect changed/new/removed files, reindex up
 /// to the budget inline, report the rest dirty.
 /// `ext` is the extension override map from `.limpet.json`, loaded ONCE per
@@ -434,10 +475,7 @@ pub fn sweep(
             None => {
                 // File gone: purge its rows now (cheap) so anchors resolve
                 // against reality.
-                store.conn.execute("DELETE FROM files WHERE path = ?1", [rel])?;
-                store.conn.execute("DELETE FROM imports WHERE file = ?1", [rel])?;
-                store.conn.execute("DELETE FROM calls WHERE file = ?1", [rel])?;
-                store.conn.execute("DELETE FROM inherits WHERE file = ?1", [rel])?;
+                purge_removed_file(store, rel)?;
                 report.removed.push(rel.clone());
             }
         }
@@ -762,6 +800,194 @@ mod tests {
         assert_ne!(hash, "unhashed");
         let len = len.expect("parsed symbol must carry body_len");
         assert!(len > 0);
+    }
+
+    #[test]
+    fn symbols_persist_disamb_for_rust_twin_trait_impls() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // Twin impls of one type: identical FQN, identical body, distinct
+        // trait. Without a persisted discriminator the two rows are
+        // indistinguishable and an edit to one is masked by the other.
+        std::fs::write(
+            root.join("t.rs"),
+            "struct T;\n\
+             impl A for T { fn go(&self) {} }\n\
+             impl B for T { fn go(&self) {} }\n\
+             fn plain() {}\n",
+        )
+        .unwrap();
+        let store = Store::open_in_memory().unwrap();
+        full_index(&store, root).unwrap();
+
+        let mut stmt = store
+            .conn
+            .prepare("SELECT fqn, disamb FROM symbols WHERE name = 'go' ORDER BY disamb")
+            .unwrap();
+        let rows: Vec<(String, Option<String>)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(rows.len(), 2, "both twin methods persist: {rows:?}");
+        assert_eq!(rows[0].0, rows[1].0, "twins share one FQN: {rows:?}");
+        assert_eq!(rows[0].1, Some("A".to_string()), "{rows:?}");
+        assert_eq!(rows[1].1, Some("B".to_string()), "{rows:?}");
+
+        let plain: Option<String> = store
+            .conn
+            .query_row("SELECT disamb FROM symbols WHERE name = 'plain'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(plain, None, "a free function carries no discriminator");
+    }
+
+    #[test]
+    fn symbols_persist_disamb_for_cpp_overloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("o.cpp"), "void f(int) {}\nvoid f(double) {}\n").unwrap();
+        let store = Store::open_in_memory().unwrap();
+        full_index(&store, root).unwrap();
+
+        let mut stmt = store
+            .conn
+            .prepare("SELECT fqn, disamb FROM symbols WHERE name = 'f' ORDER BY disamb")
+            .unwrap();
+        let rows: Vec<(String, Option<String>)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(rows.len(), 2, "both overloads persist: {rows:?}");
+        assert_eq!(rows[0].0, rows[1].0, "overloads share one FQN: {rows:?}");
+        assert_eq!(rows[0].1, Some("(double)".to_string()), "{rows:?}");
+        assert_eq!(rows[1].1, Some("(int)".to_string()), "{rows:?}");
+    }
+
+    #[test]
+    fn removed_file_purge_clears_every_table_and_spares_the_survivor() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // Both fixtures populate all four purged tables: a symbol (struct +
+        // method + fn), an import, a call, and an inherit edge.
+        std::fs::write(
+            root.join("gone.rs"),
+            "use std::fmt;\n\
+             struct Dog;\n\
+             impl Animal for Dog { fn speak(&self) { helper(); } }\n\
+             fn helper() {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("keep.rs"),
+            "use std::io;\n\
+             struct Cat;\n\
+             impl Pet for Cat { fn meow(&self) { noop(); } }\n\
+             fn noop() {}\n",
+        )
+        .unwrap();
+        let store = Store::open_in_memory().unwrap();
+        full_index(&store, root).unwrap();
+
+        let counts = |rel: &str| -> (i64, i64, i64, i64, i64) {
+            let q = |sql: &str| -> i64 { store.conn.query_row(sql, [rel], |r| r.get(0)).unwrap() };
+            (
+                q("SELECT COUNT(*) FROM files WHERE path = ?1"),
+                q("SELECT COUNT(*) FROM symbols WHERE file = ?1"),
+                q("SELECT COUNT(*) FROM imports WHERE file = ?1"),
+                q("SELECT COUNT(*) FROM calls WHERE file = ?1"),
+                q("SELECT COUNT(*) FROM inherits WHERE file = ?1"),
+            )
+        };
+        let before = counts("gone.rs");
+        assert_eq!(before.0, 1, "fixture must be indexed: {before:?}");
+        assert!(
+            before.1 > 0 && before.2 > 0 && before.3 > 0 && before.4 > 0,
+            "fixture must populate every purged table: {before:?}"
+        );
+        let survivor = counts("keep.rs");
+        assert!(
+            survivor.0 == 1
+                && survivor.1 > 0
+                && survivor.2 > 0
+                && survivor.3 > 0
+                && survivor.4 > 0,
+            "the survivor must populate every purged table too, or the \
+             untouched-rows assertion below proves nothing: {survivor:?}"
+        );
+
+        std::fs::remove_file(root.join("gone.rs")).unwrap();
+        let report = sweep(&store, root, &Default::default()).unwrap();
+        assert_eq!(report.removed, vec!["gone.rs".to_string()]);
+        assert_eq!(
+            counts("gone.rs"),
+            (0, 0, 0, 0, 0),
+            "the purge must leave no orphaned rows behind the deleted files row"
+        );
+        assert_eq!(counts("keep.rs"), survivor, "the survivor's rows are untouched");
+    }
+
+    #[test]
+    fn removed_file_purge_rolls_back_every_delete_when_one_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("gone.rs"),
+            "use std::fmt;\n\
+             struct Dog;\n\
+             impl Animal for Dog { fn speak(&self) { helper(); } }\n\
+             fn helper() {}\n",
+        )
+        .unwrap();
+        let store = Store::open_in_memory().unwrap();
+        full_index(&store, root).unwrap();
+
+        let counts = || -> (i64, i64, i64, i64, i64) {
+            let q = |sql: &str| -> i64 {
+                store.conn.query_row(sql, ["gone.rs"], |r| r.get(0)).unwrap()
+            };
+            (
+                q("SELECT COUNT(*) FROM files WHERE path = ?1"),
+                q("SELECT COUNT(*) FROM symbols WHERE file = ?1"),
+                q("SELECT COUNT(*) FROM imports WHERE file = ?1"),
+                q("SELECT COUNT(*) FROM calls WHERE file = ?1"),
+                q("SELECT COUNT(*) FROM inherits WHERE file = ?1"),
+            )
+        };
+        let before = counts();
+        assert!(
+            before.0 == 1 && before.1 > 0 && before.2 > 0 && before.3 > 0 && before.4 > 0,
+            "fixture must populate every purged table: {before:?}"
+        );
+
+        // Fail the DELETE that runs right after the files row (and, by
+        // cascade, its symbols) is already gone. RAISE(ABORT) undoes only the
+        // aborted statement and leaves the transaction open, so the files row
+        // comes back only if the purge rolls back. Without the transaction
+        // that first DELETE would already have committed, orphaning the
+        // imports/calls/inherits rows forever: the sweep only ever revisits
+        // paths the files table still knows about.
+        store
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER halt_import_delete BEFORE DELETE ON imports
+                 BEGIN SELECT RAISE(ABORT, 'injected purge failure'); END",
+            )
+            .unwrap();
+        let err = purge_removed_file(&store, "gone.rs").unwrap_err();
+        store
+            .conn
+            .execute_batch("DROP TRIGGER halt_import_delete")
+            .unwrap();
+        assert!(
+            err.to_string().contains("injected purge failure"),
+            "the injected failure must surface, not be swallowed: {err}"
+        );
+        assert_eq!(
+            counts(),
+            before,
+            "a purge that fails part way must leave the file's rows exactly as they were"
+        );
     }
 
     #[test]
