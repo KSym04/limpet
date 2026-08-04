@@ -37,7 +37,7 @@ Restart Claude Code, type `/limpet` in any project, and just work:
 ## 🎯 Why limpet, in four checkable claims
 
 - **It knows when it is wrong.** Memories anchor to AST hashes, follow renames and file moves, go stale on real edits with the reason attached, and heal on revert. → [the anchor lifecycle](#-the-anchor-lifecycle)
-- **It shows you what it saved.** Every recall is priced against the file reads it replaced: 4.0x fewer tokens on the benchmark, and a live per-project ledger via `limpet stats`. → [the receipts](#-the-receipts-token-savings-measured)
+- **It shows you what it saved.** Every recall is priced against the file reads it replaced: 4.2x fewer tokens on the benchmark, and a live per-project ledger via `limpet stats`. → [the receipts](#-the-receipts-token-savings-measured)
 - **It anchors the whole repository.** Eleven grammars for symbol-level anchoring; every other file (templates, styles, configs) anchorable at file level. → [whole repo indexed](#-whole-repo-indexed-thin-on-purpose)
 - **It never lies by omission.** Every response carries an honesty envelope: matched vs returned, what was dropped and why, how fresh the index is, how much is stale. The benchmark gate has killed limpet's own features when they crossed that line.
 
@@ -95,6 +95,12 @@ Every response is wrapped in the honesty envelope:
   }
 }
 ```
+
+A recalled item also names the task terms found verbatim in its body
+(`"matched": "sweep anchored"`, capped at three, in task order), so why an
+item surfaced is inspectable without re-reading it. The field is absent when
+no exact task term appears in the body: the item then reached the pack
+through anchor proximity or a stemmed text match instead.
 
 ## ⚓ The anchor lifecycle
 
@@ -159,21 +165,21 @@ Measured with a reproducible benchmark, seeded with 12 memories over a realistic
 ```
 question                                                   files+grep   recall   ratio  in code?
 ----------------------------------------------------------------------------------------------------
-why is the batch size 50 and why is there a queue at all         1929      367    5.3x  no (answer only in memory)
-why does the scanner skip draft products, is that a bug          1630      377    4.3x  no (answer only in memory)
-how is the health score computed                                 1630      352    4.6x  yes
-why semicolon delimiter and BOM in the csv export                1327      361    3.7x  no (answer only in memory)
-where do report files get written and why                        1327      371    3.6x  no (answer only in memory)
-how long are download tokens valid                               1023      167    6.1x  yes
-has anyone tried streaming the csv export                        1327      369    3.6x  no (answer only in memory)
-can I rename check_product in the scanner                        1630      377    4.3x  no (answer only in memory)
-what does the nightly cron actually exist for                     803      317    2.5x  no (answer only in memory)
-how often does the dashboard poll progress and can I lower it    1072      340    3.2x  no (answer only in memory)
+why is the batch size 50 and why is there a queue at all         1929      368    5.2x  no (answer only in memory)
+why does the scanner skip draft products, is that a bug          1630      316    5.2x  no (answer only in memory)
+how is the health score computed                                 1630      364    4.5x  yes
+why semicolon delimiter and BOM in the csv export                1327      373    3.6x  no (answer only in memory)
+where do report files get written and why                        1327      325    4.1x  no (answer only in memory)
+how long are download tokens valid                               1023      174    5.9x  yes
+has anyone tried streaming the csv export                        1327      318    4.2x  no (answer only in memory)
+can I rename check_product in the scanner                        1630      313    5.2x  no (answer only in memory)
+what does the nightly cron actually exist for                     803      330    2.4x  no (answer only in memory)
+how often does the dashboard poll progress and can I lower it    1072      345    3.1x  no (answer only in memory)
 ----------------------------------------------------------------------------------------------------
-TOTAL                                                           13698     3398    4.0x
+TOTAL                                                           13698     3226    4.2x
 ```
 
-**4.0x fewer tokens (75% saved) across the benchmark.** Reproduce it yourself:
+**4.2x fewer tokens (76% saved) across the benchmark.** Reproduce it yourself:
 
 ```bash
 cargo build --release
@@ -401,7 +407,7 @@ An optional `.limpet.json` at the repository root tunes two things. It is a plai
 
 ## 🧭 Roadmap
 
-See [ROADMAP.md](ROADMAP.md) for what has shipped (portable repo identity, the statusline doctor, the structural lineage graph, grammar wave 2 with eleven languages, and the 0.13 freshness pass: anchored-first sweep priority plus the evidence-gated low-entropy follow guard), what this release carries (the 0.14 truth layer: verification as a ranking signal, contradictions surfaced and duplicates refused at write time), and what is next (FQN disambiguation, the refinement loop that closes the re-verification cycle, then the 1.0 stability contract). One rule governs all of it: a feature ships only if it feeds a receipt (`limpet stats`, the benchmark, rework-avoided) or the honesty envelope.
+See [ROADMAP.md](ROADMAP.md) for what has shipped (portable repo identity, the statusline doctor, the structural lineage graph, grammar wave 2 with eleven languages, the 0.13 freshness pass, and the 0.14 truth layer: verification as a ranking signal, contradictions surfaced and duplicates refused at write time), what this release carries (freshness at scale, part 2: FQN disambiguation with @-addressable twins, the slot-first anchor ladder, matched terms on recall items, and the lag-bench watcher verdict), and what is next (the refinement loop that closes the re-verification cycle, then the 1.0 stability contract). One rule governs all of it: a feature ships only if it feeds a receipt (`limpet stats`, the benchmark, rework-avoided) or the honesty envelope.
 
 ## ⚖️ Reliance and license
 

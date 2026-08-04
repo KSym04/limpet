@@ -234,14 +234,21 @@ pub struct ResolveReport {
 /// | 3a | slot gone, ONE row at (fqn, hash) and it names a slot | slot relabelled, Followed |
 /// | 3b | slot gone, no matching row names any slot | Fresh, slot kept |
 /// | 3c | slot gone, 2+ matching rows and a slot is named | Stale{ambiguous_anchor} |
-/// | 4 | EXISTS(fqn) | Stale{body_edited} |
-/// | 4.5 | FQN gone, ONE row in my file with my body and my last segment | scope respelled, Followed |
-/// | 5 | body hunted store-wide | Invalidated / Stale / Followed |
+/// | 4 | every carrier of my body is in my file, exactly ONE has my last segment AND extends my scope chain | scope respelled, Followed |
+/// | 5 | EXISTS(fqn) | Stale{body_edited} |
+/// | 6 | body hunted store-wide | Invalidated / Stale / Followed |
 ///
-/// No step depends on row order: 1 through 4 are EXISTS or COUNT aggregates,
-/// step 4.5 acts only when its whole result set is a single row, and step 5's
-/// store-wide hunt indexes its result only when exactly one row came back. Which duplicate a LIMIT 1 returned first was nondeterministic and
-/// anchors flapped between fresh and stale across sweeps (audit 2026-07).
+/// Step 4 (the scope respell) runs BEFORE the fqn-survives verdict: a v7
+/// respell can split pre-v7 fqn twins so the OLD spelling stays alive on a
+/// different symbol, and checking EXISTS(fqn) first would false-stale the
+/// respelled anchor on every sweep forever (whole-branch review 2026-08-04).
+///
+/// No step depends on row order: 1, 2, 3 and 5 are EXISTS or COUNT
+/// aggregates, the respell step acts only when its whole result set is a
+/// single row, and step 6's store-wide hunt indexes its result only when
+/// exactly one row came back. Which duplicate a LIMIT 1 returned first was
+/// nondeterministic and anchors flapped between fresh and stale across
+/// sweeps (audit 2026-07).
 /// Anchors written before v7 carry no slot and keep the 0.14 fates (I-F2),
 /// hardening themselves only when one row proves which slot they meant; the
 /// single addition is that a followed legacy anchor takes its new home's slot
@@ -251,6 +258,23 @@ pub struct ResolveReport {
 /// how distinctive that body is: an anchored symbol deleted while an
 /// identical-bodied twin survives relabels onto the survivor (design section B,
 /// accepted with the entropy floor deliberately not applied).
+/// Does `new_fqn` spell the same symbol under an EXTENDED scope chain: every
+/// segment of `old_fqn` present in `new_fqn`, in order? Sanctioned respells
+/// (S1-S9) only insert segments, so a genuine respell always passes, while a
+/// sibling-scoped twin (`shapes.alpha.reset` vs `shapes.beta.reset`) fails.
+fn is_scope_extension(old_fqn: &str, new_fqn: &str) -> bool {
+    let mut new_segs = new_fqn.split('.');
+    'old: for seg in old_fqn.split('.') {
+        for cand in new_segs.by_ref() {
+            if cand == seg {
+                continue 'old;
+            }
+        }
+        return false;
+    }
+    true
+}
+
 fn resolve_symbol_anchor(
     store: &crate::store::Store,
     anchor_id: i64,
@@ -334,7 +358,8 @@ fn resolve_symbol_anchor(
                 // of them names a slot: which one is mine is unknowable, and
                 // guessing is how anchors start lying.
                 (n, _) if n > 1 => return Ok(AnchorFate::Stale { reason: "ambiguous_anchor" }),
-                // No row under my FQN carries my body at all: step 4 decides.
+                // No row under my FQN carries my body at all: the respell
+                // step and the fqn-survives verdict below decide.
                 _ => {}
             }
         }
@@ -349,24 +374,115 @@ fn resolve_symbol_anchor(
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )?;
             if matches > 0 {
-                // Opportunistic backfill: exactly one row carries this body
-                // under this FQN and it names a slot, so that slot is provably
-                // the one this anchor meant. Adopt it and the anchor is twin
-                // proof from here on. Two or more rows, or a NULL-disamb row
-                // (the refill window again), prove nothing: stay legacy rather
-                // than guess.
+                // Opportunistic backfill, gated on a TWIN-FREE fqn. A
+                // hash-unique row under a shared fqn proves nothing: if the
+                // twins' bodies were ever identical and the anchored symbol
+                // was just edited, the one surviving hash match is the TWIN
+                // wearing the anchor's old body, and adopting it hardens the
+                // anchor to the wrong symbol, permanently (whole-branch
+                // review 2026-08-04). Only a sole row under the fqn can be
+                // the anchor's own symbol. Everything else stays legacy:
+                // 0.14 fates exactly, no guess (I-F2).
                 if let (1, Some(d)) = (matches, slot) {
-                    store.conn.execute(
-                        "UPDATE anchors SET disamb = ?1 WHERE id = ?2",
-                        params![d, anchor_id],
+                    let fqn_rows: i64 = store.conn.query_row(
+                        "SELECT COUNT(*) FROM symbols WHERE fqn = ?1",
+                        [anchor_fqn],
+                        |r| r.get(0),
                     )?;
+                    if fqn_rows == 1 {
+                        store.conn.execute(
+                            "UPDATE anchors SET disamb = ?1 WHERE id = ?2",
+                            params![d, anchor_id],
+                        )?;
+                    }
                 }
                 return Ok(AnchorFate::Fresh);
             }
         }
     }
 
-    // 4. The FQN is still indexed but nothing under it carries my body:
+    // 4. SCOPE RESPELL. My body is still in my file under a name whose last
+    //    segment is mine and whose scope chain EXTENDS my old spelling: an
+    //    ENCLOSING SCOPE was respelled, not the symbol.
+    //
+    //    Upgrades do this on purpose. Every scope fix in 0.15 (Rust `mod`, PHP
+    //    bracketed namespace, C# block namespace, Java enum/record, PHP enum,
+    //    TS namespace/module, C++ out-of-line qualifier segments) inserts a
+    //    segment into FQNs that ALREADY have anchors pointed at them, and the
+    //    v7 migration re-parses every file at once, so the whole repo respells
+    //    in one sweep. Without this step those anchors fall through to the
+    //    store-wide hunt, where a body under `MIN_FOLLOW_BODY_BYTES` becomes
+    //    Stale{low_entropy} and a body with any duplicate becomes
+    //    Stale{ambiguous_anchor}: measured at 16.3% of respelled symbols, all
+    //    of them permanent, because a refused hunt never repairs the anchor
+    //    and every later sweep repeats the verdict. False-staling a memory
+    //    whose code never changed is the exact failure limpet exists to
+    //    prevent.
+    //
+    //    Three guards make the shortcut evidence, not a guess (whole-branch
+    //    review 2026-08-04):
+    //    - EVERY carrier of my body in the store is in my file. A carrier in
+    //      another file means the move interpretation competes with the
+    //      respell interpretation, and choosing between them is the hunt's
+    //      job, which refuses duplicates honestly.
+    //    - The candidate's scope chain extends mine: every segment of my old
+    //      FQN appears in the new one, in order. Sanctioned respells only
+    //      INSERT segments, so a genuine respell always passes, while a
+    //      same-named twin under a SIBLING scope (mod alpha deleted, mod beta
+    //      survives) fails the extension check and is refused; 0.14's verdict
+    //      for it survives via the hunt.
+    //    - Exactly one candidate. Two candidate homes fall through to the
+    //      hunt rather than be picked between.
+    //    The entropy floor is deliberately not applied: with the guards above
+    //    the follow lands on a byte-identical body in the same file under an
+    //    extended spelling of the same name, and refusing short bodies would
+    //    refuse precisely the ones this step is here to rescue. Residual,
+    //    accepted on the same terms as step 3: deleting a symbol while an
+    //    identically-bodied, same-named twin under an EXTENDED scope of it
+    //    pre-exists in the same file follows that twin.
+    //
+    //    This runs BEFORE the fqn-survives verdict below because a v7 respell
+    //    can split pre-v7 fqn twins: the old spelling legitimately survives on
+    //    a DIFFERENT symbol (a C-export wrapper beside the respelled method),
+    //    and stale-on-EXISTS(fqn) would shadow the rescue forever.
+    //
+    //    Filtering the last segment in Rust, not in SQL: an FQN segment
+    //    routinely contains `_`, which SQLite LIKE treats as a
+    //    single-character wildcard, so a LIKE pattern would match unrelated
+    //    names.
+    let last_seg = anchor_fqn.rsplit('.').next().unwrap_or(anchor_fqn);
+    let mut rstmt = store.conn.prepare(
+        "SELECT fqn, file, disamb FROM symbols WHERE body_hash = ?1 LIMIT 4",
+    )?;
+    let carriers: Vec<(String, String, Option<String>)> = rstmt
+        .query_map(params![anchor_hash], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<rusqlite::Result<Vec<(String, String, Option<String>)>>>()?;
+    let all_in_my_file = !carriers.is_empty()
+        && carriers.len() <= 3
+        && carriers.iter().all(|(_, f, _)| f == anchor_file);
+    if all_in_my_file {
+        let respelled: Vec<&(String, String, Option<String>)> = carriers
+            .iter()
+            .filter(|(f, _, _)| {
+                f.rsplit('.').next() == Some(last_seg) && is_scope_extension(anchor_fqn, f)
+            })
+            .collect();
+        if let [(new_fqn, _, new_slot)] = respelled.as_slice() {
+            // Take the new home's slot with it, exactly as the hunt does: an
+            // anchor that lands on a shared FQN carrying no discriminator is
+            // maskable by the twins living there.
+            store.conn.execute(
+                "UPDATE anchors SET disamb = ?1 WHERE id = ?2",
+                params![new_slot, anchor_id],
+            )?;
+            return Ok(AnchorFate::Followed {
+                new_fqn: new_fqn.clone(),
+                new_file: anchor_file.to_string(),
+            });
+        }
+    }
+
+    // 5. The FQN is still indexed but nothing under it carries my body:
     //    conservative stale rather than a store-wide hunt, and it heals the
     //    moment the body comes back (a revert, a stash pop).
     let fqn_exists: bool = store.conn.query_row(
@@ -378,64 +494,7 @@ fn resolve_symbol_anchor(
         return Ok(AnchorFate::Stale { reason: "body_edited" });
     }
 
-    // 4.5 SCOPE RESPELL. My FQN is gone from the index entirely and my body is
-    //     still in my file under a name whose last segment is mine: an
-    //     ENCLOSING SCOPE was respelled, not the symbol.
-    //
-    //     Upgrades do this on purpose. Every scope fix in 0.15 (Rust `mod`, PHP
-    //     bracketed namespace, C# block namespace, Java enum/record, PHP enum,
-    //     TS namespace, C++ out-of-line qualifier segments) inserts a segment
-    //     into FQNs that ALREADY have anchors pointed at them, and the v7
-    //     migration re-parses every file at once, so the whole repo respells in
-    //     one sweep. Without this step those anchors fall through to the
-    //     store-wide hunt, where a body under `MIN_FOLLOW_BODY_BYTES` becomes
-    //     Stale{low_entropy} and a body with any duplicate becomes
-    //     Stale{ambiguous_anchor}: measured at 16.3% of respelled symbols, all
-    //     of them permanent, because a refused hunt never repairs the anchor
-    //     and every later sweep repeats the verdict. False-staling a memory
-    //     whose code never changed is the exact failure limpet exists to
-    //     prevent.
-    //
-    //     Same file AND same last segment AND same body hash AND exactly one
-    //     such row is not a guess, so the entropy floor (which exists to stop
-    //     the store-wide hunt guessing between look-alikes on hash alone) is
-    //     deliberately not applied: it would refuse precisely the short bodies
-    //     this step is here to rescue. Two rows means two candidate homes and
-    //     we fall through to the hunt rather than pick one. Residual, accepted
-    //     on the same terms as step 3: if the anchored symbol was DELETED in
-    //     the same sweep that respelled a same-named, byte-identical sibling,
-    //     this follows the sibling.
-    //
-    //     Filtering the last segment in Rust, not in SQL: an FQN segment
-    //     routinely contains `_`, which SQLite LIKE treats as a
-    //     single-character wildcard, so a LIKE pattern would match unrelated
-    //     names.
-    let last_seg = anchor_fqn.rsplit('.').next().unwrap_or(anchor_fqn);
-    let mut rstmt = store.conn.prepare(
-        "SELECT fqn, disamb FROM symbols WHERE file = ?1 AND body_hash = ?2",
-    )?;
-    let homes: Vec<(String, Option<String>)> = rstmt
-        .query_map(params![anchor_file, anchor_hash], |r| Ok((r.get(0)?, r.get(1)?)))?
-        .collect::<rusqlite::Result<Vec<(String, Option<String>)>>>()?;
-    let respelled: Vec<&(String, Option<String>)> = homes
-        .iter()
-        .filter(|(f, _)| f.rsplit('.').next() == Some(last_seg))
-        .collect();
-    if let [(new_fqn, new_slot)] = respelled.as_slice() {
-        // Take the new home's slot with it, exactly as step 5 does: an anchor
-        // that lands on a shared FQN carrying no discriminator is maskable by
-        // the twins living there.
-        store.conn.execute(
-            "UPDATE anchors SET disamb = ?1 WHERE id = ?2",
-            params![new_slot, anchor_id],
-        )?;
-        return Ok(AnchorFate::Followed {
-            new_fqn: new_fqn.clone(),
-            new_file: anchor_file.to_string(),
-        });
-    }
-
-    // 5. FQN gone: search for the body elsewhere (rename/move).
+    // 6. FQN gone: search for the body elsewhere (rename/move).
     let mut fstmt = store.conn.prepare(
         "SELECT fqn, file, body_len, disamb FROM symbols WHERE body_hash = ?1 LIMIT 3",
     )?;
@@ -583,11 +642,12 @@ pub fn resolve_all(store: &crate::store::Store) -> Result<ResolveReport> {
 
         // Symbol anchor: walk the slot-first ladder. FQNs are not unique
         // (trait impls, overloads), so no step may read a row whose position
-        // SQLite chooses: steps 1 to 4 are EXISTS or COUNT aggregates, and the
-        // store-wide hunt in step 5 acts on its result only when exactly one
-        // row came back. Which duplicate a LIMIT 1 returned was
-        // nondeterministic and anchors flapped between fresh and stale across
-        // sweeps (audit 2026-07). The slot is what tells the twins apart.
+        // SQLite chooses: the aggregate steps use EXISTS or COUNT, and both
+        // the respell step and the store-wide hunt act on their result only
+        // when exactly one row came back. Which duplicate a LIMIT 1 returned
+        // was nondeterministic and anchors flapped between fresh and stale
+        // across sweeps (audit 2026-07). The slot is what tells the twins
+        // apart.
         let fate = resolve_symbol_anchor(
             store,
             row.anchor_id,

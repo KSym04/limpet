@@ -1784,3 +1784,16 @@ fn extraction_order_and_byte_ranges_are_pinned() {
         ["0||C|class|0..53", "1|C|E|class|12..37", "2|C.E|t|method|24..35", "3|C|m|method|40..51"]
     );
 }
+
+/// A comment between a reference sigil and its declarator is a named child in
+/// the C++ grammar; the R1 fieldless-wrapper recovery must skip it, never
+/// land the walk on it and extract nothing (whole-branch review 2026-08-04).
+#[test]
+fn cpp_reference_wrapper_survives_an_interleaved_comment() {
+    let src = "struct B {\n    int v[4];\n    int& /* borrowed */ at(int i) { return v[i]; }\n};\n";
+    assert_eq!(
+        fqns_of(Lang::Cpp, src),
+        ["B|at|method", "|B|class"],
+        "the commented reference-returning method must still extract"
+    );
+}

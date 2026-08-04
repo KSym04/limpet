@@ -1119,10 +1119,13 @@ fn a_followed_body_takes_its_new_slot_with_it() {
 }
 
 #[test]
-fn legacy_anchor_adopts_the_slot_a_unique_body_match_proves() {
-    // Progressive hardening (I-F2): an anchor written before schema v7 has no
-    // slot. When exactly one row carries its (fqn, body), that row's
-    // discriminator IS the slot it meant, so adopt it while reporting Fresh.
+fn legacy_anchor_never_adopts_while_a_twin_shares_the_fqn() {
+    // A hash-unique row under a SHARED fqn does not prove the slot: if the
+    // twins' bodies were ever identical and the anchored symbol was just
+    // edited, the single surviving hash match is the TWIN wearing the
+    // anchor's old body, and adopting it hardens the anchor to the wrong
+    // symbol (whole-branch review 2026-08-04). With a twin present the anchor
+    // stays legacy: 0.14 fates exactly (I-F2), no guess.
     let dir = TempDir::new().unwrap();
     let root = dir.path();
     let (store, id) = seed_router(root, &[INGRESS_IMPL, EGRESS_DISTINCT_IMPL]);
@@ -1133,10 +1136,10 @@ fn legacy_anchor_adopts_the_slot_a_unique_body_match_proves() {
     assert_eq!(status_of(&store, &id).0, "active");
     let (fqn, slot, _) = anchor_slot(&store, &id);
     assert_eq!(fqn, "router.Router.route");
-    assert_eq!(slot.as_deref(), Some("Ingress"), "the proven slot must be backfilled");
+    assert_eq!(slot, None, "a shared fqn proves nothing; the slot must stay legacy");
 
-    // Backfilled, so the anchor now gets twin protection: editing its impl
-    // can no longer be masked by the FQN it shares.
+    // Legacy semantics still catch this edit, because the distinct twin's
+    // body never carried the anchor's hash.
     write_router(
         root,
         &[&INGRESS_IMPL.replace("cost += hop * 3;", "cost += hop * 7;"), EGRESS_DISTINCT_IMPL],
@@ -1460,4 +1463,164 @@ fn a_respell_with_two_same_named_candidates_still_refuses() {
     assert_eq!(report.stale, 1, "{report:?}");
     assert_eq!(status_of(&store, &r.id).1.as_deref(), Some("ambiguous_anchor"));
     assert_eq!(anchor_slot(&store, &r.id).0, "a.dup", "a refusal moves nothing");
+}
+
+// --- whole-branch review 2026-08-04: the respell step must not guess --------
+
+#[test]
+fn a_deleted_scope_twin_is_not_respell_followed() {
+    // Deleting a scope whose same-named, byte-identical sibling survives in
+    // the file is indistinguishable from a respell by (file, hash, last
+    // segment) alone. The sibling's scope chain does NOT extend the anchor's
+    // old spelling, and that structural mismatch is what refuses the follow:
+    // 0.14 said Stale{low_entropy} here, and 0.15 must not say less.
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    let twins = "mod alpha {\n    pub fn reset() {}\n}\nmod beta {\n    pub fn reset() {}\n}\n";
+    fs::write(root.join("shapes.rs"), twins).unwrap();
+    let store = Store::open_in_memory().unwrap();
+    index::full_index(&store, root).unwrap();
+    let r = memory::remember(
+        &store,
+        "fact",
+        "alpha reset returns the shape to the origin pose",
+        "explicit",
+        None,
+        &[AnchorSpec { file: "shapes.rs".into(), symbol: Some("shapes.alpha.reset".into()) }],
+        None,
+        &[],
+        None,
+        false,
+        None,
+        false,
+    )
+    .unwrap();
+    assert_eq!(anchor_slot(&store, &r.id).0, "shapes.alpha.reset");
+
+    // The whole alpha scope is deleted; beta's identical reset survives.
+    fs::write(root.join("shapes.rs"), "mod beta {\n    pub fn reset() {}\n}\n").unwrap();
+    let report = mutate_and_resolve(&store, root);
+    assert_eq!(
+        report.followed, 0,
+        "a deleted symbol must not be respell-followed onto its surviving twin: {report:?}"
+    );
+    assert_eq!(report.stale, 1, "{report:?}");
+    let (status, reason) = status_of(&store, &r.id);
+    assert_eq!(status, "stale");
+    assert_eq!(reason.as_deref(), Some("low_entropy"), "the 0.14 verdict must survive");
+    assert_eq!(
+        anchor_slot(&store, &r.id).0,
+        "shapes.alpha.reset",
+        "the anchor must keep naming what the memory described"
+    );
+}
+
+#[test]
+fn a_leftover_in_file_twin_does_not_hijack_a_cross_file_move() {
+    // The anchored body moves to another file while an identical copy stays
+    // behind in the anchor's file. Two interpretations compete (move vs
+    // respell), so the respell step must stand down: any carrier of the body
+    // OUTSIDE the anchor's file forfeits the in-file shortcut, and the
+    // store-wide hunt refuses the duplicate as ambiguous, exactly as 0.14 did.
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    let body = "pub fn parse(n: u32) -> u32 {\n    let mut t = 0;\n    for i in 0..n {\n        t += i * 2;\n    }\n    t\n}\n";
+    fs::write(root.join("a.rs"), body).unwrap();
+    let store = Store::open_in_memory().unwrap();
+    index::full_index(&store, root).unwrap();
+    let r = memory::remember(
+        &store,
+        "fact",
+        "parse doubles every index below n",
+        "explicit",
+        None,
+        &[AnchorSpec { file: "a.rs".into(), symbol: Some("parse".into()) }],
+        None,
+        &[],
+        None,
+        false,
+        None,
+        false,
+    )
+    .unwrap();
+
+    // A byte-identical copy lands inside a mod in the same file: still fresh,
+    // the anchored top-level symbol is untouched.
+    fs::write(root.join("a.rs"), format!("{body}mod legacy {{\n{body}}}\n")).unwrap();
+    let report = mutate_and_resolve(&store, root);
+    assert_eq!(report.fresh, 1, "{report:?}");
+
+    // The top-level symbol moves to b.rs; the mod copy stays behind.
+    fs::write(root.join("a.rs"), format!("mod legacy {{\n{body}}}\n")).unwrap();
+    fs::write(root.join("b.rs"), body).unwrap();
+    let report = mutate_and_resolve(&store, root);
+    assert_eq!(
+        report.followed, 0,
+        "an out-of-file carrier must veto the in-file respell shortcut: {report:?}"
+    );
+    assert_eq!(report.stale, 1, "{report:?}");
+    let (status, reason) = status_of(&store, &r.id);
+    assert_eq!(status, "stale");
+    assert_eq!(reason.as_deref(), Some("ambiguous_anchor"));
+}
+
+#[test]
+fn a_twin_split_respell_is_rescued_from_behind_a_surviving_fqn() {
+    // A respell can leave the anchor's OLD spelling alive on a different
+    // symbol (pre-v7 twins splitting under the sanctioned scope fixes). The
+    // fqn-still-exists stale verdict must not shadow the rescue: the body
+    // sitting in the anchor's own file under an extended scope spelling is
+    // the stronger evidence.
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    let body = "pub fn helper(n: u32) -> u32 {\n    let mut t = 1;\n    for i in 1..n {\n        t = t.wrapping_mul(i);\n    }\n    t\n}\n";
+    fs::write(root.join("a.rs"), body).unwrap();
+    let store = Store::open_in_memory().unwrap();
+    index::full_index(&store, root).unwrap();
+    let r = memory::remember(
+        &store,
+        "fact",
+        "helper accumulates a wrapping product below n",
+        "explicit",
+        None,
+        &[AnchorSpec { file: "a.rs".into(), symbol: Some("helper".into()) }],
+        None,
+        &[],
+        None,
+        false,
+        None,
+        false,
+    )
+    .unwrap();
+
+    // The anchored body ends up inside a mod while a NEW body takes over the
+    // old top-level spelling: the old fqn survives on a stranger.
+    let stranger = "pub fn helper(n: u32) -> u32 {\n    n + 41\n}\n";
+    fs::write(root.join("a.rs"), format!("{stranger}mod inner {{\n{body}}}\n")).unwrap();
+    let report = mutate_and_resolve(&store, root);
+    assert_eq!(
+        report.followed, 1,
+        "the surviving stranger fqn must not shadow the respell rescue: {report:?}"
+    );
+    assert_eq!(report.stale, 0, "{report:?}");
+    assert_eq!(status_of(&store, &r.id).0, "active");
+    assert_eq!(anchor_slot(&store, &r.id).0, "a.inner.helper");
+}
+
+#[test]
+fn legacy_backfill_adopts_only_when_the_fqn_is_twin_free() {
+    // Positive control for the twin-free gate: a single row under the fqn can
+    // only be the anchor's own symbol, so adoption is safe there.
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    let (store, id) = seed_router(root, &[INGRESS_IMPL]);
+    store.conn.execute("UPDATE anchors SET disamb = NULL", []).unwrap();
+
+    let report = mutate_and_resolve(&store, root);
+    assert_eq!(report.fresh, 1);
+    assert_eq!(
+        anchor_slot(&store, &id).1.as_deref(),
+        Some("Ingress"),
+        "a twin-free fqn's single row proves the slot"
+    );
 }

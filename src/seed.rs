@@ -241,6 +241,7 @@ pub fn run(args: &[String]) -> Result<()> {
 ///   - otherwise a blank-line-delimited paragraph is one chunk;
 ///   - pure heading lines (`#`, `##`, ...) are dropped: they are structure,
 ///     not knowledge.
+///
 /// Markdown markers are stripped from the stored body so recall reads clean.
 fn chunk_markdown(text: &str) -> Vec<String> {
     let mut chunks: Vec<String> = Vec::new();

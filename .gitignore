@@ -3,3 +3,4 @@
 /docs/superpowers/
 *.code-workspace
 .playwright-mcp/
+__pycache__/

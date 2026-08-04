@@ -88,6 +88,15 @@ semantics only) + carried I3/BENCH/CONF/POS.
       workflows (task-level + whole-branch), em-dash sweep
 - [ ] Ship: version 0.15.0 sync (Cargo.toml + server.json) via /deploy-limpet
 
+Deferred out of 0.15 (whole-branch review 2026-08-04, recorded not fixed):
+- C# type-level generic arity: `class C<T>` / `class C<T,U>` share one NULL
+  slot (methods got `type_parameters`, type rows did not). 0.16 candidate.
+- C++ `union_specifier` is neither a symbol arm nor a type scope, so union
+  member functions extract file-scoped. Pre-existing, not a 0.15 regression.
+- map/lineage reads are disamb-blind: twin slots sharing an FQN merge into
+  one lineage target undisclosed. 0.16 candidate alongside the refinement
+  loop's map work.
+
 ---
 
 # SPEC: Truth-Layer (Slice A), v0.14.0
@@ -110,7 +119,7 @@ Doctrine (limpet honesty scars): **flag and propose, never silently delete or me
 | CONF | Every confidence write passes through `quantize_confidence` (6-dp). | mem 01KWPA1G5S |
 | HONEST | verified > unverified on TIES; a far-more-relevant unverified memory still ranks (text_score dominates). | P0 acceptance |
 | POS | Roadmap/README contrast mechanisms, never competitor names. | mem 01KXABHGYP |
-| I-F3 | No symbol the 0.14 extractor produced is lost, and FQN spelling (`parents` + `name`) is byte-identical pre/post outside the nine sanctioned changes S1-S9; `kind` is byte-identical outside K1-K2. Runtime-proven across all 11 grammars against the pre-branch baseline, never asserted from node-types.json. A tenth spelling change, a third kind rule, or one lost symbol is a breach. | 0.15 T2/T2b |
+| I-F3 | No symbol the 0.14 extractor produced is lost, and FQN spelling (`parents` + `name`) is byte-identical pre/post outside the nine sanctioned changes S1-S9; `kind` is byte-identical outside K1-K3. Runtime-proven across all 11 grammars against the pre-branch baseline, never asserted from node-types.json. A tenth spelling change, a fourth kind rule, or one lost symbol is a breach. | 0.15 T2/T2b |
 
 ### I-F3: the complete sanctioned set (measured, not collected)
 
@@ -134,13 +143,15 @@ docs/superpowers/specs/2026-07-21-freshness-scale-2-design.md.
 | S8 | PHP | `enum_declaration` | `class` row + scopes members | -- |
 | S9 | C++ | `template_function` under `qualified_identifier` | name is the template's `name` (`f`), not the template id (`f<int>`); arguments move to `disamb` | -- |
 
-`kind` moves only under K1/K2, both from `parents.is_empty()` becoming
-`fn_kind(tdepth)` where `tdepth` counts TYPE scopes only:
+`kind` moves only under K1-K3, all from `parents.is_empty()` becoming
+`fn_kind(tdepth)` where `tdepth` counts TYPE scopes only; K3 names the one
+place a segment COUNTS as a type scope:
 
 | # | Rule | Effect |
 |---|------|--------|
 | K1 | module/namespace frame is not a type scope | a free function inside a C++ `namespace` (or Rust `mod`, PHP/C# namespace, TS `internal_module`) is `function`, not `method` |
 | K2 | enclosing FUNCTION frame is not a type scope | a nested `def`/`fn` is `function`, not `method` |
+| K3 | C++ qualifier segments ARE type scopes | an out-of-line qualified member definition (`void A::run()`) labels `method`, matching its in-class spelling |
 
 Two C++ recoveries ADD rows without respelling any existing one (so they cannot
 breach I-F3, but they shift later ordinals in their file):

@@ -362,8 +362,12 @@ fn cpp_definition_parts(node: Node, src: &[u8]) -> Option<(Vec<String>, String, 
                 cur = match cur.child_by_field_name("declarator") {
                     Some(d) => d,
                     // Fieldless wrapper (`&`/`&&`/parens): the single named
-                    // child IS the declarator, the sigil is an anonymous token.
-                    None => cur.named_child(0)?,
+                    // child IS the declarator, the sigil is an anonymous
+                    // token. A comment can sit between them and is also a
+                    // named child, so never land the walk on one.
+                    None => (0..cur.named_child_count())
+                        .filter_map(|i| cur.named_child(i))
+                        .find(|c| c.kind() != "comment")?,
                 };
             }
             "identifier" | "field_identifier" | "destructor_name" | "operator_name" => {

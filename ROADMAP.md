@@ -13,7 +13,7 @@ that: age is not truth, and a schedule cannot name which memory an edit broke.
 A deterministic AST-hash anchor is the only thing that flags the lie. Everything below deepens that edge or it does
 not ship.
 
-**Current focus (post-0.14): adoption before features.** The core promise is
+**Current focus (post-0.15): adoption before features.** The core promise is
 built and receipted; the bottleneck is people using it. The 0.14 truth-layer
 release carries that focus in the binary: `limpet demo` is the reproducible
 anchor-lifecycle proof (anchor -> edit -> stale -> heal, self-verifying), and
@@ -62,17 +62,15 @@ built.
   proof, CI smoke on every platform), `limpet seed` (MEMORY.md ingest as
   `mined`), `import --path`, wider default ignores, and a hot-path panic
   ratchet in CI.
-
-## v0.15: freshness at scale, part 2
-
-- **Full FQN disambiguation** (deferred from grammar wave 2): trait impls, C++
-  overloads, and nested modules currently share FQNs; the `(fqn, hash)`
-  existence check shipped in 0.7.2 stops the flapping, but true uniqueness needs
-  schema work.
-- **FS-event watcher** (notify) replacing the on-call sweep for very large
-  repositories, gated on evidence: build a lag bench on a genuinely large repo
-  first; if sweep prioritization keeps anchored-file staleness latency
-  acceptable, the watcher (and its per-platform risk surface) stays unbuilt.
+- **v0.15.0: freshness at scale, part 2.** Twins stopped sharing one identity.
+  Schema v7 gives every symbol a `disamb` discriminator (trait impl path,
+  receiver, parameter list, generic arity), an anchor addresses an exact twin
+  with an `@<disamb>` suffix spelled the way the source writes it, and the
+  slot-first resolution ladder closes the twin-masking false-Fresh hole,
+  including a scope-respell step so a relabeled namespace is followed instead
+  of false-staled. Recall items now name the task terms they matched (capped,
+  omitted when empty; the 4.0x bench gate held at 4.2x). Removed-file purges
+  became transactional. WATCHER_VERDICT_SENTENCE
 
 ## v0.16: the refinement loop
 

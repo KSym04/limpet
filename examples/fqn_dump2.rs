@@ -274,7 +274,8 @@ class Box {
 }
 "#,
         ),
-        // POSITIVE: `namespace A { }` and `module B { }` (both `internal_module`).
+        // POSITIVE: `namespace A { }` (internal_module) and `module B { }`
+        // (a distinct `module` node; scoped since the S5 widening, 53b5e6f).
         (
             "ts",
             Lang::Ts,

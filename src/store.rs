@@ -318,16 +318,12 @@ fn add_column_tolerating_race(conn: &Connection, ddl: &str) -> Result<bool> {
 /// rows and uniqueness is delivered at resolution. Each ALTER gates on its OWN
 /// table's ACTUAL state (pragma_table_info, the v5 precedent), never the
 /// version stamp: migrations run on every open and must no-op on re-run.
-/// Adding the symbols column also zeroes files.mtime_ns so the bounded sweep
-/// re-parses every file and refills disamb. That ALTER + UPDATE pair MUST be
-/// one transaction: the pragma gate keys off the column alone, so a crash
-/// between the two statements would leave the column present with live mtimes
-/// and every later open would skip the refill forever. SQLite DDL is
-/// transactional, so the pair commits or disappears together. A racing loser
-/// (duplicate-column ALTER failure) rolls back and skips the zeroing: the
-/// winner's commit already carried it. The anchors column zeroes nothing
-/// (anchors backfill via resolve, not re-parse), so its single ALTER is
-/// atomic on its own and needs no transaction.
+/// This migration only adds the columns; the mtime-zeroing that refills them
+/// lives in `refill_v7_content_once` below, gated on its own marker, so ONE
+/// mechanism covers both a fresh v6 -> v7 migration and a store that already
+/// reached v7 under an earlier build (the stamp cannot tell those apart). The
+/// symbols ALTER still runs inside a transaction so a racing loser rolls back
+/// cleanly; the anchors ALTER is a single atomic statement and needs none.
 fn migrate_to_v7(conn: &Connection) -> Result<()> {
     let present: i64 = conn.query_row(
         "SELECT COUNT(*) FROM pragma_table_info('symbols') WHERE name = 'disamb'",
@@ -358,27 +354,28 @@ fn migrate_to_v7(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// One-time content refill for stores whose v7 columns were filled by an
-/// EARLIER v7 build, not a shape migration.
+/// The one-time v7 content refill: zero every `files.mtime_ns` so the bounded
+/// sweep re-parses the whole repo and fills the new columns.
 ///
-/// `migrate_to_v7` zeroes `files.mtime_ns` from inside the ALTER that adds
-/// `symbols.disamb`, so it fires exactly once per store and never again. A
-/// store that reached v7 under a mid-development build therefore already has
-/// the column, skips that refill forever, and keeps rows the shipping extractor
+/// This is the SOLE refill mechanism for v7 (`migrate_to_v7` only adds
+/// columns). It must cover two stores the version stamp cannot tell apart:
+/// one migrating v6 -> v7 right now, and one that reached v7 under an earlier
+/// mid-development build and therefore keeps rows the shipping extractor
 /// would spell differently: FQNs missing the scope segments 0.15 added
 /// (C# block namespace, Java enum/record, PHP enum, TS namespace), `disamb`
 /// values from before the discriminator covered accessors and generic arity,
 /// and `calls.caller_fqn` values from before it carried the caller's full
-/// scope. Those rows heal only file by file as files happen to change, so a
-/// dogfood store can serve wrong lineage and unresolvable FQNs indefinitely.
+/// scope. Without the refill those rows heal only file by file as files
+/// happen to change, so a store can serve wrong lineage and unresolvable
+/// FQNs indefinitely.
 ///
-/// The gate is its own `meta_kv` marker, not the version stamp: every migration
-/// stamps the same `SCHEMA_VERSION`, so the stamp cannot distinguish "reached
-/// v7 last week" from "reached v7 just now". `ON CONFLICT DO NOTHING` makes the
-/// insert the claim, so the refill runs once even across racing processes, and
-/// the marker plus the UPDATE share one transaction for the same reason
-/// `migrate_to_v7` pairs its own: a crash between them would skip the refill
-/// forever. No DDL, so `SCHEMA_VERSION` is unchanged; the shape is still v7.
+/// The gate is its own `meta_kv` marker, not the version stamp: every
+/// migration stamps the same `SCHEMA_VERSION`, so the stamp cannot
+/// distinguish "reached v7 last week" from "reached v7 just now".
+/// `ON CONFLICT DO NOTHING` makes the insert the claim, so the refill runs
+/// once even across racing processes, and the marker plus the UPDATE share
+/// one transaction: a crash between them would skip the refill forever. No
+/// DDL, so `SCHEMA_VERSION` is unchanged; the shape is still v7.
 fn refill_v7_content_once(conn: &Connection) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
     let claimed = tx.execute(
