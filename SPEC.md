@@ -18,16 +18,16 @@ semantics only) + carried I3/BENCH/CONF/POS.
 
 ## Task Implementation Checklist: 0.15.0
 
-- [ ] T1 store.rs: schema v7 (symbols.disamb + anchors.disamb ALTERs,
+- [x] T1 store.rs: schema v7 (symbols.disamb + anchors.disamb ALTERs,
       pragma self-gate, duplicate-column race tolerated, mtimes zeroed once,
       SCHEMA_V1 fresh DDL updated, SCHEMA_VERSION 6->7, 4 hardcoded version
       tests updated, reopen-idempotence test)
-- [ ] T2 extract.rs: SymbolFact.disamb + push_sym signature; per-grammar
+- [x] T2 extract.rs: SymbolFact.disamb + push_sym signature; per-grammar
       disamb (Rust impl trait, Go receiver, C++/Java/C# param text); scope
       fixes (Rust mod_item, PHP bracketed namespace, C++ qualified
       out-of-line); fixtures per change verified via to_sexp; I-F3 runtime
       proof across all 11 grammars
-- [ ] T2b extract.rs: close every REMAINING shape that filed two symbols in
+- [x] T2b extract.rs: close every REMAINING shape that filed two symbols in
       one slot, adversarial-review follow-up. Scope fixes: C# block
       `namespace_declaration` (file-scoped form deliberately untouched), TS
       `internal_module`, Java `enum_declaration`/`record_declaration`, PHP
@@ -46,15 +46,17 @@ semantics only) + carried I3/BENCH/CONF/POS.
       3.06M calls): 0 symbols lost, 87 strictly new, 0 phantom callers -- but
       that corpus was C and C++ only, so it proved NOTHING about Java, C#,
       TypeScript, PHP, Ruby or Python. I-F3 re-proven properly under T2d.
-- [ ] T2d I-F3 restated and re-proven with the COMPLETE sanctioned list
-      (S1-S9, K1-K2, R1-R2) over a 41-fixture, 11-grammar differential run
-      against the 2ab0afb baseline from one byte-identical harness. 42
-      spelling changes, all attributable, 0 unattributed, 0 rows lost. New
+- [x] T2d I-F3 restated and re-proven with the COMPLETE sanctioned list
+      (S1-S9, K1-K2, R1-R2) over a 43-fixture, 11-grammar differential run
+      against the 2ab0afb baseline from one byte-identical harness. 45
+      spelling changes, all attributable, 0 unattributed, 0 rows lost
+      (re-measured 2026-08-04 with S5 widened to identifier-named `module`
+      nodes; delta vs the 2026-07-25 run = the three Beta.* rows only). New
       permanent pins in tests/index_langs.rs for every newly sanctioned scope
       plus the negative bounds (C# file-scoped namespace, TS string-named
       ambient module, Rust `mod x;`, PHP unbracketed namespace, Ruby
       `class << self`, C++ `::f` and anonymous namespace).
-- [ ] T2c anchor.rs: ladder step 4.5 (scope respell). An FQN gone from the
+- [x] T2c anchor.rs: ladder step 4.5 (scope respell). An FQN gone from the
       index whose body is still in its file under the same last segment is a
       respelled SCOPE, not a moved symbol: follow it. Without it every scope
       fix above false-stales the anchors already pointing at those FQNs
@@ -62,11 +64,11 @@ semantics only) + carried I3/BENCH/CONF/POS.
       ambiguous_anchor on any duplicated body) for zero code change.
       store.rs: one-time `v7_content_refill` marker so a store that reached v7
       under an earlier build still gets its single reindex.
-- [ ] T3 index/mod.rs: persist disamb into symbols insert; purge tx fix (G)
-- [ ] T4 memory/mod.rs + tools.rs: resolve_anchor DISTINCT (fqn, disamb) +
+- [x] T3 index/mod.rs: persist disamb into symbols insert; purge tx fix (G)
+- [x] T4 memory/mod.rs + tools.rs: resolve_anchor DISTINCT (fqn, disamb) +
       @disamb spec parsing (last-@ split, verbatim retry) + anchors INSERT
       disamb + tool description + README
-- [ ] T5 anchor.rs: slot-first ladder (5 steps) + legacy NULL path +
+- [x] T5 anchor.rs: slot-first ladder (5 steps) + legacy NULL path +
       opportunistic backfill + follow rewrites disamb + twin-masking test +
       trait-rename follow test + golden additions
 - [ ] T6 bench/lag_bench.py: synthetic repos 2k/10k/50k, walk/stat/reindex
@@ -121,7 +123,7 @@ docs/superpowers/specs/2026-07-21-freshness-scale-2-design.md.
 | S2 | PHP | `namespace_definition` with a `body` | one segment, no symbol row | `namespace A;` pushes nothing |
 | S3 | C++ | `function_definition` reaching `qualified_identifier` | every `scope` segment becomes a parent, raw source text | `::f` has no `scope` field; anonymous `namespace` has no name |
 | S4 | C# | `namespace_declaration` with a `body` | the dotted name as ONE segment | `file_scoped_namespace_declaration` pushes nothing |
-| S5 | TS | `internal_module` with a `body` | one segment, no symbol row | string-named `module "x" { }` is the `module` node, pushes nothing; kind absent from the JS grammar |
+| S5 | TS | `internal_module` or identifier-named `module` with a `body` | one segment, no symbol row | string-named `module "x" { }` never scopes: it carries a `body` too, so the `name` kind (`string`), not body presence, is the bound; neither node kind exists in the JS grammar |
 | S6 | Java | `enum_declaration` | `class` row + scopes members | -- |
 | S7 | Java | `record_declaration` | `class` row + scopes members | -- |
 | S8 | PHP | `enum_declaration` | `class` row + scopes members | -- |
@@ -140,10 +142,12 @@ breach I-F3, but they shift later ordinals in their file):
 R1 `reference_declarator`/`parenthesized_declarator` (fieldless wrappers,
 previously extracted nothing), R2 unqualified `template_function` (ditto).
 
-Measured over a 41-fixture corpus covering every `parents.push` arm in BOTH
-trees: 218 baseline symbols, 231 branch symbols, 42 spelling changes ALL
-attributable, 0 unattributed, 7 kind changes, 13 rows added, 0 rows lost; JS,
-Go and Bash byte-identical. Pins live in `tests/index_langs.rs` under the
+Measured over a 43-fixture corpus covering every `parents.push` arm in BOTH
+trees (re-measured 2026-08-04 after S5 widened to identifier-named `module`
+nodes; the widening added exactly the three `Beta.*` rows, nothing else moved):
+218 baseline symbols, 231 branch symbols, 45 spelling changes ALL attributable,
+0 unattributed, 7 kind-only changes, 13 rows added, 0 rows lost; JS, Go and
+Bash byte-identical. Pins live in `tests/index_langs.rs` under the
 `I-F3 sanctioned-scope pins` banner.
 
 ## ATTACK SURFACE / HAZARDS

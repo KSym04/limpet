@@ -718,14 +718,20 @@ fn walk(
                     pushed += 1;
                 }
             }
-            // TypeScript `namespace A { ... }` / `module A { ... }`, the direct
-            // analogue of PHP's bracketed namespace: one file legally holds
-            // several, and without the segment two same-named classes in two
-            // namespaces produce one FQN per method. Body-bearing only, so an
-            // ambient `declare module "x";` contributes nothing. The kind does
-            // not exist in the JS grammar, where this arm simply never matches.
-            "internal_module" => {
-                if node.child_by_field_name("body").is_some() {
+            // TypeScript `namespace A { ... }` (internal_module) and the legacy
+            // `module A { ... }` (a distinct `module` node with the same shape),
+            // the direct analogue of PHP's bracketed namespace: one file legally
+            // holds several, and without the segment two same-named classes in
+            // two namespaces produce one FQN per method. Body-bearing only, and
+            // never string-named: an ambient `declare module "x" { ... }` also
+            // carries a statement_block body, so the name kind is what keeps a
+            // quoted module specifier out of the FQN. Neither kind exists in the
+            // JS grammar, where this arm simply never matches.
+            "internal_module" | "module" => {
+                let string_named = node
+                    .child_by_field_name("name")
+                    .is_some_and(|n| n.kind() == "string");
+                if !string_named && node.child_by_field_name("body").is_some() {
                     if let Some(name) = name_of(node, src) {
                         parents.push(name);
                         pushed += 1;

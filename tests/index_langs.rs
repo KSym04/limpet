@@ -1416,10 +1416,12 @@ namespace Cards {
 
 #[test]
 fn fqn_pin_ts_internal_module_scoping() {
-    // S5. `namespace A { }` and the legacy `module A { }` are one grammar node,
-    // `internal_module`, and are TypeScript's exact analogue of PHP's bracketed
-    // namespace: a file can legally hold several, so two same-named classes in
-    // two namespaces otherwise produced one FQN and one slot per method.
+    // S5. `namespace A { }` is `internal_module`; the legacy `module A { }` is
+    // a distinct `module` node with the same shape (name field + body), and
+    // both are TypeScript's exact analogue of PHP's bracketed namespace: a file
+    // can legally hold several, so two same-named classes in two namespaces
+    // otherwise produced one FQN and one slot per method. String-named ambient
+    // modules also carry a body, so the `name` kind is what keeps them out.
     let src = r#"
 namespace Alpha {
     export class Options {
