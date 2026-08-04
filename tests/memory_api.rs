@@ -1343,3 +1343,74 @@ fn import_rejects_bogus_anchor_disamb_without_aborting_the_batch() {
         .unwrap();
     assert_eq!(bad, 0, "a rejected line stores nothing");
 }
+
+// ---------------------------------------------------------------- P5 matched
+
+/// P5: an item names which task terms hit its body, capped at three, in task
+/// order, and the field is absent entirely when nothing hits (omit-when-empty
+/// is what keeps the wire under the bench gate).
+#[test]
+fn recall_items_carry_capped_matched_terms_or_nothing() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    let mut store = seeded_store(root);
+
+    memory::remember(
+        &store,
+        "insight",
+        "sweep prioritization reindexes anchored files first inside the budget",
+        "explicit",
+        None,
+        &[AnchorSpec { file: "cache.py".into(), symbol: Some("cache_get".into()) }],
+        None,
+        &[],
+        Some("main"),
+        false,
+        None,
+        false,
+    )
+    .unwrap();
+
+    let resp = limpet::tools::dispatch(
+        &mut store,
+        root,
+        "recall",
+        &serde_json::json!({
+            "task": "how does sweep prioritization order anchored files in the reindex budget",
+            "budget_tokens": 2000
+        }),
+    )
+    .unwrap();
+    let items = resp["data"].as_array().unwrap();
+    let hit = items
+        .iter()
+        .find(|i| i["body"].as_str().unwrap().starts_with("sweep prioritization"))
+        .expect("stored memory recalled");
+    assert_eq!(
+        hit["matched"].as_str().unwrap(),
+        "sweep prioritization anchored",
+        "task-order intersection, capped at three"
+    );
+
+    // No term overlap: reached via the working set instead, and the wire
+    // carries no matched key at all.
+    let resp = limpet::tools::dispatch(
+        &mut store,
+        root,
+        "recall",
+        &serde_json::json!({
+            "task": "zebra quantum flamingo",
+            "working_set": ["cache.py"],
+            "budget_tokens": 2000
+        }),
+    )
+    .unwrap();
+    let items = resp["data"].as_array().unwrap();
+    assert!(!items.is_empty(), "working-set proximity still surfaces the item");
+    for i in items {
+        assert!(
+            i.get("matched").is_none(),
+            "no task term hits, so no matched field: {i}"
+        );
+    }
+}

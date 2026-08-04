@@ -121,6 +121,10 @@ fn tool_recall(store: &Store, sweep: &SweepReport, args: &Value) -> Result<Value
             if !i.flags.is_empty() {
                 obj.insert("flags".into(), json!(i.flags));
             }
+            // P5: why this item surfaced, only when a task term actually hit.
+            if !i.matched.is_empty() {
+                obj.insert("matched".into(), json!(i.matched));
+            }
             obj.insert(
                 "on".into(),
                 json!(i.created_at.get(..10).unwrap_or(&i.created_at)),
@@ -772,7 +776,7 @@ pub fn tool_schemas() -> Value {
     json!([
         {
             "name": "recall",
-            "description": "Retrieve project memories relevant to a task. Returns a token-budgeted, ranked pack of facts, decisions, insights, episodes, and intents, each flagged if stale or contradicted. Always check meta.staleness and item flags before trusting a memory. Provenance is on the `source` field: `verified` = proven with evidence on file (outranks everything at equal relevance); `mined` = imported, lower trust; a MISSING `source` field means an unverified explicit claim (someone typed it, nothing re-runnable, and it cannot be trusted like a proof). Prefer verified memories for anything you must not get wrong.",
+            "description": "Retrieve project memories relevant to a task. Returns a token-budgeted, ranked pack of facts, decisions, insights, episodes, and intents, each flagged if stale or contradicted. Always check meta.staleness and item flags before trusting a memory. Provenance is on the `source` field: `verified` = proven with evidence on file (outranks everything at equal relevance); `mined` = imported, lower trust; a MISSING `source` field means an unverified explicit claim (someone typed it, nothing re-runnable, and it cannot be trusted like a proof). Prefer verified memories for anything you must not get wrong. An item's `matched` field names the task terms found in its body; its absence means the item surfaced by anchor proximity, not vocabulary.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

@@ -74,8 +74,13 @@ semantics only) + carried I3/BENCH/CONF/POS.
 - [ ] T6 bench/lag_bench.py: synthetic repos 2k/10k/50k, walk/stat/reindex
       cost separation, staleness latency in calls, drain; run on release
       binary; verdict recorded in ROADMAP with numbers
-- [ ] T7 P5 matched terms: implement capped omit-when-empty field + bench;
-      keep only if >= 4.0x with ITEM_OVERHEAD parity, else revert + episode
+- [x] T7 P5 matched terms: per-item `matched` string (task terms found in the
+      body, cap 3, task order, omitted when empty), priced into both the
+      packer and recall_cost (ITEM_OVERHEAD parity). GATE HELD on the rebuilt
+      release binary: 4.2x overall / 5.4x lineage (a first 4.1x reading was a
+      stale-binary artifact and was discarded); emission proven on the real
+      serve path via stdio JSON-RPC ("matched":"sweep prioritization
+      anchored"). 3 unit + 1 wire test.
 - [ ] T8 docs: README (disamb + @spec + bench receipt), ROADMAP (0.15 ->
       Shipped + watcher verdict), main.rs doc header if touched
 - [ ] T9 QA: full suite green, clippy 0, panic ratchet, bench 4.0x+, demo,
@@ -234,8 +239,8 @@ Slice A (truth layer):
       sidecar. Old binaries reading a new export simply ignore the field (entry
       imports visible; acceptable degradation). INVARIANT: archival is a USER
       action, not an honesty flag; I3 does not apply (like superseded).
-- [ ] P5: `matched` field per recalled item (query∩body significant tokens); BENCH RISK
-      -> DEFERRED out of 0.14; 0.15 candidate, ships only if the 4.0x bench gate holds
+- [x] P5: `matched` field per recalled item (query∩body significant tokens); BENCH RISK
+      -> DEFERRED out of 0.14; shipped in 0.15 T7 with the 4.0x gate held at 4.2x
 
 Slice B (adoption):
 - [x] `src/demo.rs` drop-in + wire main.rs; `cargo run -- demo` exits 0 (verified)
