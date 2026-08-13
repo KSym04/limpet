@@ -37,7 +37,7 @@ Restart Claude Code, type `/limpet` in any project, and just work:
 ## 🎯 Why limpet, in four checkable claims
 
 - **It knows when it is wrong.** Memories anchor to AST hashes, follow renames and file moves, go stale on real edits with the reason attached, and heal on revert. → [the anchor lifecycle](#-the-anchor-lifecycle)
-- **It shows you what it saved.** Every recall is priced against the file reads it replaced: 4.0x fewer tokens on the benchmark, and a live per-project ledger via `limpet stats`. → [the receipts](#-the-receipts-token-savings-measured)
+- **It shows you what it saved.** Every recall is priced against the file reads it replaced: 4.2x fewer tokens on the benchmark, and a live per-project ledger via `limpet stats`. → [the receipts](#-the-receipts-token-savings-measured)
 - **It anchors the whole repository.** Eleven grammars for symbol-level anchoring; every other file (templates, styles, configs) anchorable at file level. → [whole repo indexed](#-whole-repo-indexed-thin-on-purpose)
 - **It never lies by omission.** Every response carries an honesty envelope: matched vs returned, what was dropped and why, how fresh the index is, how much is stale. The benchmark gate has killed limpet's own features when they crossed that line.
 
@@ -96,6 +96,13 @@ Every response is wrapped in the honesty envelope:
 }
 ```
 
+A recalled item also names the significant task terms found verbatim in its
+body (`"matched": "sweep anchored"`, capped at three, in task order), so why
+an item surfaced is inspectable without re-reading it. The field is absent
+when no significant task term appears whole in the body: the item then
+reached the pack through anchor proximity, a stopword-only hit, or a stemmed
+or partial text match instead.
+
 ## ⚓ The anchor lifecycle
 
 ```
@@ -114,6 +121,16 @@ move a trivial body    unique match, too small   stale (low_entropy), never re-p
 ```
 
 A multi-anchor memory dies only when **every** anchor dies. Losing one anchor while others still resolve degrades it to `stale:anchor_lost` so the surviving knowledge stays usable. And `remember` refuses an anchor it cannot resolve, loudly, at write time: no memory is ever born dead.
+
+Twins (trait impls, overloads, accessor pairs) share one FQN, so a symbol spec takes an optional `@<disamb>` suffix naming the exact one, spelled as the source writes it, whitespace forgiven (`f@(int a, String b)` and the canonicalized stored form are one spelling): the Rust trait path (`impl` for an inherent impl), the Go receiver type (`func` for a package function), the Ruby receiver (`self.`, `<<self.`, `#` for an instance method), and the parameter list for C++, Java, C#, Python and JS/TS, generic arity and JS/TS `static` included. An ambiguous spec is refused with the exact typeable forms listed.
+
+```
+symbol: "go"      → refused: matches t.T.go@A, t.T.go@B, t.T.go@impl
+symbol: "go@A"    → anchors to the A impl's body, and only that one
+symbol: "go@impl" → anchors to the inherent impl, and only that one
+symbol: "x@"      → anchors to a twin that carries no discriminator at all
+                    (a type sharing its name with a method, say)
+```
 
 Rename-following is evidence-gated: a unique match on a trivial body (an empty function, a bare delegation stub, a near-empty file) is refused as follow evidence and surfaces as `stale:low_entropy` instead of silently re-pointing the anchor at a look-alike twin, and it heals the moment the original code returns.
 
@@ -149,21 +166,21 @@ Measured with a reproducible benchmark, seeded with 12 memories over a realistic
 ```
 question                                                   files+grep   recall   ratio  in code?
 ----------------------------------------------------------------------------------------------------
-why is the batch size 50 and why is there a queue at all         1929      367    5.3x  no (answer only in memory)
-why does the scanner skip draft products, is that a bug          1630      377    4.3x  no (answer only in memory)
-how is the health score computed                                 1630      352    4.6x  yes
-why semicolon delimiter and BOM in the csv export                1327      361    3.7x  no (answer only in memory)
-where do report files get written and why                        1327      371    3.6x  no (answer only in memory)
-how long are download tokens valid                               1023      167    6.1x  yes
-has anyone tried streaming the csv export                        1327      369    3.6x  no (answer only in memory)
-can I rename check_product in the scanner                        1630      377    4.3x  no (answer only in memory)
-what does the nightly cron actually exist for                     803      317    2.5x  no (answer only in memory)
-how often does the dashboard poll progress and can I lower it    1072      340    3.2x  no (answer only in memory)
+why is the batch size 50 and why is there a queue at all         1929      368    5.2x  no (answer only in memory)
+why does the scanner skip draft products, is that a bug          1630      316    5.2x  no (answer only in memory)
+how is the health score computed                                 1630      364    4.5x  yes
+why semicolon delimiter and BOM in the csv export                1327      373    3.6x  no (answer only in memory)
+where do report files get written and why                        1327      325    4.1x  no (answer only in memory)
+how long are download tokens valid                               1023      174    5.9x  yes
+has anyone tried streaming the csv export                        1327      318    4.2x  no (answer only in memory)
+can I rename check_product in the scanner                        1630      313    5.2x  no (answer only in memory)
+what does the nightly cron actually exist for                     803      330    2.4x  no (answer only in memory)
+how often does the dashboard poll progress and can I lower it    1072      345    3.1x  no (answer only in memory)
 ----------------------------------------------------------------------------------------------------
-TOTAL                                                           13698     3398    4.0x
+TOTAL                                                           13698     3226    4.2x
 ```
 
-**4.0x fewer tokens (75% saved) across the benchmark.** Reproduce it yourself:
+**4.2x fewer tokens (76% saved) across the benchmark.** Reproduce it yourself:
 
 ```bash
 cargo build --release
@@ -185,6 +202,16 @@ Methodology, stated so the number can be checked rather than believed:
 - 8 of the 10 questions are marked "no" above: their answers exist in **no file at any token price** (decisions, history, tribal knowledge). File reading gets you the code but not the answer. We still charge limpet full price against the file-reading cost instead of claiming infinite savings.
 - The script is a regression gate: it exits nonzero if savings drop below 4x.
 - Fixture files are 58 to 179 lines. Real source files run several times larger, and the "without" side grows with file size while a recall response does not.
+
+Freshness has a receipt too. `bench/lag_bench.py` builds synthetic repos of
+2,000, 10,000 and 50,000 files, edits anchored symbols in batches of 1, 32
+and 100, and measures how many sweep calls pass before every edit is flagged:
+**one call, at every size and every batch width**, because files carrying
+anchors reindex first inside the sweep budget. The same run prices the cost
+of that sweep on a quiet repo (nothing changed): 156 ms per call at 2,000
+files, 372 ms at 10,000, 1,206 ms at 50,000. That last number is why the
+FS-event watcher is a designed, bench-gated backlog item rather than a
+promise: staleness latency does not need it, sweep cost at 50k files does.
 
 ## 🗺️ Visual memory
 
@@ -391,7 +418,7 @@ An optional `.limpet.json` at the repository root tunes two things. It is a plai
 
 ## 🧭 Roadmap
 
-See [ROADMAP.md](ROADMAP.md) for what has shipped (portable repo identity, the statusline doctor, the structural lineage graph, grammar wave 2 with eleven languages, and the 0.13 freshness pass: anchored-first sweep priority plus the evidence-gated low-entropy follow guard), what this release carries (the 0.14 truth layer: verification as a ranking signal, contradictions surfaced and duplicates refused at write time), and what is next (FQN disambiguation, the refinement loop that closes the re-verification cycle, then the 1.0 stability contract). One rule governs all of it: a feature ships only if it feeds a receipt (`limpet stats`, the benchmark, rework-avoided) or the honesty envelope.
+See [ROADMAP.md](ROADMAP.md) for what has shipped (portable repo identity, the statusline doctor, the structural lineage graph, grammar wave 2 with eleven languages, the 0.13 freshness pass, and the 0.14 truth layer: verification as a ranking signal, contradictions surfaced and duplicates refused at write time), what this release carries (freshness at scale, part 2: FQN disambiguation with @-addressable twins, the slot-first anchor ladder, matched terms on recall items, and the lag-bench watcher verdict), and what is next (the refinement loop that closes the re-verification cycle, then the 1.0 stability contract). One rule governs all of it: a feature ships only if it feeds a receipt (`limpet stats`, the benchmark, rework-avoided) or the honesty envelope.
 
 ## ⚖️ Reliance and license
 

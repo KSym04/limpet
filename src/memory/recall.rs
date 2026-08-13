@@ -28,6 +28,9 @@ pub struct RecallItem {
     /// baseline. Not serialized: the wire shape is built in tools.rs.
     #[serde(skip)]
     pub anchor_files: Vec<String>,
+    /// P5: the task terms found in this body, space-joined, so the agent can
+    /// see WHY an item surfaced without re-reading it. Empty ships nothing.
+    pub matched: String,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -44,6 +47,50 @@ pub struct RecallResult {
 /// counted against the budget alongside the body itself.
 const ITEM_OVERHEAD_TOKENS: usize = 30;
 
+/// P5 cap: per-item wire additions are the known bench killer (the envelope
+/// ledger died at 3.8x, the per-item unverified marker at 3.8x again), so at
+/// most this many matched terms ride along per item.
+const MATCHED_TERMS_CAP: usize = 3;
+
+/// Lowercased alphanumeric runs of three or more characters, minus common
+/// function words, first-seen order, deduplicated. Shared by both sides of
+/// the matched-terms intersection so tokenization can never disagree with
+/// itself.
+fn significant_terms(text: &str) -> Vec<String> {
+    const STOP: [&str; 18] = [
+        "the", "and", "for", "with", "that", "this", "from", "into", "when",
+        "what", "how", "does", "are", "was", "not", "its", "has", "have",
+    ];
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for tok in text.split(|c: char| !c.is_alphanumeric() && c != '_') {
+        if tok.chars().count() < 3 {
+            continue;
+        }
+        let lower = tok.to_lowercase();
+        if STOP.contains(&lower.as_str()) || !seen.insert(lower.clone()) {
+            continue;
+        }
+        out.push(lower);
+    }
+    out
+}
+
+/// The task terms present in `body`, capped and space-joined for the wire.
+fn matched_terms(task_terms: &[String], body: &str) -> String {
+    if task_terms.is_empty() {
+        return String::new();
+    }
+    let body_terms: HashSet<String> = significant_terms(body).into_iter().collect();
+    task_terms
+        .iter()
+        .filter(|t| body_terms.contains(t.as_str()))
+        .take(MATCHED_TERMS_CAP)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 pub fn recall(
     store: &Store,
     task: &str,
@@ -52,6 +99,7 @@ pub fn recall(
 ) -> Result<RecallResult> {
     let now = now_iso();
     let fts_query = fts_escape(task);
+    let task_terms = significant_terms(task);
 
     // Candidates: FTS matches, plus everything anchored near the working
     // set (an agent's current files matter even when vocabulary differs).
@@ -250,6 +298,7 @@ pub fn recall(
             flags.push(format!("contradicted-by:{}", c?));
         }
 
+        let matched_in_body = matched_terms(&task_terms, &body);
         items.push(RecallItem {
             id: id.clone(),
             kind,
@@ -264,6 +313,7 @@ pub fn recall(
                 .map(|(f, s)| s.clone().unwrap_or_else(|| f.clone()))
                 .collect(),
             anchor_files: anchor_rows.iter().map(|(f, _)| f.clone()).collect(),
+            matched: matched_in_body,
             flags,
         });
     }
@@ -292,7 +342,8 @@ pub fn recall(
     let mut packed = Vec::new();
     let mut spent = 0usize;
     for item in items {
-        let cost = token_estimate(&item.body) + ITEM_OVERHEAD_TOKENS;
+        let cost =
+            token_estimate(&item.body) + token_estimate(&item.matched) + ITEM_OVERHEAD_TOKENS;
         if spent + cost > budget_tokens && !packed.is_empty() {
             continue;
         }
@@ -334,7 +385,9 @@ pub fn recall_cost(items: &[RecallItem], file_size: impl Fn(&str) -> Option<i64>
     let mut files: HashSet<&str> = HashSet::new();
     let mut active_files: HashSet<&str> = HashSet::new();
     for item in items {
-        cost.served += (token_estimate(&item.body) + ITEM_OVERHEAD_TOKENS) as i64;
+        cost.served += (token_estimate(&item.body)
+            + token_estimate(&item.matched)
+            + ITEM_OVERHEAD_TOKENS) as i64;
         for f in &item.anchor_files {
             files.insert(f);
             if item.status == "active" {
@@ -353,6 +406,33 @@ pub fn recall_cost(items: &[RecallItem], file_size: impl Fn(&str) -> Option<i64>
 }
 
 #[cfg(test)]
+mod matched_tests {
+    use super::*;
+
+    #[test]
+    fn significant_terms_drop_stopwords_short_tokens_and_dups() {
+        let terms = significant_terms(
+            "How does the sweep order the sweep for busy_timeout and io?",
+        );
+        assert_eq!(terms, ["sweep", "order", "busy_timeout"]);
+    }
+
+    #[test]
+    fn matched_terms_intersect_in_task_order_and_cap_at_three() {
+        let task = significant_terms("anchor ladder follows renamed scope respell twin");
+        let m = matched_terms(&task, "the ladder respell step follows a renamed scope twin");
+        assert_eq!(m, "ladder follows renamed");
+    }
+
+    #[test]
+    fn matched_terms_empty_when_nothing_hits() {
+        let task = significant_terms("zebra quantum flamingo");
+        assert_eq!(matched_terms(&task, "sweep budget staleness"), "");
+        assert_eq!(matched_terms(&[], "anything at all"), "");
+    }
+}
+
+#[cfg(test)]
 mod cost_tests {
     use super::*;
 
@@ -368,6 +448,7 @@ mod cost_tests {
             created_at: "2026-07-03T00:00:00Z".into(),
             anchors: files.iter().map(|f| f.to_string()).collect(),
             anchor_files: files.iter().map(|f| f.to_string()).collect(),
+            matched: String::new(),
             flags: vec![],
         }
     }

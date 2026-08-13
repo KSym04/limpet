@@ -13,10 +13,10 @@ that: age is not truth, and a schedule cannot name which memory an edit broke.
 A deterministic AST-hash anchor is the only thing that flags the lie. Everything below deepens that edge or it does
 not ship.
 
-**Current focus (post-0.13): adoption before features.** The core promise is
+**Current focus (post-0.15): adoption before features.** The core promise is
 built and receipted; the bottleneck is people using it. The 0.14 truth-layer
 release carries that focus in the binary: `limpet demo` is the reproducible
-anchor-lifecycle proof (anchor → edit → stale → heal, self-verifying), and
+anchor-lifecycle proof (anchor -> edit -> stale -> heal, self-verifying), and
 `limpet seed` lets a working MEMORY.md come along instead of being abandoned.
 Feature work continues under the evidence gates below, unchanged.
 
@@ -51,47 +51,32 @@ built.
   surfaces as `stale:low_entropy` instead of silently re-pointing the anchor at
   a trivial twin; it heals the moment the original returns. On pre-v5 stores
   the guard hardens progressively as the sweep refills.
-
-## v0.14.0: the truth layer (in flight)
-
-A claim and a proven fact used to look identical at recall, so the tool could
-confidently repeat a past mistake. This release makes verification a
-first-class signal on both the read and write paths, and ships the adoption
-bridge.
-
-- **Verification ranks.** `verified` (evidence on file) earns a ranking boost;
-  an unverified explicit claim is downranked, so truth wins ties. Typed
-  confidence on unverified memories is capped below what `verified` earns:
-  swagger cannot outrank proof. Gate held: the token bench stayed over 4.0x
-  and the recall-quality suite pins the behavior.
-- **Contradiction surfacing at write** (pulled forward from the refinement
-  loop). A new memory landing on an anchor whose existing memory asserts a
-  divergent value (a flipped number, an added negation) returns
-  `possible_conflicts` naming the old id, so the writer supersedes
-  deliberately. Surfaced, never auto-linked: invariant I4 holds.
-- **Dedup enforced at write.** A near-identical body on the same anchor is
-  refused, naming the existing id and the supersede path; `force: true` stores
-  anyway. A correction with a new value is never refused: blocking it would
-  freeze a past mistake in place.
-- **Archival.** `admin archive` shelves a memory without deleting it: hidden
-  from recall, the verify queue, and map, while its staleness keeps tracking
-  the code underneath; `restore` brings it back with its current, truthful
-  status. Archived entries still export (flagged), so hidden is never lost.
-- **Adoption bridge.** `limpet demo` (the self-verifying lifecycle proof, also
-  a CI smoke test on every platform) and `limpet seed` (ingest a MEMORY.md as
-  `mined`, idempotently). Plus wider default ignores for generated trees and a
-  hot-path panic ratchet in CI.
-
-## v0.15: freshness at scale, part 2
-
-- **Full FQN disambiguation** (deferred from grammar wave 2): trait impls, C++
-  overloads, and nested modules currently share FQNs; the `(fqn, hash)`
-  existence check shipped in 0.7.2 stops the flapping, but true uniqueness needs
-  schema work.
-- **FS-event watcher** (notify) replacing the on-call sweep for very large
-  repositories, gated on evidence: build a lag bench on a genuinely large repo
-  first; if sweep prioritization keeps anchored-file staleness latency
-  acceptable, the watcher (and its per-platform risk surface) stays unbuilt.
+- **v0.14.0: the truth layer.** Verification became a first-class signal on
+  both paths: `verified` evidence earns a ranking boost only while its anchor
+  is live (rotten proof loses the boost), typed confidence is capped below
+  what proof earns, value-divergent writes surface `possible_conflicts`,
+  near-identical bodies are refused with the supersede path named (`force`
+  overrides; corrections never refused), and archival shelves a memory without
+  deleting it while staleness keeps tracking the code underneath. The adoption
+  bridge shipped in the same binary: `limpet demo` (self-verifying lifecycle
+  proof, CI smoke on every platform), `limpet seed` (MEMORY.md ingest as
+  `mined`), `import --path`, wider default ignores, and a hot-path panic
+  ratchet in CI.
+- **v0.15.0: freshness at scale, part 2.** Twins stopped sharing one identity.
+  Schema v7 gives every symbol a `disamb` discriminator (trait impl path,
+  receiver, parameter list, generic arity), an anchor addresses an exact twin
+  with an `@<disamb>` suffix spelled the way the source writes it, and the
+  slot-first resolution ladder closes the twin-masking false-Fresh hole,
+  including a scope-respell step so a relabeled namespace is followed instead
+  of false-staled. Recall items now name the task terms they matched (capped,
+  omitted when empty; the 4.0x bench gate held at 4.2x). Removed-file purges
+  became transactional. The watcher lag bench ran on the release binary
+  (synthetic repos of 2k/10k/50k files, edit batches of 1/32/100): anchored
+  staleness lands in ONE sweep call at every size and batch width, so sweep
+  prioritization holds and no watcher is needed for correctness; a quiet
+  50k-file repo pays 1.2s per sweep call (p50, against a 250 ms bar), so the
+  FS-event watcher graduates from "unbuilt unless proven needed" to a
+  designed backlog item, gated on this bench (see the bets table).
 
 ## v0.16: the refinement loop
 
@@ -138,6 +123,7 @@ freeze because `reverify` adds a tool op and the tool API freezes at 1.0.
 
 | Bet | Gate before it ships |
 |---|---|
+| FS-event watcher: cut the quiet-repo sweep cost at scale (an OS-event feed marks dirty files so quiet sweeps stop paying full stat cost). Staleness LATENCY does not need it: the 0.15 lag bench measured one sweep call at every size. | `bench/lag_bench.py` quiet-repo per-call p50 < 250 ms at 50k files, with staleness latency still 1 call and 0 integrity findings |
 | Authority-weighted recall: knowledge earns rank structurally (fan-in, refactors survived, verification), with `cost_to_learn` as one bounded human input (<=35% of authority); never overrides staleness. Full design in SPEC.md. | recall_eval precision holds or improves AND the token bench gate holds |
 | Semantic recall (embedding rerank behind a feature flag) | Must beat FTS + proximity on the recall_eval precision suite; "only if it earns its size" |
 | Episode mining from session transcripts (SessionEnd hook) | Mined entries are already capped at 0.5 confidence; the miner must show a >50% keep-rate under human review or it is noise |

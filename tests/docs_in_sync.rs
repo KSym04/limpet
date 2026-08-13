@@ -68,3 +68,43 @@ fn documented_cli_commands_exist() {
         );
     }
 }
+
+#[test]
+fn the_015_recall_surfaces_are_documented() {
+    // The 0.15 wire additions must stay documented, and their wording must
+    // stay honest: the matched field's ABSENCE claim was corrected once
+    // (whole-branch review 2026-08-04: FTS stems, matched does not, so
+    // absence cannot promise "not vocabulary") and must not drift back.
+    let readme = readme();
+    assert!(
+        readme.contains("`@<disamb>` suffix"),
+        "the @disamb anchor syntax ships but README.md does not document it"
+    );
+    assert!(
+        readme.contains("\"matched\": \"sweep anchored\""),
+        "the matched field ships but README.md does not document it"
+    );
+    assert!(
+        !readme.contains("not vocabulary"),
+        "the matched-absence overclaim must not return to README.md"
+    );
+
+    let schemas = tool_schemas();
+    let recall_desc = schemas
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "recall")
+        .expect("recall tool ships")["description"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        recall_desc.contains("`matched`"),
+        "the recall tool description must name the matched field"
+    );
+    assert!(
+        !recall_desc.contains("not vocabulary"),
+        "the matched-absence overclaim must not return to the tool description"
+    );
+}

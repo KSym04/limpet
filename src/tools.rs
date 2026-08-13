@@ -121,6 +121,10 @@ fn tool_recall(store: &Store, sweep: &SweepReport, args: &Value) -> Result<Value
             if !i.flags.is_empty() {
                 obj.insert("flags".into(), json!(i.flags));
             }
+            // P5: why this item surfaced, only when a task term actually hit.
+            if !i.matched.is_empty() {
+                obj.insert("matched".into(), json!(i.matched));
+            }
             obj.insert(
                 "on".into(),
                 json!(i.created_at.get(..10).unwrap_or(&i.created_at)),
@@ -772,7 +776,7 @@ pub fn tool_schemas() -> Value {
     json!([
         {
             "name": "recall",
-            "description": "Retrieve project memories relevant to a task. Returns a token-budgeted, ranked pack of facts, decisions, insights, episodes, and intents, each flagged if stale or contradicted. Always check meta.staleness and item flags before trusting a memory. Provenance is on the `source` field: `verified` = proven with evidence on file (outranks everything at equal relevance); `mined` = imported, lower trust; a MISSING `source` field means an unverified explicit claim (someone typed it, nothing re-runnable, and it cannot be trusted like a proof). Prefer verified memories for anything you must not get wrong.",
+            "description": "Retrieve project memories relevant to a task. Returns a token-budgeted, ranked pack of facts, decisions, insights, episodes, and intents, each flagged if stale or contradicted. Always check meta.staleness and item flags before trusting a memory. Provenance is on the `source` field: `verified` = proven with evidence on file (outranks everything at equal relevance); `mined` = imported, lower trust; a MISSING `source` field means an unverified explicit claim (someone typed it, nothing re-runnable, and it cannot be trusted like a proof). Prefer verified memories for anything you must not get wrong. An item's `matched` field names the significant task terms found verbatim in its body; when absent, no significant task term appears there whole and the item surfaced via anchor proximity, a stopword-only hit, or a stemmed/partial text match.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -793,7 +797,7 @@ pub fn tool_schemas() -> Value {
                     "body": { "type": "string", "description": "The memory itself. Short, specific, standalone." },
                     "anchors": { "type": "array", "items": { "type": "object", "properties": {
                         "file": { "type": "string", "description": "Repo-relative path." },
-                        "symbol": { "type": "string", "description": "Function/class name or FQN in that file. Omit to anchor to the file itself (goes stale when the file's content changes)." }
+                        "symbol": { "type": "string", "description": "Function/class name or FQN in that file. Twins sharing one FQN take an @<disamb> suffix naming one trait impl, overload or accessor, spelled as the source writes it, whitespace forgiven (\"go@A\", \"go@impl\", \"f@(int a)\", \"m@self.\"); a bare trailing @ names the twin with no discriminator. An ambiguous name is refused with the exact forms listed. Omit to anchor to the file itself (goes stale when the file's content changes)." }
                     }, "required": ["file"] } },
                     "evidence": { "type": "object", "properties": {
                         "command": { "type": "string" }, "output": { "type": "string" }

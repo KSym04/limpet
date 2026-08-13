@@ -812,3 +812,810 @@ fn dispatch_remember_passes_private_and_origin() {
     let status = limpet::tools::dispatch(&mut store, dir.path(), "admin", &serde_json::json!({"op":"status"})).unwrap();
     assert_eq!(status["data"]["private"].as_i64(), Some(1));
 }
+
+/// Twin trait impls plus the inherent method next to them: one FQN
+/// (`t.T.go`), three slots (`@A`, `@B`, and one with NO discriminator), and
+/// deliberately DIFFERENT bodies so which slot a spec picked is visible in
+/// the stored anchor hash rather than having to be taken on trust. This is
+/// the shape the extractor itself pins (inherent impl plus trait impls), so
+/// the undiscriminated slot has to stay reachable.
+fn twin_impl_store(root: &std::path::Path) -> Store {
+    fs::write(
+        root.join("t.rs"),
+        "struct T;\n\
+         impl A for T { fn go(&self) -> u32 { 1 } }\n\
+         impl B for T { fn go(&self) -> u32 { 222 } }\n\
+         impl T { fn go(&self) -> u32 { 33333 } }\n",
+    )
+    .unwrap();
+    let store = Store::open_in_memory().unwrap();
+    index::full_index(&store, root).unwrap();
+    store
+}
+
+/// The body hash of one twin slot, read straight from the index.
+fn slot_hash(store: &Store, disamb: &str) -> String {
+    store
+        .conn
+        .query_row(
+            "SELECT body_hash FROM symbols WHERE name = 'go' AND disamb = ?1",
+            [disamb],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
+#[test]
+fn disamb_suffix_anchors_to_the_named_slot() {
+    let dir = TempDir::new().unwrap();
+    let store = twin_impl_store(dir.path());
+    let r = memory::remember(
+        &store,
+        "insight",
+        "the A impl returns the identity value",
+        "explicit",
+        None,
+        &[AnchorSpec { file: "t.rs".into(), symbol: Some("go@A".into()) }],
+        None,
+        &[],
+        None,
+        false,
+        None, false,
+    )
+    .unwrap();
+    assert_eq!(r.anchored, 1);
+
+    let (fqn, disamb, hash): (String, Option<String>, String) = store
+        .conn
+        .query_row(
+            "SELECT symbol_fqn, disamb, ast_body_hash FROM anchors WHERE entry_id = ?1",
+            [&r.id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(fqn, "t.T.go");
+    assert_eq!(disamb.as_deref(), Some("A"), "the anchor records the slot it resolved");
+    assert_eq!(hash, slot_hash(&store, "A"), "the A slot's own body hash");
+    assert_ne!(hash, slot_hash(&store, "B"), "never the twin's hash");
+}
+
+#[test]
+fn bare_name_over_twin_slots_lists_the_slot_forms() {
+    let dir = TempDir::new().unwrap();
+    let store = twin_impl_store(dir.path());
+    let err = memory::remember(
+        &store,
+        "insight",
+        "go does a thing",
+        "explicit",
+        None,
+        &[AnchorSpec { file: "t.rs".into(), symbol: Some("go".into()) }],
+        None,
+        &[],
+        None,
+        false,
+        None, false,
+    )
+    .unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("ambiguous"), "{msg}");
+    assert!(
+        msg.contains("t.T.go@A") && msg.contains("t.T.go@B"),
+        "the caller must be told exactly what to type: {msg}"
+    );
+    assert!(
+        msg.contains("t.T.go@impl"),
+        "the inherent slot needs a typeable spelling of its own, not the bare \
+         FQN that just bounced: {msg}"
+    );
+    let entries: i64 = store
+        .conn
+        .query_row("SELECT COUNT(*) FROM entries", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(entries, 0, "an ambiguous slot never guesses and never stores");
+}
+
+#[test]
+fn a_truncated_slot_list_says_so() {
+    let dir = TempDir::new().unwrap();
+    let mut src = String::from("struct T;\n");
+    for i in 0..6 {
+        src.push_str(&format!("impl Tr{i} for T {{ fn go(&self) -> u32 {{ {i} }} }}\n"));
+    }
+    fs::write(dir.path().join("many.rs"), src).unwrap();
+    let store = Store::open_in_memory().unwrap();
+    index::full_index(&store, dir.path()).unwrap();
+    let err = memory::remember(
+        &store,
+        "insight",
+        "go does a thing",
+        "explicit",
+        None,
+        &[AnchorSpec { file: "many.rs".into(), symbol: Some("go".into()) }],
+        None,
+        &[],
+        None,
+        false,
+        None, false,
+    )
+    .unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("and more"),
+        "a capped menu must admit the choices it dropped: {msg}"
+    );
+}
+
+#[test]
+fn trailing_at_anchors_the_undiscriminated_slot() {
+    // A type and a callable can share an FQN in most languages (Java keeps
+    // class and method names in separate namespaces, so a factory method may
+    // be spelled exactly like the nested class it builds). The type row is the
+    // symbol class that genuinely carries NO discriminator, so no
+    // `@<disamb>` spelling and no bare FQN can name it: the empty suffix is
+    // the only spec that reaches it.
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("Config.java"),
+        "class Config {\n\
+        \x20 class Builder {\n\
+        \x20   void run() { go(); }\n\
+        \x20 }\n\
+        \x20 Builder Builder() {\n\
+        \x20   return make();\n\
+        \x20 }\n\
+         }\n",
+    )
+    .unwrap();
+    let store = Store::open_in_memory().unwrap();
+    index::full_index(&store, dir.path()).unwrap();
+    let slots: i64 = store
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM symbols WHERE fqn = 'Config.Config.Builder'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(slots, 2, "premise: the nested class and the factory share one FQN");
+
+    let r = memory::remember(
+        &store,
+        "fact",
+        "the Builder type collects options before validating",
+        "explicit",
+        None,
+        &[AnchorSpec { file: "Config.java".into(), symbol: Some("Builder@".into()) }],
+        None,
+        &[],
+        None,
+        false,
+        None, false,
+    )
+    .unwrap();
+    assert_eq!(r.anchored, 1);
+
+    let (fqn, disamb, hash): (String, Option<String>, String) = store
+        .conn
+        .query_row(
+            "SELECT symbol_fqn, disamb, ast_body_hash FROM anchors WHERE entry_id = ?1",
+            [&r.id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(fqn, "Config.Config.Builder");
+    assert_eq!(disamb, None, "the empty suffix means 'no discriminator', not 'a disamb spelled \"\"'");
+    let class_hash: String = store
+        .conn
+        .query_row(
+            "SELECT body_hash FROM symbols WHERE fqn = 'Config.Config.Builder' AND kind = 'class'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(hash, class_hash, "the type's own body hash, not the factory's");
+}
+
+#[test]
+fn a_discriminator_carrying_an_at_still_anchors() {
+    let dir = TempDir::new().unwrap();
+    // A Java discriminator is the parameter list verbatim, annotations
+    // included, so the spec carries two `@` signs and a single last-`@`
+    // split shreds it.
+    fs::write(
+        dir.path().join("C.java"),
+        "class C {\n  void f(int a) { log(a); }\n  \
+         void f(@NonNull String a) { log(a.length()); }\n}\n",
+    )
+    .unwrap();
+    let store = Store::open_in_memory().unwrap();
+    index::full_index(&store, dir.path()).unwrap();
+    let (disamb, hash): (String, String) = store
+        .conn
+        .query_row(
+            "SELECT disamb, body_hash FROM symbols WHERE name = 'f' AND disamb LIKE '%@%'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("fixture must produce an overload whose discriminator holds an `@`");
+
+    let r = memory::remember(
+        &store,
+        "fact",
+        "the annotated overload is the one callers reach",
+        "explicit",
+        None,
+        &[AnchorSpec { file: "C.java".into(), symbol: Some(format!("f@{disamb}")) }],
+        None,
+        &[],
+        None,
+        false,
+        None, false,
+    )
+    .unwrap();
+    assert_eq!(r.anchored, 1);
+    let (stored_disamb, stored_hash): (Option<String>, String) = store
+        .conn
+        .query_row(
+            "SELECT disamb, ast_body_hash FROM anchors WHERE entry_id = ?1",
+            [&r.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(stored_disamb.as_deref(), Some(disamb.as_str()));
+    assert_eq!(stored_hash, hash, "the annotated overload's own body, not its twin's");
+}
+
+#[test]
+fn unknown_disamb_fails_not_found_with_the_slot_list() {
+    let dir = TempDir::new().unwrap();
+    let store = twin_impl_store(dir.path());
+    let err = memory::remember(
+        &store,
+        "insight",
+        "go does a thing",
+        "explicit",
+        None,
+        &[AnchorSpec { file: "t.rs".into(), symbol: Some("go@Nope".into()) }],
+        None,
+        &[],
+        None,
+        false,
+        None, false,
+    )
+    .unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("not found"), "{msg}");
+    assert!(
+        msg.contains("t.T.go@A") && msg.contains("t.T.go@B"),
+        "the near-miss list must show the slots that DO exist: {msg}"
+    );
+}
+
+#[test]
+fn symbol_spelled_with_an_at_sign_still_anchors() {
+    let dir = TempDir::new().unwrap();
+    // bash allows `@` inside a function name, so the last-`@` split would
+    // shred this spec. The verbatim retry keeps it anchorable.
+    fs::write(
+        dir.path().join("deploy.sh"),
+        "function deploy@prod {\n  echo shipping to prod\n}\n",
+    )
+    .unwrap();
+    let store = Store::open_in_memory().unwrap();
+    index::full_index(&store, dir.path()).unwrap();
+    let indexed: i64 = store
+        .conn
+        .query_row("SELECT COUNT(*) FROM symbols WHERE name = 'deploy@prod'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(indexed, 1, "fixture must really produce an @-spelled symbol");
+
+    let r = memory::remember(
+        &store,
+        "episode",
+        "prod deploys need the VPN up first",
+        "explicit",
+        None,
+        &[AnchorSpec { file: "deploy.sh".into(), symbol: Some("deploy@prod".into()) }],
+        None,
+        &[],
+        None,
+        false,
+        None, false,
+    )
+    .unwrap();
+    let (fqn, disamb): (String, Option<String>) = store
+        .conn
+        .query_row(
+            "SELECT symbol_fqn, disamb FROM anchors WHERE entry_id = ?1",
+            [&r.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(fqn, "deploy.deploy@prod");
+    assert_eq!(disamb, None, "the `@` was part of the name, not a slot request");
+}
+
+#[test]
+fn single_slot_bare_name_anchors_and_records_its_disamb() {
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("one.rs"),
+        "struct T;\nimpl A for T { fn go(&self) -> u32 { 1 } }\n",
+    )
+    .unwrap();
+    let store = Store::open_in_memory().unwrap();
+    index::full_index(&store, dir.path()).unwrap();
+    let r = memory::remember(
+        &store,
+        "fact",
+        "go is the only impl of this trait method",
+        "explicit",
+        None,
+        &[AnchorSpec { file: "one.rs".into(), symbol: Some("go".into()) }],
+        None,
+        &[],
+        None,
+        false,
+        None, false,
+    )
+    .unwrap();
+    assert_eq!(r.anchored, 1, "one slot resolves exactly as before");
+    let disamb: Option<String> = store
+        .conn
+        .query_row("SELECT disamb FROM anchors WHERE entry_id = ?1", [&r.id], |row| row.get(0))
+        .unwrap();
+    assert_eq!(
+        disamb.as_deref(),
+        Some("A"),
+        "an undisambiguated spec still records the slot it landed on"
+    );
+}
+
+#[test]
+fn export_import_round_trip_preserves_anchor_disamb() {
+    let dir = TempDir::new().unwrap();
+    let store = twin_impl_store(dir.path());
+    let r = memory::remember(
+        &store,
+        "decision",
+        "the B impl carries the wide value on purpose",
+        "explicit",
+        None,
+        &[AnchorSpec { file: "t.rs".into(), symbol: Some("go@B".into()) }],
+        None,
+        &[],
+        None,
+        false,
+        None, false,
+    )
+    .unwrap();
+
+    let mut out = Vec::new();
+    store.export_jsonl(&mut out).unwrap();
+    let text = String::from_utf8(out.clone()).unwrap();
+    assert!(text.contains(r#""disamb":"B""#), "export must carry the slot: {text}");
+
+    let dir2 = TempDir::new().unwrap();
+    let mut fresh = twin_impl_store(dir2.path());
+    let rep = fresh
+        .import_jsonl(&mut std::io::BufReader::new(out.as_slice()))
+        .unwrap();
+    assert_eq!(rep.added, 1);
+    let (disamb, hash): (Option<String>, Option<String>) = fresh
+        .conn
+        .query_row(
+            "SELECT disamb, ast_body_hash FROM anchors WHERE entry_id = ?1",
+            [&r.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(disamb.as_deref(), Some("B"), "the slot survives the round trip");
+    assert_eq!(
+        hash.as_deref(),
+        Some(slot_hash(&fresh, "B").as_str()),
+        "the local re-resolve must read the B slot, not an arbitrary twin"
+    );
+}
+
+#[test]
+fn at_spec_accepts_the_source_spelling_of_a_parameter_list() {
+    // Stored discriminators are whitespace-canonicalized; the user types the
+    // list the way the source writes it, comma-space included, and the spec
+    // parser canonicalizes before matching instead of demanding the stored
+    // spelling.
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("M.java"),
+        "class M {\n\
+        \x20 void m(int a) { one(); }\n\
+        \x20 void m(int a, String b) { two(); }\n\
+         }\n",
+    )
+    .unwrap();
+    let store = Store::open_in_memory().unwrap();
+    index::full_index(&store, dir.path()).unwrap();
+    let r = memory::remember(
+        &store,
+        "fact",
+        "the two-arg overload validates before writing",
+        "explicit",
+        None,
+        &[AnchorSpec { file: "M.java".into(), symbol: Some("m@(int a, String b)".into()) }],
+        None,
+        &[],
+        None,
+        false,
+        None, false,
+    )
+    .unwrap();
+    assert_eq!(r.anchored, 1);
+    let disamb: Option<String> = store
+        .conn
+        .query_row("SELECT disamb FROM anchors WHERE entry_id = ?1", [&r.id], |row| row.get(0))
+        .unwrap();
+    assert_eq!(disamb.as_deref(), Some("(int a,String b)"), "canonical slot recorded");
+}
+
+#[test]
+fn at_named_symbol_colliding_with_a_slot_spec_is_refused_loudly() {
+    // bash allows `@` in a function name. When `deploy@` names a real symbol
+    // AND parses as a trailing-@ slot spec that also matches (`deploy` with
+    // no discriminator), silently picking either is a guess.
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("run.sh"),
+        "function deploy@ {\n  push_prod\n}\nfunction deploy {\n  push_stage\n}\n",
+    )
+    .unwrap();
+    let store = Store::open_in_memory().unwrap();
+    index::full_index(&store, dir.path()).unwrap();
+    let both: i64 = store
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM symbols WHERE fqn IN ('run.deploy', 'run.deploy@')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(both, 2, "premise: both spellings exist as symbols");
+    let err = memory::remember(
+        &store,
+        "fact",
+        "deploy pushes to production",
+        "explicit",
+        None,
+        &[AnchorSpec { file: "run.sh".into(), symbol: Some("deploy@".into()) }],
+        None,
+        &[],
+        None,
+        false,
+        None, false,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("ambiguous"), "must refuse loudly: {err}");
+}
+
+#[test]
+fn deliberate_null_slot_survives_the_round_trip() {
+    // The trailing-@ spec pins the row where disamb IS NULL (the nested
+    // class), and export omits the field for it. On import that NULL must
+    // stay a precise slot request, never a wildcard: the widened
+    // "(?2 IS NULL OR disamb = ?2)" re-resolve adopted the factory METHOD's
+    // hash (lowest ordinal) as the class anchor's fresh baseline.
+    let src = "class Config {\n\
+        \x20 class Builder {\n\
+        \x20   void run() { go(); }\n\
+        \x20 }\n\
+        \x20 Builder Builder() {\n\
+        \x20   return make();\n\
+        \x20 }\n\
+         }\n";
+    let dir = TempDir::new().unwrap();
+    fs::write(dir.path().join("Config.java"), src).unwrap();
+    let store = Store::open_in_memory().unwrap();
+    index::full_index(&store, dir.path()).unwrap();
+    let r = memory::remember(
+        &store,
+        "fact",
+        "the Builder type collects options before validating",
+        "explicit",
+        None,
+        &[AnchorSpec { file: "Config.java".into(), symbol: Some("Builder@".into()) }],
+        None,
+        &[],
+        None,
+        false,
+        None, false,
+    )
+    .unwrap();
+
+    let mut out = Vec::new();
+    store.export_jsonl(&mut out).unwrap();
+
+    let dir2 = TempDir::new().unwrap();
+    fs::write(dir2.path().join("Config.java"), src).unwrap();
+    let mut fresh = Store::open_in_memory().unwrap();
+    index::full_index(&fresh, dir2.path()).unwrap();
+    fresh.import_jsonl(&mut std::io::BufReader::new(out.as_slice())).unwrap();
+
+    let class_hash: String = fresh
+        .conn
+        .query_row(
+            "SELECT body_hash FROM symbols
+             WHERE fqn = 'Config.Config.Builder' AND disamb IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let (disamb, hash): (Option<String>, Option<String>) = fresh
+        .conn
+        .query_row(
+            "SELECT disamb, ast_body_hash FROM anchors WHERE entry_id = ?1",
+            [&r.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(disamb, None, "the undiscriminated slot stays undiscriminated");
+    assert_eq!(
+        hash.as_deref(),
+        Some(class_hash.as_str()),
+        "the NULL slot must re-resolve to the class row, never the factory twin"
+    );
+}
+
+#[test]
+fn lww_reimport_through_an_old_peer_keeps_the_local_slot() {
+    // The 0.14-peer wash cycle: this machine anchors a slot, a peer running a
+    // binary that predates disamb imports the export, makes an entry-level
+    // change (archive, supersede), and re-exports WITHOUT the field. When the
+    // newer line comes back, replacing the local anchor with disamb NULL
+    // would strip twin protection permanently (with a twin present the
+    // backfill correctly refuses to re-adopt). The local slot must survive.
+    let dir = TempDir::new().unwrap();
+    let mut store = twin_impl_store(dir.path());
+    let r = memory::remember(
+        &store,
+        "decision",
+        "the B impl carries the wide value on purpose",
+        "explicit",
+        None,
+        &[AnchorSpec { file: "t.rs".into(), symbol: Some("go@B".into()) }],
+        None,
+        &[],
+        None,
+        false,
+        None, false,
+    )
+    .unwrap();
+
+    let mut out = Vec::new();
+    store.export_jsonl(&mut out).unwrap();
+    let line = String::from_utf8(out).unwrap();
+    let mut obj: serde_json::Value = serde_json::from_str(line.lines().next().unwrap()).unwrap();
+    // What an old peer emits back: no disamb on the anchor, a strictly newer
+    // entry stamp from its own edit (within the import skew allowance).
+    obj["anchors"][0].as_object_mut().unwrap().remove("disamb");
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    obj["updated_at"] = serde_json::Value::String(index::iso_from_secs(now_secs + 30));
+    let peer_line = serde_json::to_string(&obj).unwrap();
+
+    let rep = store
+        .import_jsonl(&mut std::io::BufReader::new(peer_line.as_bytes()))
+        .unwrap();
+    assert_eq!(rep.updated, 1, "the newer line must win LWW: {rep:?}");
+    let (disamb, hash): (Option<String>, Option<String>) = store
+        .conn
+        .query_row(
+            "SELECT disamb, ast_body_hash FROM anchors WHERE entry_id = ?1",
+            [&r.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(disamb.as_deref(), Some("B"), "the local slot must survive the wash cycle");
+    assert_eq!(
+        hash.as_deref(),
+        Some(slot_hash(&store, "B").as_str()),
+        "and the hash must stay the B slot's body"
+    );
+}
+
+/// Two files, one FQN: the extension is stripped when an FQN is minted, so
+/// `util.js` and `util.ts` both mint `util.parse`. The import re-resolve must
+/// read the hash of the file the anchor actually names.
+fn fqn_collision_store(root: &std::path::Path) -> Store {
+    fs::write(
+        root.join("util.js"),
+        "function parse(s) {\n  return JSON.parse(s);\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("util.ts"),
+        "function parse(s: string) {\n  return s.split(\",\").map(Number);\n}\n",
+    )
+    .unwrap();
+    let store = Store::open_in_memory().unwrap();
+    index::full_index(&store, root).unwrap();
+    store
+}
+
+#[test]
+fn import_reresolves_the_hash_from_the_anchors_own_file() {
+    let dir = TempDir::new().unwrap();
+    let store = fqn_collision_store(dir.path());
+    let r = memory::remember(
+        &store,
+        "fact",
+        "parse splits on commas in the typed build",
+        "explicit",
+        None,
+        &[AnchorSpec { file: "util.ts".into(), symbol: Some("parse".into()) }],
+        None,
+        &[],
+        None,
+        false,
+        None, false,
+    )
+    .unwrap();
+    assert_eq!(r.anchored, 1);
+
+    let mut out = Vec::new();
+    store.export_jsonl(&mut out).unwrap();
+
+    let dir2 = TempDir::new().unwrap();
+    let mut fresh = fqn_collision_store(dir2.path());
+    let rep = fresh
+        .import_jsonl(&mut std::io::BufReader::new(out.as_slice()))
+        .unwrap();
+    assert_eq!(rep.added, 1);
+    let ts_hash: String = fresh
+        .conn
+        .query_row("SELECT body_hash FROM symbols WHERE file = 'util.ts'", [], |r| r.get(0))
+        .unwrap();
+    let hash: Option<String> = fresh
+        .conn
+        .query_row("SELECT ast_body_hash FROM anchors WHERE entry_id = ?1", [&r.id], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        hash.as_deref(),
+        Some(ts_hash.as_str()),
+        "the anchor names util.ts, so util.js's body can never supply its hash"
+    );
+}
+
+#[test]
+fn export_omits_disamb_for_undisambiguated_anchors() {
+    let dir = TempDir::new().unwrap();
+    // A Rust free function is a symbol class that genuinely has NO
+    // discriminator: the language forbids overloading, so there is nothing for
+    // one to tell apart. (A Python `def` is not such a class: its parameter
+    // list is what splits `@property` from `@x.setter`.)
+    fs::write(
+        dir.path().join("cache.rs"),
+        "pub fn cache_get(key: &str) -> Option<u32> {\n    store_lookup(key)\n}\n",
+    )
+    .unwrap();
+    let store = Store::open_in_memory().unwrap();
+    index::full_index(&store, dir.path()).unwrap();
+    memory::remember(
+        &store,
+        "fact",
+        "cache_get returns None on miss",
+        "explicit",
+        None,
+        &[AnchorSpec { file: "cache.rs".into(), symbol: Some("cache_get".into()) }],
+        None,
+        &[],
+        None,
+        false,
+        None, false,
+    )
+    .unwrap();
+    let mut out = Vec::new();
+    store.export_jsonl(&mut out).unwrap();
+    let text = String::from_utf8(out).unwrap();
+    assert!(
+        !text.contains("disamb"),
+        "an anchor with no discriminator must not pay for the field: {text}"
+    );
+}
+
+#[test]
+fn import_rejects_bogus_anchor_disamb_without_aborting_the_batch() {
+    use std::io::BufReader;
+    let dir = TempDir::new().unwrap();
+    let mut store = seeded_store(dir.path());
+
+    let lines = concat!(
+        r#"{"id":"01BADDISAMB00000000000AAA","kind":"fact","body":"claims an object as its slot","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","source":"explicit","confidence":0.5,"status":"active","anchors":[{"file":"cache.py","symbol_fqn":"cache.cache_get","ast_body_hash":"deadbeefdeadbeefdeadbeefdeadbeef","context_hint":null,"disamb":{"nested":"object"}}],"links":[]}"#, "\n",
+        r#"{"id":"01GOODDISAMB0000000000BBB","kind":"fact","body":"an ordinary fact next door","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","source":"explicit","confidence":0.5,"status":"active","anchors":[],"links":[]}"#, "\n",
+    );
+    let report = store
+        .import_jsonl(&mut BufReader::new(lines.as_bytes()))
+        .expect("a bogus disamb must not abort the batch");
+    assert_eq!(report.rejected, 1, "the malformed slot is refused: {report:?}");
+    assert_eq!(report.added, 1, "its neighbor still applies: {report:?}");
+    let bad: i64 = store
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM entries WHERE id = '01BADDISAMB00000000000AAA'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(bad, 0, "a rejected line stores nothing");
+}
+
+// ---------------------------------------------------------------- P5 matched
+
+/// P5: an item names which task terms hit its body, capped at three, in task
+/// order, and the field is absent entirely when nothing hits (omit-when-empty
+/// is what keeps the wire under the bench gate).
+#[test]
+fn recall_items_carry_capped_matched_terms_or_nothing() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    let mut store = seeded_store(root);
+
+    memory::remember(
+        &store,
+        "insight",
+        "sweep prioritization reindexes anchored files first inside the budget",
+        "explicit",
+        None,
+        &[AnchorSpec { file: "cache.py".into(), symbol: Some("cache_get".into()) }],
+        None,
+        &[],
+        Some("main"),
+        false,
+        None,
+        false,
+    )
+    .unwrap();
+
+    let resp = limpet::tools::dispatch(
+        &mut store,
+        root,
+        "recall",
+        &serde_json::json!({
+            "task": "how does sweep prioritization order anchored files in the reindex budget",
+            "budget_tokens": 2000
+        }),
+    )
+    .unwrap();
+    let items = resp["data"].as_array().unwrap();
+    let hit = items
+        .iter()
+        .find(|i| i["body"].as_str().unwrap().starts_with("sweep prioritization"))
+        .expect("stored memory recalled");
+    assert_eq!(
+        hit["matched"].as_str().unwrap(),
+        "sweep prioritization anchored",
+        "task-order intersection, capped at three"
+    );
+
+    // No term overlap: reached via the working set instead, and the wire
+    // carries no matched key at all.
+    let resp = limpet::tools::dispatch(
+        &mut store,
+        root,
+        "recall",
+        &serde_json::json!({
+            "task": "zebra quantum flamingo",
+            "working_set": ["cache.py"],
+            "budget_tokens": 2000
+        }),
+    )
+    .unwrap();
+    let items = resp["data"].as_array().unwrap();
+    assert!(!items.is_empty(), "working-set proximity still surfaces the item");
+    for i in items {
+        assert!(
+            i.get("matched").is_none(),
+            "no task term hits, so no matched field: {i}"
+        );
+    }
+}
