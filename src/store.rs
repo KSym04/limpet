@@ -371,17 +371,30 @@ fn migrate_to_v7(conn: &Connection) -> Result<()> {
 ///
 /// The gate is its own `meta_kv` marker, not the version stamp: every
 /// migration stamps the same `SCHEMA_VERSION`, so the stamp cannot
-/// distinguish "reached v7 last week" from "reached v7 just now".
-/// `ON CONFLICT DO NOTHING` makes the insert the claim, so the refill runs
-/// once even across racing processes, and the marker plus the UPDATE share
-/// one transaction: a crash between them would skip the refill forever. No
-/// DDL, so `SCHEMA_VERSION` is unchanged; the shape is still v7.
+/// distinguish "reached v7 last week" from "reached v7 just now". The
+/// marker's VALUE is a generation counter, not a flag: a store refilled at
+/// an earlier generation still carries rows an even-later extractor spells
+/// differently, and a constant marker would freeze it there forever (0.15
+/// whole-branch review). The guarded upsert is the claim, so the refill runs
+/// once per generation even across racing processes, and the marker plus the
+/// UPDATE share one transaction: a crash between them would skip the refill
+/// forever. No DDL, so `SCHEMA_VERSION` is unchanged; the shape is still v7.
+///
+/// Bump `CONTENT_REFILL_GENERATION` in any commit that changes FQN spelling,
+/// `kind` labeling, a disamb recipe, or call extraction once the marker may
+/// already be claimed on real stores. Generation history: 1 = the original
+/// v7 refill (d500552); 2 = S5 identifier-named TS modules, the C++ R1
+/// wrapper recovery, and the review round's disamb recipe additions (static
+/// members, composed nested discriminators, enum-constant bodies).
+const CONTENT_REFILL_GENERATION: i64 = 2;
+
 fn refill_v7_content_once(conn: &Connection) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
     let claimed = tx.execute(
-        "INSERT INTO meta_kv(k, v) VALUES('v7_content_refill', '1')
-         ON CONFLICT(k) DO NOTHING",
-        [],
+        "INSERT INTO meta_kv(k, v) VALUES('v7_content_refill', CAST(?1 AS TEXT))
+         ON CONFLICT(k) DO UPDATE SET v = excluded.v
+         WHERE CAST(meta_kv.v AS INTEGER) < CAST(excluded.v AS INTEGER)",
+        [CONTENT_REFILL_GENERATION],
     )?;
     if claimed == 1 {
         tx.execute("UPDATE files SET mtime_ns = 0", [])?;
@@ -958,12 +971,43 @@ impl Store {
             } else {
                 tx.execute("DELETE FROM archived WHERE entry_id = ?1", [&id])?;
             }
+            // A winning line replaces the entry's anchors wholesale, but a
+            // peer running an older binary exports anchors WITHOUT the disamb
+            // field it does not know. Letting that wash cycle (0.15 exports,
+            // 0.14 peer archives and re-exports, 0.15 re-imports) rewrite a
+            // slotted anchor to NULL would strip twin protection permanently:
+            // with a same-FQN twin present the backfill correctly refuses to
+            // re-adopt, so the anchor falls to the legacy ladder forever.
+            // Preserve the local slot when the incoming anchor names the same
+            // (file, symbol_fqn) and carries no disamb of its own. Best
+            // effort by design: an entry anchored to two twins of one FQN
+            // keeps the first slot seen (a shape remember cannot produce).
+            let mut preserved_slots: std::collections::HashMap<(String, Option<String>), String> =
+                std::collections::HashMap::new();
+            {
+                let mut ps = tx.prepare(
+                    "SELECT file, symbol_fqn, disamb FROM anchors
+                     WHERE entry_id = ?1 AND disamb IS NOT NULL",
+                )?;
+                let rows = ps.query_map([&id], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, String>(2)?))
+                })?;
+                for row in rows {
+                    let (f, s, d) = row?;
+                    preserved_slots.entry((f, s)).or_insert(d);
+                }
+            }
             tx.execute("DELETE FROM anchors WHERE entry_id = ?1", [&id])?;
             if let Some(anchors) = obj["anchors"].as_array() {
                 for a in anchors {
                     let file = a["file"].as_str().unwrap_or_default();
                     let symbol_fqn = a["symbol_fqn"].as_str();
-                    let disamb = a["disamb"].as_str();
+                    let disamb: Option<String> = a["disamb"].as_str().map(str::to_string).or_else(|| {
+                        preserved_slots
+                            .get(&(file.to_string(), symbol_fqn.map(str::to_string)))
+                            .cloned()
+                    });
+                    let disamb = disamb.as_deref();
                     // Re-resolve the hash against the LOCAL index rather than
                     // trusting the imported one: a forged hash must not be
                     // able to fake "fresh" against code this machine does not
@@ -971,21 +1015,55 @@ impl Store {
                     // local hash (honestly fresh); otherwise keep the imported
                     // hash so normal follow/invalidate logic applies. A
                     // disambiguated anchor re-resolves against ITS slot, so a
-                    // twin's body can never supply the hash. The file is
-                    // pinned too: an FQN is path-derived with the extension
-                    // stripped, so `util.js` and `util.ts` mint the same one
-                    // and an fqn-only lookup would adopt whichever sorts
-                    // first. The ordering keeps the rest deterministic.
+                    // twin's body can never supply the hash. `disamb IS ?2`,
+                    // never a NULL-is-wildcard OR: a NULL on the wire is the
+                    // deliberate undiscriminated slot (the trailing-@ spec
+                    // pins the row where disamb IS NULL), and widening it to
+                    // "any twin, lowest ordinal" adopted the wrong slot's
+                    // body as the anchor's fresh baseline. A NULL that
+                    // matches no row falls through to the imported hash and
+                    // the ladder judges it honestly. The file is pinned too:
+                    // an FQN is path-derived with the extension stripped, so
+                    // `util.js` and `util.ts` mint the same one and an
+                    // fqn-only lookup would adopt whichever sorts first. The
+                    // ordering keeps the rest deterministic.
                     let local_hash: Option<String> = match symbol_fqn {
-                        Some(fqn) => tx
-                            .query_row(
-                                "SELECT body_hash FROM symbols
-                                 WHERE fqn = ?1 AND (?2 IS NULL OR disamb = ?2) AND file = ?3
-                                 ORDER BY ordinal, body_hash LIMIT 1",
-                                rusqlite::params![fqn, disamb, file],
-                                |r| r.get(0),
-                            )
-                            .ok(),
+                        Some(fqn) => {
+                            let exact: Option<String> = tx
+                                .query_row(
+                                    "SELECT body_hash FROM symbols
+                                     WHERE fqn = ?1 AND disamb IS ?2 AND file = ?3
+                                     ORDER BY ordinal, body_hash LIMIT 1",
+                                    rusqlite::params![fqn, disamb, file],
+                                    |r| r.get(0),
+                                )
+                                .ok();
+                            match (exact, disamb) {
+                                (Some(h), _) => Some(h),
+                                // A slot-less anchor (a legacy export, or a
+                                // peer predating disamb) whose fqn has no NULL
+                                // row here: adopt the local hash only when the
+                                // fqn+file is twin-free, so the single row can
+                                // only be the anchored symbol. With twins
+                                // present, guessing a slot is how anchors
+                                // start lying; the imported hash stays and the
+                                // ladder judges it.
+                                (None, None) => {
+                                    let mut ts = tx.prepare(
+                                        "SELECT body_hash FROM symbols
+                                         WHERE fqn = ?1 AND file = ?2 LIMIT 2",
+                                    )?;
+                                    let hashes: Vec<String> = ts
+                                        .query_map(rusqlite::params![fqn, file], |r| r.get(0))?
+                                        .collect::<rusqlite::Result<_>>()?;
+                                    match hashes.as_slice() {
+                                        [only] => Some(only.clone()),
+                                        _ => None,
+                                    }
+                                }
+                                (None, Some(_)) => None,
+                            }
+                        }
                         None => tx
                             .query_row("SELECT hash FROM files WHERE path = ?1", [file], |r| {
                                 r.get(0)
@@ -1825,6 +1903,51 @@ mod tests {
             .query_row("SELECT mtime_ns FROM files WHERE path='a.rs'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(mtime, 777, "the content refill claims its marker once and never re-fires");
+    }
+
+    #[test]
+    fn a_store_refilled_at_an_earlier_generation_refills_once_more() {
+        // A store that claimed the marker under an earlier extractor
+        // generation keeps rows the shipping extractor spells differently;
+        // the generation bump must re-fire the refill exactly once, and a
+        // marker already at the current generation must stay a no-op.
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("store.db");
+        build_v6_shaped_store(&db);
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "ALTER TABLE symbols ADD COLUMN disamb TEXT;
+                 ALTER TABLE anchors ADD COLUMN disamb TEXT;",
+            )
+            .unwrap();
+            conn.execute("UPDATE meta_kv SET v='7' WHERE k='schema_version'", []).unwrap();
+            conn.execute(
+                "INSERT INTO meta_kv(k, v) VALUES('v7_content_refill', '1')",
+                [],
+            )
+            .unwrap();
+        }
+        {
+            let s = Store::open(&db).unwrap();
+            let mtime: i64 = s
+                .conn
+                .query_row("SELECT mtime_ns FROM files WHERE path='a.rs'", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(mtime, 0, "a generation-1 store must refill once under generation 2");
+            let gen: String = s
+                .conn
+                .query_row("SELECT v FROM meta_kv WHERE k='v7_content_refill'", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(gen, "2", "the claim must record the new generation");
+            s.conn.execute("UPDATE files SET mtime_ns = 555", []).unwrap();
+        }
+        let s = Store::open(&db).unwrap();
+        let mtime: i64 = s
+            .conn
+            .query_row("SELECT mtime_ns FROM files WHERE path='a.rs'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mtime, 555, "a marker already at the current generation never re-fires");
     }
 
     #[test]

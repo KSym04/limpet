@@ -70,7 +70,13 @@ built.
   including a scope-respell step so a relabeled namespace is followed instead
   of false-staled. Recall items now name the task terms they matched (capped,
   omitted when empty; the 4.0x bench gate held at 4.2x). Removed-file purges
-  became transactional. WATCHER_VERDICT_SENTENCE
+  became transactional. The watcher lag bench ran on the release binary
+  (synthetic repos of 2k/10k/50k files, edit batches of 1/32/100): anchored
+  staleness lands in ONE sweep call at every size and batch width, so sweep
+  prioritization holds and no watcher is needed for correctness; a quiet
+  50k-file repo pays 1.2s per sweep call (p50, against a 250 ms bar), so the
+  FS-event watcher graduates from "unbuilt unless proven needed" to a
+  designed backlog item, gated on this bench (see the bets table).
 
 ## v0.16: the refinement loop
 
@@ -117,6 +123,7 @@ freeze because `reverify` adds a tool op and the tool API freezes at 1.0.
 
 | Bet | Gate before it ships |
 |---|---|
+| FS-event watcher: cut the quiet-repo sweep cost at scale (an OS-event feed marks dirty files so quiet sweeps stop paying full stat cost). Staleness LATENCY does not need it: the 0.15 lag bench measured one sweep call at every size. | `bench/lag_bench.py` quiet-repo per-call p50 < 250 ms at 50k files, with staleness latency still 1 call and 0 integrity findings |
 | Authority-weighted recall: knowledge earns rank structurally (fan-in, refactors survived, verification), with `cost_to_learn` as one bounded human input (<=35% of authority); never overrides staleness. Full design in SPEC.md. | recall_eval precision holds or improves AND the token bench gate holds |
 | Semantic recall (embedding rerank behind a feature flag) | Must beat FTS + proximity on the recall_eval precision suite; "only if it earns its size" |
 | Episode mining from session transcripts (SessionEnd hook) | Mined entries are already capped at 0.5 confidence; the miner must show a >50% keep-rate under human review or it is noise |

@@ -96,11 +96,12 @@ Every response is wrapped in the honesty envelope:
 }
 ```
 
-A recalled item also names the task terms found verbatim in its body
-(`"matched": "sweep anchored"`, capped at three, in task order), so why an
-item surfaced is inspectable without re-reading it. The field is absent when
-no exact task term appears in the body: the item then reached the pack
-through anchor proximity or a stemmed text match instead.
+A recalled item also names the significant task terms found verbatim in its
+body (`"matched": "sweep anchored"`, capped at three, in task order), so why
+an item surfaced is inspectable without re-reading it. The field is absent
+when no significant task term appears whole in the body: the item then
+reached the pack through anchor proximity, a stopword-only hit, or a stemmed
+or partial text match instead.
 
 ## ⚓ The anchor lifecycle
 
@@ -121,7 +122,7 @@ move a trivial body    unique match, too small   stale (low_entropy), never re-p
 
 A multi-anchor memory dies only when **every** anchor dies. Losing one anchor while others still resolve degrades it to `stale:anchor_lost` so the surviving knowledge stays usable. And `remember` refuses an anchor it cannot resolve, loudly, at write time: no memory is ever born dead.
 
-Twins (trait impls, overloads, accessor pairs) share one FQN, so a symbol spec takes an optional `@<disamb>` suffix naming the exact one, spelled as the source writes it: the Rust trait path (`impl` for an inherent impl), the Go receiver type (`func` for a package function), the Ruby receiver (`self.`, `<<self.`, `#` for an instance method), and the parameter list for C++, Java, C#, Python and JS/TS, generic arity included.
+Twins (trait impls, overloads, accessor pairs) share one FQN, so a symbol spec takes an optional `@<disamb>` suffix naming the exact one, spelled as the source writes it, whitespace forgiven (`f@(int a, String b)` and the canonicalized stored form are one spelling): the Rust trait path (`impl` for an inherent impl), the Go receiver type (`func` for a package function), the Ruby receiver (`self.`, `<<self.`, `#` for an instance method), and the parameter list for C++, Java, C#, Python and JS/TS, generic arity and JS/TS `static` included. An ambiguous spec is refused with the exact typeable forms listed.
 
 ```
 symbol: "go"      → refused: matches t.T.go@A, t.T.go@B, t.T.go@impl
@@ -201,6 +202,16 @@ Methodology, stated so the number can be checked rather than believed:
 - 8 of the 10 questions are marked "no" above: their answers exist in **no file at any token price** (decisions, history, tribal knowledge). File reading gets you the code but not the answer. We still charge limpet full price against the file-reading cost instead of claiming infinite savings.
 - The script is a regression gate: it exits nonzero if savings drop below 4x.
 - Fixture files are 58 to 179 lines. Real source files run several times larger, and the "without" side grows with file size while a recall response does not.
+
+Freshness has a receipt too. `bench/lag_bench.py` builds synthetic repos of
+2,000, 10,000 and 50,000 files, edits anchored symbols in batches of 1, 32
+and 100, and measures how many sweep calls pass before every edit is flagged:
+**one call, at every size and every batch width**, because files carrying
+anchors reindex first inside the sweep budget. The same run prices the cost
+of that sweep on a quiet repo (nothing changed): 156 ms per call at 2,000
+files, 372 ms at 10,000, 1,206 ms at 50,000. That last number is why the
+FS-event watcher is a designed, bench-gated backlog item rather than a
+promise: staleness latency does not need it, sweep cost at 50k files does.
 
 ## 🗺️ Visual memory
 

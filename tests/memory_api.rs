@@ -1218,6 +1218,211 @@ fn export_import_round_trip_preserves_anchor_disamb() {
     );
 }
 
+#[test]
+fn at_spec_accepts_the_source_spelling_of_a_parameter_list() {
+    // Stored discriminators are whitespace-canonicalized; the user types the
+    // list the way the source writes it, comma-space included, and the spec
+    // parser canonicalizes before matching instead of demanding the stored
+    // spelling.
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("M.java"),
+        "class M {\n\
+        \x20 void m(int a) { one(); }\n\
+        \x20 void m(int a, String b) { two(); }\n\
+         }\n",
+    )
+    .unwrap();
+    let store = Store::open_in_memory().unwrap();
+    index::full_index(&store, dir.path()).unwrap();
+    let r = memory::remember(
+        &store,
+        "fact",
+        "the two-arg overload validates before writing",
+        "explicit",
+        None,
+        &[AnchorSpec { file: "M.java".into(), symbol: Some("m@(int a, String b)".into()) }],
+        None,
+        &[],
+        None,
+        false,
+        None, false,
+    )
+    .unwrap();
+    assert_eq!(r.anchored, 1);
+    let disamb: Option<String> = store
+        .conn
+        .query_row("SELECT disamb FROM anchors WHERE entry_id = ?1", [&r.id], |row| row.get(0))
+        .unwrap();
+    assert_eq!(disamb.as_deref(), Some("(int a,String b)"), "canonical slot recorded");
+}
+
+#[test]
+fn at_named_symbol_colliding_with_a_slot_spec_is_refused_loudly() {
+    // bash allows `@` in a function name. When `deploy@` names a real symbol
+    // AND parses as a trailing-@ slot spec that also matches (`deploy` with
+    // no discriminator), silently picking either is a guess.
+    let dir = TempDir::new().unwrap();
+    fs::write(
+        dir.path().join("run.sh"),
+        "function deploy@ {\n  push_prod\n}\nfunction deploy {\n  push_stage\n}\n",
+    )
+    .unwrap();
+    let store = Store::open_in_memory().unwrap();
+    index::full_index(&store, dir.path()).unwrap();
+    let both: i64 = store
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM symbols WHERE fqn IN ('run.deploy', 'run.deploy@')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(both, 2, "premise: both spellings exist as symbols");
+    let err = memory::remember(
+        &store,
+        "fact",
+        "deploy pushes to production",
+        "explicit",
+        None,
+        &[AnchorSpec { file: "run.sh".into(), symbol: Some("deploy@".into()) }],
+        None,
+        &[],
+        None,
+        false,
+        None, false,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("ambiguous"), "must refuse loudly: {err}");
+}
+
+#[test]
+fn deliberate_null_slot_survives_the_round_trip() {
+    // The trailing-@ spec pins the row where disamb IS NULL (the nested
+    // class), and export omits the field for it. On import that NULL must
+    // stay a precise slot request, never a wildcard: the widened
+    // "(?2 IS NULL OR disamb = ?2)" re-resolve adopted the factory METHOD's
+    // hash (lowest ordinal) as the class anchor's fresh baseline.
+    let src = "class Config {\n\
+        \x20 class Builder {\n\
+        \x20   void run() { go(); }\n\
+        \x20 }\n\
+        \x20 Builder Builder() {\n\
+        \x20   return make();\n\
+        \x20 }\n\
+         }\n";
+    let dir = TempDir::new().unwrap();
+    fs::write(dir.path().join("Config.java"), src).unwrap();
+    let store = Store::open_in_memory().unwrap();
+    index::full_index(&store, dir.path()).unwrap();
+    let r = memory::remember(
+        &store,
+        "fact",
+        "the Builder type collects options before validating",
+        "explicit",
+        None,
+        &[AnchorSpec { file: "Config.java".into(), symbol: Some("Builder@".into()) }],
+        None,
+        &[],
+        None,
+        false,
+        None, false,
+    )
+    .unwrap();
+
+    let mut out = Vec::new();
+    store.export_jsonl(&mut out).unwrap();
+
+    let dir2 = TempDir::new().unwrap();
+    fs::write(dir2.path().join("Config.java"), src).unwrap();
+    let mut fresh = Store::open_in_memory().unwrap();
+    index::full_index(&fresh, dir2.path()).unwrap();
+    fresh.import_jsonl(&mut std::io::BufReader::new(out.as_slice())).unwrap();
+
+    let class_hash: String = fresh
+        .conn
+        .query_row(
+            "SELECT body_hash FROM symbols
+             WHERE fqn = 'Config.Config.Builder' AND disamb IS NULL",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let (disamb, hash): (Option<String>, Option<String>) = fresh
+        .conn
+        .query_row(
+            "SELECT disamb, ast_body_hash FROM anchors WHERE entry_id = ?1",
+            [&r.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(disamb, None, "the undiscriminated slot stays undiscriminated");
+    assert_eq!(
+        hash.as_deref(),
+        Some(class_hash.as_str()),
+        "the NULL slot must re-resolve to the class row, never the factory twin"
+    );
+}
+
+#[test]
+fn lww_reimport_through_an_old_peer_keeps_the_local_slot() {
+    // The 0.14-peer wash cycle: this machine anchors a slot, a peer running a
+    // binary that predates disamb imports the export, makes an entry-level
+    // change (archive, supersede), and re-exports WITHOUT the field. When the
+    // newer line comes back, replacing the local anchor with disamb NULL
+    // would strip twin protection permanently (with a twin present the
+    // backfill correctly refuses to re-adopt). The local slot must survive.
+    let dir = TempDir::new().unwrap();
+    let mut store = twin_impl_store(dir.path());
+    let r = memory::remember(
+        &store,
+        "decision",
+        "the B impl carries the wide value on purpose",
+        "explicit",
+        None,
+        &[AnchorSpec { file: "t.rs".into(), symbol: Some("go@B".into()) }],
+        None,
+        &[],
+        None,
+        false,
+        None, false,
+    )
+    .unwrap();
+
+    let mut out = Vec::new();
+    store.export_jsonl(&mut out).unwrap();
+    let line = String::from_utf8(out).unwrap();
+    let mut obj: serde_json::Value = serde_json::from_str(line.lines().next().unwrap()).unwrap();
+    // What an old peer emits back: no disamb on the anchor, a strictly newer
+    // entry stamp from its own edit (within the import skew allowance).
+    obj["anchors"][0].as_object_mut().unwrap().remove("disamb");
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    obj["updated_at"] = serde_json::Value::String(index::iso_from_secs(now_secs + 30));
+    let peer_line = serde_json::to_string(&obj).unwrap();
+
+    let rep = store
+        .import_jsonl(&mut std::io::BufReader::new(peer_line.as_bytes()))
+        .unwrap();
+    assert_eq!(rep.updated, 1, "the newer line must win LWW: {rep:?}");
+    let (disamb, hash): (Option<String>, Option<String>) = store
+        .conn
+        .query_row(
+            "SELECT disamb, ast_body_hash FROM anchors WHERE entry_id = ?1",
+            [&r.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(disamb.as_deref(), Some("B"), "the local slot must survive the wash cycle");
+    assert_eq!(
+        hash.as_deref(),
+        Some(slot_hash(&store, "B").as_str()),
+        "and the hash must stay the B slot's body"
+    );
+}
+
 /// Two files, one FQN: the extension is stripped when an FQN is minted, so
 /// `util.js` and `util.ts` both mint `util.parse`. The import re-resolve must
 /// read the hash of the file the anchor actually names.

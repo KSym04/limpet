@@ -202,7 +202,7 @@ fn is_sig_punct(ch: char) -> bool {
 /// It does NOT hold across edits that change tokens: renaming a parameter,
 /// reordering parameters, or adding a default argument each move the symbol to
 /// a new slot. Comments are removed upstream by `sig_text`, not here.
-fn collapse_ws(text: &str) -> String {
+pub(crate) fn collapse_ws(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut in_ws = false;
     for ch in text.chars() {
@@ -270,6 +270,21 @@ fn sig_text(node: Node, src: &[u8]) -> String {
 /// edit to the other.
 fn params_signature(node: Node, src: &[u8]) -> Option<String> {
     node.child_by_field_name("parameters").map(|p| sig_text(p, src))
+}
+
+/// Compose a symbol's own discriminator with the one inherited from an
+/// enclosing discriminated scope. Replace-not-compose was a twin hole: the
+/// getter and setter halves of an accessor pair each contained a nested
+/// helper whose own `()` replaced the inherited `(self)` / `(self,v)`, so
+/// both helpers filed into one slot one level down (0.15 whole-branch
+/// review). The enclosing discriminator prefixes the own one, outermost
+/// first, so arbitrarily deep nesting stays distinct and deterministic.
+fn compose_disamb(own: Option<String>, inherited: Option<&str>) -> Option<String> {
+    match (own, inherited) {
+        (Some(o), Some(i)) => Some(format!("{i}{o}")),
+        (Some(o), None) => Some(o),
+        (None, i) => i.map(str::to_string),
+    }
 }
 
 /// C++ overload signature: the parameter list plus the qualifiers that follow
@@ -456,15 +471,16 @@ fn csharp_explicit_iface(node: Node, src: &[u8]) -> String {
         .unwrap_or_default()
 }
 
-/// Go receiver type raw text (e.g. `*A`) for method disambiguation: two
-/// types can define same-named methods in one package.
+/// Go receiver type (e.g. `*A`) for method disambiguation: two types can
+/// define same-named methods in one package. sig_text, not raw text, so a
+/// formatting-only edit (`* A` vs `*A`) cannot move the method to a new slot.
 fn go_receiver_type(node: Node, src: &[u8]) -> Option<String> {
     let recv = node.child_by_field_name("receiver")?;
     let mut c = recv.walk();
     let decl = recv
         .children(&mut c)
         .find(|ch| ch.kind() == "parameter_declaration")?;
-    decl.child_by_field_name("type").map(|t| node_text(t, src))
+    decl.child_by_field_name("type").map(|t| sig_text(t, src))
 }
 
 /// Sentinel scope for a call made outside every symbol (file top level).
@@ -701,7 +717,7 @@ fn walk(
         Lang::Js | Lang::Ts => match kind {
             "function_declaration" | "generator_function_declaration" => {
                 if let Some(name) = name_of(node, src) {
-                    let d = params_signature(node, src).or_else(|| inherited.map(str::to_string));
+                    let d = compose_disamb(params_signature(node, src), inherited);
                     push_sym(facts, node, src, parents, "function", name.clone(), d.clone());
                     own_disamb = d;
                     parents.push(name);
@@ -712,14 +728,41 @@ fn walk(
             // so without a discriminator an accessor pair shares one slot and
             // either half masks an edit to the other. The parameter list is
             // what separates them (a setter always takes the value), the same
-            // rule Java/C# already use.
+            // rule Java/C# already use. Static and instance members of one
+            // name live in separate namespaces, so `static load()` beside
+            // `load()` is ALSO legal and the parameter list alone files both
+            // into one slot; the `static` modifier is an anonymous token, not
+            // a field, so it is scanned for, and it prefixes the
+            // discriminator (`static()` vs `()`).
             "method_definition" => {
                 if let Some(name) = name_of(node, src) {
-                    let d = params_signature(node, src).or_else(|| inherited.map(str::to_string));
+                    let is_static = (0..node.child_count())
+                        .filter_map(|i| node.child(i))
+                        .any(|c| c.kind() == "static");
+                    let own = params_signature(node, src)
+                        .map(|p| if is_static { format!("static{p}") } else { p });
+                    let d = compose_disamb(own, inherited);
                     push_sym(facts, node, src, parents, "method", name.clone(), d.clone());
                     own_disamb = d;
                     parents.push(name);
                     pushed += 1;
+                }
+            }
+            // A named object literal's shorthand methods are
+            // `method_definition` nodes under the enclosing FQN: without a
+            // marker `const a = { save() {} }` and `const b = { save() {} }`
+            // file both saves into one file-scope slot. The declarator name
+            // flows down as the enclosing discriminator (`a.()` vs `b.()`).
+            // Inline literals never bound to a name keep no marker: recorded
+            // residual, same terms as the C# generic-arity deferral.
+            "variable_declarator" => {
+                let has_object_value = node
+                    .child_by_field_name("value")
+                    .is_some_and(|v| v.kind() == "object");
+                if has_object_value {
+                    if let Some(name) = name_of(node, src) {
+                        own_disamb = compose_disamb(Some(format!("{name}.")), inherited);
+                    }
                 }
             }
             // TypeScript `namespace A { ... }` (internal_module) and the legacy
@@ -804,8 +847,7 @@ fn walk(
             "function_definition" => {
                 if let Some(name) = name_of(node, src) {
                     let k = fn_kind(tdepth);
-                    let d = params_signature(node, src)
-                        .or_else(|| inherited.map(str::to_string));
+                    let d = compose_disamb(params_signature(node, src), inherited);
                     push_sym(facts, node, src, parents, k, name.clone(), d.clone());
                     own_disamb = d;
                     parents.push(name);
@@ -869,7 +911,7 @@ fn walk(
                         (Some(t), None) => Some(t),
                         (None, p) => p,
                     };
-                    let d = d.or_else(|| inherited.map(str::to_string));
+                    let d = compose_disamb(d, inherited);
                     push_sym(facts, node, src, parents, k, name.clone(), d.clone());
                     own_disamb = d;
                     parents.push(name);
@@ -970,8 +1012,11 @@ fn walk(
                 // `impl A for T { fn go }` left the inherent half maskable.
                 // Consts and statics inherit this too, and needed it for the
                 // same reason.
+                // sig_text, not node_text: a reformatted trait path (`Display <T>`
+                // rewrapped, a comment inside the generics) must not move every
+                // member of the impl to a new slot.
                 own_disamb = Some(match node.child_by_field_name("trait") {
-                    Some(tf) => node_text(tf, src),
+                    Some(tf) => sig_text(tf, src),
                     None => RUST_INHERENT_IMPL.to_string(),
                 });
                 if let Some(t) = node.child_by_field_name("type") {
@@ -1196,12 +1241,42 @@ fn walk(
         Lang::Java => match kind {
             "method_declaration" => {
                 if let Some(name) = name_of(node, src) {
-                    let d = params_signature(node, src)
-                        .or_else(|| inherited.map(str::to_string));
+                    let d = compose_disamb(params_signature(node, src), inherited);
                     push_sym(facts, node, src, parents, "method", name.clone(), d.clone());
                     own_disamb = d;
                     parents.push(name);
                     pushed += 1;
+                }
+            }
+            // An enum constant with a class body defines constant-specific
+            // members: `ADD { int apply(..) }` and `SUB { int apply(..) }`
+            // would otherwise both file at (Op.apply, params), one slot for
+            // two bodies (S6 scopes the enum, never the constant, so the FQN
+            // spelling is unchanged). The constant name flows down as the
+            // enclosing discriminator instead.
+            "enum_constant" => {
+                if node.child_by_field_name("body").is_some() {
+                    if let Some(name) = name_of(node, src) {
+                        own_disamb = compose_disamb(Some(format!("{name}.")), inherited);
+                    }
+                }
+            }
+            // An anonymous class body (`new Runnable() { public void run()
+            // {..} }`) files its members under the enclosing FQN; the
+            // constructed type narrows the twin space so two different-type
+            // anonymous classes in one scope stop sharing a slot. Two
+            // SAME-type anonymous classes with identical bodies remain one
+            // slot: recorded residual, same terms as the C# generic-arity
+            // deferral.
+            "object_creation_expression" => {
+                let has_body = (0..node.child_count())
+                    .filter_map(|i| node.child(i))
+                    .any(|c| c.kind() == "class_body");
+                if has_body {
+                    if let Some(t) = node.child_by_field_name("type") {
+                        let marker = format!("new {}.", sig_text(t, src));
+                        own_disamb = compose_disamb(Some(marker), inherited);
+                    }
                 }
             }
             // `enum` and `record` are types with bodies exactly like `class`:
@@ -1327,7 +1402,7 @@ fn walk(
                             .unwrap_or_default();
                         format!("{}{}{}", csharp_explicit_iface(node, src), tp, p)
                     });
-                    let d = d.or_else(|| inherited.map(str::to_string));
+                    let d = compose_disamb(d, inherited);
                     push_sym(facts, node, src, parents, "method", name.clone(), d.clone());
                     own_disamb = d;
                     parents.push(name);
@@ -1979,6 +2054,121 @@ mod inherit_tests {
             !rows.iter().any(|(p, _, _)| p.contains("self")),
             "`class << self` is context, never an FQN segment: {rows:?}"
         );
+    }
+
+    #[test]
+    fn disamb_js_static_and_instance_members_split() {
+        // Static and instance members of one name live in separate JS/TS
+        // namespaces, so this class is legal and both `load`s parse as
+        // method_definition with identical name and parameters fields; the
+        // `static` token is what keeps them out of one slot.
+        let src = "class Config {\n\
+                   \x20 static load() { return read(); }\n\
+                   \x20 load() { return read(); }\n\
+                   }\n";
+        let rows = syms(Lang::Js, src);
+        let d = disambs(&rows, "Config", "load");
+        assert_eq!(d.len(), 2, "{rows:?}");
+        assert!(d.contains(&Some("static()".to_string())), "{rows:?}");
+        assert!(d.contains(&Some("()".to_string())), "{rows:?}");
+    }
+
+    #[test]
+    fn disamb_nested_helper_composes_the_enclosing_discriminator() {
+        // A nested def computes its own `()`, which used to REPLACE the
+        // inherited accessor discriminator: both helpers filed at (C.x, "()")
+        // and either masked an edit to the other. Composition keeps the
+        // enclosing discriminator as a prefix.
+        let src = "class C:\n\
+                   \x20   @property\n\
+                   \x20   def x(self):\n\
+                   \x20       def check():\n\
+                   \x20           return 1\n\
+                   \x20       return check()\n\
+                   \x20   @x.setter\n\
+                   \x20   def x(self, v):\n\
+                   \x20       def check():\n\
+                   \x20           return 2\n\
+                   \x20       return check()\n";
+        let rows = syms(Lang::Py, src);
+        let d = disambs(&rows, "C.x", "check");
+        assert_eq!(d.len(), 2, "{rows:?}");
+        assert!(d.contains(&Some("(self)()".to_string())), "{rows:?}");
+        assert!(d.contains(&Some("(self,v)()".to_string())), "{rows:?}");
+    }
+
+    #[test]
+    fn disamb_java_enum_constant_bodies_split() {
+        // The classic strategy enum: each constant body overrides `apply`.
+        // S6 scopes the enum and never the constant, so all three rows spell
+        // `Op.apply`; the constant name in the discriminator is what keeps
+        // ADD's body from answering Fresh for an edit to SUB's.
+        let src = "enum Op {\n\
+                   \x20 ADD { int apply(int a,int b) { return 0; } },\n\
+                   \x20 SUB { int apply(int a,int b) { return 0; } };\n\
+                   \x20 abstract int apply(int a,int b);\n\
+                   }\n";
+        let rows = syms(Lang::Java, src);
+        let d = disambs(&rows, "Op", "apply");
+        assert_eq!(d.len(), 3, "{rows:?}");
+        assert!(d.contains(&Some("ADD.(int a,int b)".to_string())), "{rows:?}");
+        assert!(d.contains(&Some("SUB.(int a,int b)".to_string())), "{rows:?}");
+        assert!(d.contains(&Some("(int a,int b)".to_string())), "the abstract row: {rows:?}");
+    }
+
+    #[test]
+    fn disamb_java_anonymous_class_members_split() {
+        // Two anonymous class bodies inside one method file their members
+        // under the enclosing FQN; the constructed type keeps different-type
+        // anonymous classes out of one slot. (Two SAME-type anonymous classes
+        // with identical bodies remain one slot: recorded residual.)
+        let src = "class H {\n\
+                   \x20 void go() {\n\
+                   \x20   Runnable r = new Runnable() { public void run() { a(); } };\n\
+                   \x20   Widget w = new Widget() { public void run() { b(); } };\n\
+                   \x20 }\n\
+                   }\n";
+        let rows = syms(Lang::Java, src);
+        let d = disambs(&rows, "H.go", "run");
+        assert_eq!(d.len(), 2, "{rows:?}");
+        assert!(d.contains(&Some("()new Runnable.()".to_string())), "{rows:?}");
+        assert!(d.contains(&Some("()new Widget.()".to_string())), "{rows:?}");
+    }
+
+    #[test]
+    fn disamb_js_object_literal_methods_split() {
+        // Shorthand methods of two named object literals are file-scope
+        // method_definition nodes sharing one name; the declarator name keeps
+        // them in separate slots.
+        let src = "const a = { save() { return 1; } };\n\
+                   const b = { save() { return 2; } };\n";
+        let rows = syms(Lang::Js, src);
+        let d = disambs(&rows, "", "save");
+        assert_eq!(d.len(), 2, "{rows:?}");
+        assert!(d.contains(&Some("a.()".to_string())), "{rows:?}");
+        assert!(d.contains(&Some("b.()".to_string())), "{rows:?}");
+    }
+
+    #[test]
+    fn disamb_go_receiver_formatting_is_canonical() {
+        // The receiver discriminator goes through sig_text: `* B` and `*B`
+        // are one slot, so a gofmt pass cannot churn every method anchor.
+        let src = "package m\n\
+                   func (b * B) String() string { return \"\" }\n";
+        let rows = syms(Lang::Go, src);
+        let d = disambs(&rows, "", "String");
+        assert_eq!(d, vec![Some("*B".to_string())], "{rows:?}");
+    }
+
+    #[test]
+    fn disamb_rust_trait_path_formatting_is_canonical() {
+        // The trait-path discriminator goes through sig_text too: rewrapped
+        // generics collapse to one spelling.
+        let src = "struct S;\n\
+                   impl Fmt <T>  for S { fn go(&self) {} }\n";
+        let rows = syms(Lang::Rust, src);
+        let d = disambs(&rows, "S", "go");
+        assert_eq!(d, vec![Some("Fmt<T>".to_string())], "{rows:?}");
     }
 
     #[test]

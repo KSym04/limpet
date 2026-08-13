@@ -62,12 +62,13 @@ fn significant_terms(text: &str) -> Vec<String> {
         "what", "how", "does", "are", "was", "not", "its", "has", "have",
     ];
     let mut out: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
     for tok in text.split(|c: char| !c.is_alphanumeric() && c != '_') {
         if tok.chars().count() < 3 {
             continue;
         }
         let lower = tok.to_lowercase();
-        if STOP.contains(&lower.as_str()) || out.contains(&lower) {
+        if STOP.contains(&lower.as_str()) || !seen.insert(lower.clone()) {
             continue;
         }
         out.push(lower);

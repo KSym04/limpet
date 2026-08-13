@@ -11,10 +11,18 @@ and verdict; P5 matched-terms behind the 4.0x bench gate; removed-file purge
 transactionality.
 
 Key invariants: I-F1 (no twin masking), I-F2 (legacy anchors byte-exact),
-I-F3 (spelling byte-identical outside S1-S9, kind outside K1-K2, no symbol
+I-F3 (spelling byte-identical outside S1-S9, kind outside K1-K3, no symbol
 lost, runtime-proven), I-F4 (v7 no-op re-run, race-safe), I-F5 (recall wire
 untouched by disamb; P5 gated), I-F6 (entropy guards unweakened), I-F7 (set
 semantics only) + carried I3/BENCH/CONF/POS.
+
+I-F2 amendment (final review round, deliberate): a legacy NULL-disamb anchor
+whose fqn is still indexed IN ITS OWN FILE while its body is not reads
+Stale{body_edited} BEFORE the scope-respell step. The state is point-in-time
+ambiguous (in-place edit with a preserved copy vs a twin-split respell), and
+the ladder picks the honest failure: a wrong follow serves an edited body as
+fresh forever, a stale is visible and recoverable. Pinned in
+tests/anchor_golden.rs (a_surviving_fqn... and an_in_place_edit...).
 
 ## Task Implementation Checklist: 0.15.0
 
@@ -47,7 +55,7 @@ semantics only) + carried I3/BENCH/CONF/POS.
       that corpus was C and C++ only, so it proved NOTHING about Java, C#,
       TypeScript, PHP, Ruby or Python. I-F3 re-proven properly under T2d.
 - [x] T2d I-F3 restated and re-proven with the COMPLETE sanctioned list
-      (S1-S9, K1-K2, R1-R2) over a 43-fixture, 11-grammar differential run
+      (S1-S9, K1-K3, R1-R2) over a 43-fixture, 11-grammar differential run
       against the 2ab0afb baseline from one byte-identical harness. 45
       spelling changes, all attributable, 0 unattributed, 0 rows lost
       (re-measured 2026-08-04 with S5 widened to identifier-named `module`
@@ -56,9 +64,11 @@ semantics only) + carried I3/BENCH/CONF/POS.
       plus the negative bounds (C# file-scoped namespace, TS string-named
       ambient module, Rust `mod x;`, PHP unbracketed namespace, Ruby
       `class << self`, C++ `::f` and anonymous namespace).
-- [x] T2c anchor.rs: ladder step 4.5 (scope respell). An FQN gone from the
-      index whose body is still in its file under the same last segment is a
-      respelled SCOPE, not a moved symbol: follow it. Without it every scope
+- [x] T2c anchor.rs: the scope-respell step (step 4 of the shipped 6-step
+      ladder). An FQN whose body is still in its file under the same last
+      segment under an EXTENDED scope chain is a respelled SCOPE, not a moved
+      symbol: follow it (gated for legacy NULL anchors by the same-file
+      fqn-survival stale, see the I-F2 amendment above). Without it every scope
       fix above false-stales the anchors already pointing at those FQNs
       (measured 16.3% permanent: low_entropy under the follow floor,
       ambiguous_anchor on any duplicated body) for zero code change.
@@ -68,12 +78,18 @@ semantics only) + carried I3/BENCH/CONF/POS.
 - [x] T4 memory/mod.rs + tools.rs: resolve_anchor DISTINCT (fqn, disamb) +
       @disamb spec parsing (last-@ split, verbatim retry) + anchors INSERT
       disamb + tool description + README
-- [x] T5 anchor.rs: slot-first ladder (5 steps) + legacy NULL path +
-      opportunistic backfill + follow rewrites disamb + twin-masking test +
-      trait-rename follow test + golden additions
-- [ ] T6 bench/lag_bench.py: synthetic repos 2k/10k/50k, walk/stat/reindex
-      cost separation, staleness latency in calls, drain; run on release
-      binary; verdict recorded in ROADMAP with numbers
+- [x] T5 anchor.rs: slot-first ladder (6 steps: slot-fresh, slot-edited,
+      slot-respell, scope-respell, fqn-survives stale, hunt) + legacy NULL
+      path + opportunistic backfill + follow rewrites disamb + twin-masking
+      test + trait-rename follow test + golden additions
+- [x] T6 bench/lag_bench.py: synthetic repos 2k/10k/50k, walk/stat/reindex
+      cost separation, staleness latency in calls, drain; run on the release
+      binary 2026-08-07. VERDICT: anchored staleness latency 1 sweep call at
+      every size and edit batch (K1/K32/K100), integrity 0 findings; quiet
+      per-call p50 156/372/1206 ms at 2k/10k/50k vs the 250 ms bar, so the
+      FS-event watcher becomes a designed backlog item gated on this bench.
+      Recorded in ROADMAP (0.15 Shipped entry + bets table) + README
+      receipts section.
 - [x] T7 P5 matched terms: per-item `matched` string (task terms found in the
       body, cap 3, task order, omitted when empty), priced into both the
       packer and recall_cost (ITEM_OVERHEAD parity). GATE HELD on the rebuilt
@@ -81,14 +97,62 @@ semantics only) + carried I3/BENCH/CONF/POS.
       stale-binary artifact and was discarded); emission proven on the real
       serve path via stdio JSON-RPC ("matched":"sweep prioritization
       anchored"). 3 unit + 1 wire test.
-- [ ] T8 docs: README (disamb + @spec + bench receipt), ROADMAP (0.15 ->
-      Shipped + watcher verdict), main.rs doc header if touched
-- [ ] T9 QA: full suite green, clippy 0, panic ratchet, bench 4.0x+, demo,
-      two-process v6->v7 dogfood on the real store, adversarial review
-      workflows (task-level + whole-branch), em-dash sweep
+- [x] T8 docs: README (disamb + @spec whitespace-forgiven wording, matched
+      semantics, lag-bench receipt in the receipts section), ROADMAP (0.15 ->
+      Shipped with the measured watcher verdict + FS-event watcher added to
+      the bets table with its bench gate); main.rs untouched
+- [x] T9 QA (final run 2026-08-13, post review-round fixes): 14/14 suites
+      green (cargo test --locked exit 0), clippy 0 (known MSRV map_or lint
+      only), panic ratchet ok, bench 4.2x overall / 5.4x lineage on the
+      rebuilt release binary, demo exit 0, em-dash sweep 0 files.
+      Two-process dogfoods on copies of the REAL store: v6 -> v7 (72 real
+      entries, statuses unchanged, refill once, serve recall emitted matched
+      terms on the wire, reopen no-op) AND refill generation 1 -> 2 (109
+      entries, 29 stale before == 29 stale after, marker 1 -> 2, reopen
+      no-op). Adversarial reviews: task-level rounds during the branch plus
+      TWO whole-branch workflows (2026-08-04; 2026-08-07 24-agent round, 8
+      confirmed findings all fixed, section above).
 - [ ] Ship: version 0.15.0 sync (Cargo.toml + server.json) via /deploy-limpet
 
-Deferred out of 0.15 (whole-branch review 2026-08-04, recorded not fixed):
+FINAL REVIEW ROUND (2026-08-07, 24-agent adversarial workflow: 19 raw
+findings, 8 confirmed after two-lens verification, 1 refuted, 10 minor; ALL
+confirmed + actionable minors FIXED):
+- [x] BLOCKER anchor.rs: respell step converted an in-place edit of a legacy
+      NULL-disamb anchor's symbol into Followed when the old body survived
+      in-file under a deeper scope. Fixed: same-file fqn-survival stale gate
+      (I-F2 amendment above) + flipped/added golden pins.
+- [x] MAJOR store.rs: v7 refill marker frozen at its first claim; extractor
+      changes after the claim never re-fired it. Fixed:
+      CONTENT_REFILL_GENERATION (now 2) guarded upsert + generation test.
+- [x] MAJOR extract.rs: JS/TS static/instance members of one name shared one
+      slot. Fixed: `static` prefixes the discriminator + pin.
+- [x] MAJOR extract.rs: Java enum-constant bodies filed constant overrides
+      into the enum's slot. Fixed: constant-name marker flows down + pin.
+      Java anonymous-class members got a `new <Type>.` marker + pin; JS
+      named-object-literal methods got a declarator marker + pin.
+- [x] MAJOR extract.rs: nested symbols with their own parameter list
+      DISCARDED the inherited twin discriminator. Fixed: compose_disamb
+      (inherited prefixes own, all param-list grammars) + pin.
+- [x] MAJOR store.rs import: NULL disamb re-resolved as a wildcard and could
+      adopt the twin's hash. Fixed: `disamb IS ?2` exact, twin-free-only
+      adoption for slot-less anchors + deliberate-NULL round-trip test.
+- [x] MAJOR store.rs import: an old-binary peer's re-export stripped local
+      anchor slots via LWW replace. Fixed: preserved_slots carry-over when
+      the incoming anchor names the same (file, fqn) slot-lessly + test.
+- [x] MAJOR docs: "@disamb spelled as the source writes it" was false for
+      whitespace. Fixed both ways: the spec parser canonicalizes the suffix
+      through collapse_ws, and README/tool docs say whitespace is forgiven.
+- [x] minors: sig_text for Go receiver + Rust trait-path discriminators
+      (formatting-only edits no longer churn slots); HashSet dedup in
+      significant_terms; @-named bash symbol colliding with a slot spec is
+      refused loudly; K1-K2 -> K1-K3 in two SPEC lines; ladder step count
+      corrected; matched-absence wording fixed in README + recall tool
+      description.
+- Refuted (1): "is_scope_extension vacuous for pre-v7 spellings"; the
+  mechanical trace was right but the blocker fix removes the reachable harm.
+
+Deferred out of 0.15 (whole-branch reviews 2026-08-04 + 2026-08-07,
+recorded not fixed):
 - C# type-level generic arity: `class C<T>` / `class C<T,U>` share one NULL
   slot (methods got `type_parameters`, type rows did not). 0.16 candidate.
 - C++ `union_specifier` is neither a symbol arm nor a type scope, so union
@@ -96,6 +160,15 @@ Deferred out of 0.15 (whole-branch review 2026-08-04, recorded not fixed):
 - map/lineage reads are disamb-blind: twin slots sharing an FQN merge into
   one lineage target undisclosed. 0.16 candidate alongside the refinement
   loop's map work.
+- Two SAME-type Java anonymous classes with identical bodies in one scope
+  share one slot (the `new <Type>.` marker cannot separate them); inline
+  (never-bound) JS object literals keep no declarator marker. Both
+  pre-existing twin spaces narrowed, not closed, by this round.
+- JS `get x()` beside a plain method `x()` (legal parse, degenerate at
+  runtime) share `()`. Not worth a discriminator.
+- T2b's "totality" claim is therefore scoped: every twin axis with a STABLE
+  spellable discriminator is closed; the residuals above are the measured
+  remainder.
 
 ---
 

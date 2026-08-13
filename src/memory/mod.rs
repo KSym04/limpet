@@ -205,15 +205,49 @@ fn resolve_anchor(store: &Store, spec: &AnchorSpec) -> Result<ResolvedAnchor> {
                     continue;
                 }
                 let (name, want) = (&symbol[..at], &symbol[at + 1..]);
-                let filter =
-                    if want.is_empty() { SlotWant::Undiscriminated } else { SlotWant::Exact(want) };
-                slots = symbol_slots(store, name, &spec.file, filter)?;
+                if want.is_empty() {
+                    slots = symbol_slots(store, name, &spec.file, SlotWant::Undiscriminated)?;
+                    if !slots.is_empty() {
+                        break;
+                    }
+                    continue;
+                }
+                // The stored spelling always wins verbatim. When that misses,
+                // retry the suffix through the extractor's whitespace
+                // canonicalizer: parameter-list discriminators are stored
+                // collapsed (`(int a,String b)`), so the comma-space spelling
+                // the source actually writes resolves too, and the docs' "as
+                // the source writes it" holds. Fragments the extractor joins
+                // WITH a space (`() const`) are reached by the verbatim try.
+                slots = symbol_slots(store, name, &spec.file, SlotWant::Exact(want))?;
                 if !slots.is_empty() {
                     break;
+                }
+                let want_canon = crate::index::extract::collapse_ws(want);
+                if want_canon != want {
+                    slots = symbol_slots(store, name, &spec.file, SlotWant::Exact(&want_canon))?;
+                    if !slots.is_empty() {
+                        break;
+                    }
                 }
             }
             if slots.is_empty() {
                 slots = symbol_slots(store, symbol, &spec.file, SlotWant::Any)?;
+            } else if symbol.contains('@') {
+                // A symbol can legitimately be spelled WITH an `@` (bash
+                // allows it). If the split matched a slot AND the verbatim
+                // spelling also names a symbol, picking either silently is a
+                // guess; surface the collision instead.
+                let verbatim = symbol_slots(store, symbol, &spec.file, SlotWant::Any)?;
+                if !verbatim.is_empty() {
+                    bail!(
+                        "symbol '{symbol}' is ambiguous in {}: it names a symbol \
+                         spelled with '@' AND parses as an `fqn@disamb` slot spec \
+                         matching {:?}. Rename one or anchor the file instead.",
+                        spec.file,
+                        slot_forms(&slots),
+                    );
+                }
             }
             // Never guess between duplicates: two `push` methods, or twin
             // trait impls of one method, must surface as a choice rather

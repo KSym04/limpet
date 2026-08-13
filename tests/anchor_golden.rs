@@ -1565,12 +1565,18 @@ fn a_leftover_in_file_twin_does_not_hijack_a_cross_file_move() {
 }
 
 #[test]
-fn a_twin_split_respell_is_rescued_from_behind_a_surviving_fqn() {
-    // A respell can leave the anchor's OLD spelling alive on a different
-    // symbol (pre-v7 twins splitting under the sanctioned scope fixes). The
-    // fqn-still-exists stale verdict must not shadow the rescue: the body
-    // sitting in the anchor's own file under an extended scope spelling is
-    // the stronger evidence.
+fn a_surviving_fqn_in_the_anchors_file_forces_the_honest_stale() {
+    // Point-in-time this state has two readings and they demand opposite
+    // verdicts: (a) the anchored symbol was edited in place and an old copy
+    // of its body survives deeper in the file (a `mod legacy` preservation),
+    // truth Stale{body_edited}; (b) a scope respell moved the body deeper
+    // while a DIFFERENT symbol claimed the old spelling, truth Followed.
+    // Nothing observable separates them, so the ladder must pick the honest
+    // failure: reading (b) as stale is visible and recoverable, reading (a)
+    // as Followed silently serves a memory as fresh over edited code. A
+    // legacy NULL-disamb anchor whose spelling is still alive in its own
+    // file therefore stales instead of taking the respell shortcut (the
+    // slotted branch already encodes the same preference via step 2).
     let dir = TempDir::new().unwrap();
     let root = dir.path();
     let body = "pub fn helper(n: u32) -> u32 {\n    let mut t = 1;\n    for i in 1..n {\n        t = t.wrapping_mul(i);\n    }\n    t\n}\n";
@@ -1599,12 +1605,59 @@ fn a_twin_split_respell_is_rescued_from_behind_a_surviving_fqn() {
     fs::write(root.join("a.rs"), format!("{stranger}mod inner {{\n{body}}}\n")).unwrap();
     let report = mutate_and_resolve(&store, root);
     assert_eq!(
-        report.followed, 1,
-        "the surviving stranger fqn must not shadow the respell rescue: {report:?}"
+        report.followed, 0,
+        "a live same-file fqn means a possible in-place edit; following would mask it: {report:?}"
     );
-    assert_eq!(report.stale, 0, "{report:?}");
-    assert_eq!(status_of(&store, &r.id).0, "active");
-    assert_eq!(anchor_slot(&store, &r.id).0, "a.inner.helper");
+    assert_eq!(report.stale, 1, "{report:?}");
+    let (status, reason) = status_of(&store, &r.id);
+    assert_eq!(status, "stale");
+    assert_eq!(reason.as_deref(), Some("body_edited"));
+    assert_eq!(
+        anchor_slot(&store, &r.id).0,
+        "a.helper",
+        "the anchor must keep naming what the memory described"
+    );
+}
+
+#[test]
+fn an_in_place_edit_with_a_preserved_copy_is_stale_not_followed() {
+    // The blocker shape from the 0.15 whole-branch review: rewrite the
+    // anchored symbol while keeping its old implementation byte-identical
+    // inside a mod in the same file. Before the same-file fqn gate the
+    // respell step followed the preserved copy and the edit vanished as
+    // Followed; the memory stayed active over changed code.
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    let body = "pub fn digest(n: u32) -> u32 {\n    let mut t = 7;\n    for i in 2..n {\n        t = t.rotate_left(i % 8) ^ i;\n    }\n    t\n}\n";
+    fs::write(root.join("a.rs"), body).unwrap();
+    let store = Store::open_in_memory().unwrap();
+    index::full_index(&store, root).unwrap();
+    let r = memory::remember(
+        &store,
+        "fact",
+        "digest folds every index below n into a rotating xor",
+        "explicit",
+        None,
+        &[AnchorSpec { file: "a.rs".into(), symbol: Some("digest".into()) }],
+        None,
+        &[],
+        None,
+        false,
+        None,
+        false,
+    )
+    .unwrap();
+
+    // The old body is preserved under mod legacy; the live symbol is edited.
+    let edited = "pub fn digest(n: u32) -> u32 {\n    n ^ 0xA5\n}\n";
+    fs::write(root.join("a.rs"), format!("{edited}mod legacy {{\n{body}}}\n")).unwrap();
+    let report = mutate_and_resolve(&store, root);
+    assert_eq!(report.followed, 0, "an in-place edit must never read as Followed: {report:?}");
+    assert_eq!(report.stale, 1, "{report:?}");
+    let (status, reason) = status_of(&store, &r.id);
+    assert_eq!(status, "stale");
+    assert_eq!(reason.as_deref(), Some("body_edited"));
+    assert_eq!(anchor_slot(&store, &r.id).0, "a.digest");
 }
 
 #[test]

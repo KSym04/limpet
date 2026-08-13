@@ -398,6 +398,29 @@ fn resolve_symbol_anchor(
                 }
                 return Ok(AnchorFate::Fresh);
             }
+            // My spelling is still indexed in my own file while my body is
+            // not: the straightforward reading is an in-place edit of my
+            // symbol, and an edit must never be converted into a Followed. A
+            // byte-identical copy of the old body surviving elsewhere in the
+            // file (a `mod legacy` preservation, an extracted helper) makes
+            // the respell step below read exactly like a sanctioned scope
+            // respell, and following it would serve the memory as fresh over
+            // code that changed: the one lie this tool exists to prevent.
+            // The slotted branch already prefers edit evidence over rescue
+            // (step 2); this is the same preference for anchors that never
+            // recorded a slot. Cost, accepted: a pre-v7 twin split where a
+            // DIFFERENT symbol keeps my old spelling alive in my file now
+            // reads Stale{body_edited} instead of following the
+            // extended-scope copy. An honest stale is visible and heals if
+            // the body returns; a wrong follow lies forever.
+            let fqn_alive_here: bool = store.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM symbols WHERE fqn = ?1 AND file = ?2)",
+                params![anchor_fqn, anchor_file],
+                |r| r.get(0),
+            )?;
+            if fqn_alive_here {
+                return Ok(AnchorFate::Stale { reason: "body_edited" });
+            }
         }
     }
 
@@ -444,7 +467,13 @@ fn resolve_symbol_anchor(
     //    This runs BEFORE the fqn-survives verdict below because a v7 respell
     //    can split pre-v7 fqn twins: the old spelling legitimately survives on
     //    a DIFFERENT symbol (a C-export wrapper beside the respelled method),
-    //    and stale-on-EXISTS(fqn) would shadow the rescue forever.
+    //    and stale-on-EXISTS(fqn) would shadow the rescue forever. For a
+    //    SLOTTED anchor that ordering is safe: an in-place edit of its own
+    //    symbol was already caught by step 2 (the slot still exists), so
+    //    reaching here means the slot itself vanished. A legacy NULL anchor
+    //    has no such evidence, so its branch above stales first whenever its
+    //    spelling is still alive in its own file; only a spelling gone from
+    //    the file reaches this step.
     //
     //    Filtering the last segment in Rust, not in SQL: an FQN segment
     //    routinely contains `_`, which SQLite LIKE treats as a
