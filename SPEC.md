@@ -1,6 +1,8 @@
 # SPEC: freshness at scale, part 2, v0.15.0
 
-Status: IN PROGRESS (2026-07-21). Full design:
+Status: SHIPPED 2026-08-13 (PR #27 merged, tag v0.15.0; GitHub release 12
+assets, crates.io 0.15.0, MCP registry isLatest all verified same day; local
+binary updated). Full design:
 docs/superpowers/specs/2026-07-21-freshness-scale-2-design.md
 
 FQN disambiguation via an additive `disamb` discriminator (schema v7:
@@ -112,7 +114,10 @@ tests/anchor_golden.rs (a_surviving_fqn... and an_in_place_edit...).
       no-op). Adversarial reviews: task-level rounds during the branch plus
       TWO whole-branch workflows (2026-08-04; 2026-08-07 24-agent round, 8
       confirmed findings all fixed, section above).
-- [ ] Ship: version 0.15.0 sync (Cargo.toml + server.json) via /deploy-limpet
+- [x] Ship: version 0.15.0 synced (Cargo.toml + server.json + Cargo.lock),
+      PR #27 merged on green 3-platform CI, tag v0.15.0 pushed 2026-08-13;
+      release workflow 12 assets, crates.io 0.15.0, MCP registry isLatest
+      True, local binary self-updated, all verified
 
 FINAL REVIEW ROUND (2026-08-07, 24-agent adversarial workflow: 19 raw
 findings, 8 confirmed after two-lens verification, 1 refuted, 10 minor; ALL
