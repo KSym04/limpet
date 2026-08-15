@@ -1,7 +1,9 @@
 # SPEC: the refinement loop, v0.16.0
 
-Status: QA COMPLETE (2026-08-15), shipping. Personal-tool phase: gates
-unchanged, adoption pressure dropped by owner decision.
+Status: SHIPPED 2026-08-15 (PR #28 merged on green 3-platform CI, tag
+v0.16.0; GitHub release 12 assets, crates.io 0.16.0, MCP registry isLatest
+all verified same day; local binary self-updated). Personal-tool phase:
+gates unchanged, adoption pressure dropped by owner decision.
 
 Closes the re-verification half of refinement: a flagged memory gets a
 first-class path back to trusted. Must land before v1.0 because reverify
@@ -114,7 +116,10 @@ changes the tool API and the API freezes at 1.0.
       mean_overlap + group caps + anchors_elsewhere, in-tx status guard,
       output secret scan, doctor wording, docs_in_sync coverage. 1 refuted
       (git-mv dead-end: fqn embeds the path, so the scenario cannot occur).
-- [ ] Ship: 0.16.0 sync via /deploy-limpet
+- [x] Ship: 0.16.0 synced (Cargo.toml + server.json + Cargo.lock), PR #28
+      merged on green CI, tag v0.16.0 pushed 2026-08-15; release workflow 12
+      assets, crates.io 0.16.0, MCP registry isLatest True, local binary
+      self-updated, all verified
 
 ---
 
