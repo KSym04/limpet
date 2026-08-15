@@ -838,11 +838,13 @@ fn server_image_advisory(installed: &std::path::Path) {
         }
     }
     if !stale.is_empty() {
+        // Spawn-time vs binary mtime cannot see the image's VERSION: a
+        // rebuild of the same version also trips this, so the note claims
+        // "may", not "does", and names the observable symptom.
         println!(
             "note server images: {} `limpet serve` process(es) predate the installed \
-             binary (pid {}). They run an older code image; the version guard blocks \
-             their writes, but their sessions' limpet tools will error until those \
-             clients restart.",
+             binary (pid {}) and may be running an older code image. If limpet tools \
+             in those sessions error after an update, restart those clients.",
             stale.len(),
             stale.join(", ")
         );

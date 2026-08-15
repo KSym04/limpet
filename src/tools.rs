@@ -749,15 +749,42 @@ fn consolidate_payload(store: &Store) -> Result<Value> {
         std::collections::BTreeMap::new();
     for (file, fqn, id, kind, body) in rows {
         let key = (file, fqn.unwrap_or_default());
-        groups.entry(key).or_default().push((id, kind, body));
+        let members = groups.entry(key).or_default();
+        // One entry, one membership: an entry anchored to two twins of one
+        // FQN produces two rows under this key (disamb is not part of it)
+        // and would otherwise pair with itself into a phantom cluster.
+        if !members.iter().any(|(mid, _, _)| *mid == id) {
+            members.push((id, kind, body));
+        }
     }
+
+    // How many anchors each entry carries in total, so a cluster can warn
+    // when superseding a member would also kill its knowledge at anchors
+    // OUTSIDE this cluster.
+    let anchor_counts: std::collections::HashMap<String, i64> = {
+        let mut cs = store
+            .conn
+            .prepare("SELECT entry_id, COUNT(*) FROM anchors GROUP BY entry_id")?;
+        let rows = cs.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
 
     let mut clusters: Vec<Value> = Vec::new();
     let mut total = 0usize;
+    let mut oversize_groups = 0usize;
     for ((file, fqn), members) in &groups {
         if members.len() < 2 {
             continue;
         }
+        // Pairwise comparison is O(n^2) per group; one hot file anchor with
+        // hundreds of entries must not stall every admin call. Oversize
+        // groups compare their first MAX_GROUP members and say so.
+        const MAX_GROUP: usize = 40;
+        let capped = members.len() > MAX_GROUP;
+        if capped {
+            oversize_groups += 1;
+        }
+        let members: &[Member] = &members[..members.len().min(MAX_GROUP)];
         let toks: Vec<std::collections::HashSet<String>> = members
             .iter()
             .map(|(_, _, b)| memory::significant_tokens(b))
@@ -775,13 +802,16 @@ fn consolidate_payload(store: &Store) -> Result<Value> {
             comp[i] = r;
             r
         }
+        // Every pair's overlap is recorded (mean_overlap must describe the
+        // whole cluster, not just the edges above the threshold); only
+        // above-threshold pairs union components.
         let mut pair_overlap: std::collections::HashMap<(usize, usize), f64> =
             std::collections::HashMap::new();
         for i in 0..n {
             for j in i + 1..n {
                 let o = memory::jaccard(&toks[i], &toks[j]);
+                pair_overlap.insert((i, j), o);
                 if o >= MIN_OVERLAP {
-                    pair_overlap.insert((i, j), o);
                     let (ri, rj) = (find(&mut comp, i), find(&mut comp, j));
                     if ri != rj {
                         comp[ri] = rj;
@@ -824,6 +854,13 @@ fn consolidate_payload(store: &Store) -> Result<Value> {
             } else {
                 format!("{file} :: {fqn}")
             };
+            // A member with anchors OUTSIDE this cluster is flagged:
+            // superseding it kills its knowledge at every other anchor too,
+            // so the distiller must carry those or leave the member alone.
+            let other_anchors: Vec<i64> = shown
+                .iter()
+                .map(|&i| (anchor_counts.get(&members[i].0).copied().unwrap_or(1) - 1).max(0))
+                .collect();
             clusters.push(json!({
                 "anchor": anchor,
                 "ids": shown.iter().map(|&i| members[i].0.clone()).collect::<Vec<_>>(),
@@ -832,6 +869,7 @@ fn consolidate_payload(store: &Store) -> Result<Value> {
                     .iter()
                     .map(|&i| members[i].2.chars().take(PREVIEW_CHARS).collect::<String>())
                     .collect::<Vec<_>>(),
+                "anchors_elsewhere": other_anchors,
                 "mean_overlap": (mean * 100.0).round() / 100.0,
                 "members_truncated": idxs.len() > MAX_MEMBERS,
             }));
@@ -841,7 +879,10 @@ fn consolidate_payload(store: &Store) -> Result<Value> {
         "clusters": clusters,
         "candidates_found": total,
         "truncated": total > MAX_CLUSTERS,
-        "next": "distill a cluster into one entry via remember, then link supersedes to its members",
+        "oversize_groups": oversize_groups,
+        "next": "distill a cluster into one entry via remember, then link supersedes to its members; \
+                 a member with anchors_elsewhere > 0 also carries knowledge at other anchors, so fold \
+                 those in or leave that member unsuperseded",
     }))
 }
 
@@ -986,7 +1027,7 @@ pub fn tool_schemas() -> Value {
         },
         {
             "name": "admin",
-            "description": "Maintenance: op=index (full reindex), status (includes private and archived counts), forget (id, permanent), archive / restore (id: archive hides a memory from recall, the verify queue, and map without deleting it; its staleness keeps tracking the code underneath, and restore brings it back with its current, truthful status), export / import (JSONL at .limpet/memory.jsonl for team sharing via git; private memories are withheld from export and counted in private_withheld; archived entries export with an archived flag), ledger (token-savings receipt: session + lifetime + methodology) / ledger_reset, reverify (id + command + output: accept a fresh run of a verify_queue item's proving command; re-stamps the evidence digest and timestamp, re-binds every anchor to the current code, refunds the stale confidence penalty, and returns the entry to active as verified; refuses when any anchor no longer resolves, when the entry is superseded/invalidated/archived, or when the command carries a credential), consolidate (read-only merge candidates: clusters of same-anchor entries whose bodies overlap enough to be one lesson restated; distill a cluster into one entry via remember and link supersedes to its members; nothing is merged automatically).",
+            "description": "Maintenance: op=index (full reindex), status (includes private and archived counts), forget (id, permanent), archive / restore (id: archive hides a memory from recall, the verify queue, and map without deleting it; its staleness keeps tracking the code underneath, and restore brings it back with its current, truthful status), export / import (JSONL at .limpet/memory.jsonl for team sharing via git; private memories are withheld from export and counted in private_withheld; archived entries export with an archived flag), ledger (token-savings receipt: session + lifetime + methodology) / ledger_reset, reverify (id + command + output: accept a fresh run of a verify_queue item's proving command; re-stamps the evidence digest and timestamp, re-binds every anchor to the current code, restores confidence to the full verified level, and returns the entry to active as verified; refuses when any anchor no longer resolves, when the entry is superseded/invalidated/archived, or when the command carries a credential), consolidate (read-only merge candidates: clusters of same-anchor entries whose bodies overlap enough to be one lesson restated; distill a cluster into one entry via remember and link supersedes to its members; nothing is merged automatically).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1098,5 +1139,53 @@ mod consolidate_tests {
             .unwrap();
         let v = consolidate_payload(&store).unwrap();
         assert_eq!(v["clusters"].as_array().unwrap().len(), 0, "{v}");
+    }
+}
+
+#[cfg(test)]
+mod consolidate_twin_tests {
+    use super::*;
+    use crate::memory::{self, AnchorSpec};
+    use crate::store::Store;
+
+    #[test]
+    fn an_entry_anchored_to_two_twins_of_one_fqn_never_pairs_with_itself() {
+        // Both anchors share (file, fqn) and differ only in disamb, which the
+        // grouping key ignores; without per-entry dedupe the entry paired
+        // with itself into a phantom [X, X] cluster.
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("t.rs"),
+            "struct T;\n\
+             impl A for T { fn go(&self) -> u32 { 1 + 2 + 3 } }\n\
+             impl B for T { fn go(&self) -> u32 { 9 * 9 * 9 } }\n",
+        )
+        .unwrap();
+        let store = Store::open_in_memory().unwrap();
+        crate::index::full_index(&store, dir.path()).unwrap();
+        memory::remember(
+            &store,
+            "decision",
+            "both go impls deliberately disagree about scaling",
+            "explicit",
+            None,
+            &[
+                AnchorSpec { file: "t.rs".into(), symbol: Some("go@A".into()) },
+                AnchorSpec { file: "t.rs".into(), symbol: Some("go@B".into()) },
+            ],
+            None,
+            &[],
+            None,
+            false,
+            None,
+            false,
+        )
+        .unwrap();
+        let v = consolidate_payload(&store).unwrap();
+        assert_eq!(
+            v["clusters"].as_array().unwrap().len(),
+            0,
+            "a self-pair is not a cluster: {v}"
+        );
     }
 }

@@ -950,6 +950,14 @@ impl Store {
                 continue;
             }
 
+            // conf_before_stale COALESCEs like the anchor-slot preservation:
+            // a peer running a binary that predates the column re-exports the
+            // line WITHOUT it, and letting that NULL win would destroy a
+            // pending refund so the next heal serves the penalized
+            // confidence forever (0.16 whole-branch review). The cost is the
+            // mirror edge: a refund legitimately consumed on the peer is
+            // resurrected here until the next stale re-stores it, bounded by
+            // the per-source cap below.
             tx.execute(
                 "INSERT INTO entries(id, kind, body, created_at, updated_at, source,
                                      confidence, status, stale_reason, branch,
@@ -965,7 +973,7 @@ impl Store {
                    evidence_digest=excluded.evidence_digest,
                    evidence_ran_at=excluded.evidence_ran_at,
                    origin=COALESCE(excluded.origin, origin),
-                   conf_before_stale=excluded.conf_before_stale",
+                   conf_before_stale=COALESCE(excluded.conf_before_stale, conf_before_stale)",
                 rusqlite::params![
                     id,
                     kind,
@@ -990,11 +998,17 @@ impl Store {
                     obj["evidence_digest"].as_str(),
                     obj["evidence_ran_at"].as_str(),
                     origin,
-                    // Same clamp discipline as confidence: a hostile refund
-                    // must not park a future confidence outside [0,1].
-                    obj["conf_before_stale"]
-                        .as_f64()
-                        .map(|c| crate::memory::quantize_confidence(c.clamp(0.0, 1.0))),
+                    // Same discipline as confidence two params above, cap
+                    // included: the refund is a FUTURE confidence (heal and
+                    // reverify pay it out verbatim), so a refund above the
+                    // source's ceiling would launder a hostile line past the
+                    // trust policy the moment its anchors resolve (0.16
+                    // whole-branch review).
+                    obj["conf_before_stale"].as_f64().map(|c| {
+                        crate::memory::quantize_confidence(
+                            c.min(crate::memory::import_confidence_cap(source)),
+                        )
+                    }),
                 ],
             )?;
             // Archival travels with the line: a winning (added/updated) line

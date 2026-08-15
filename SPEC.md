@@ -10,12 +10,22 @@ changes the tool API and the API freezes at 1.0.
 ## INVARIANTS
 
 - I-R1: reverify never guesses. An anchor that cannot re-resolve against the
-  CURRENT index refuses the whole op naming the anchor; no half-reverified
-  entry exists.
+  CURRENT index refuses the whole op naming the anchor, and so does a slot
+  holding more than one distinct body or resolving in more than one file
+  (which body the evidence proves is unknowable); no half-reverified entry
+  exists. A slot found whole in exactly ONE other file follows the rename
+  and repairs anchors.file.
 - I-R2: confidence refund is decay-once-per-reason. The pre-stale value is
-  stored on the active->stale transition ONLY, restored on heal or reverify,
-  and cleared after. A stale entry re-staling never re-stores the penalized
-  value. Every confidence write stays ROUND(...,6) (CONF).
+  stored on the active->stale transition ONLY, HEAL restores exactly it, and
+  it clears after either consumer. Reverify is a fresh proof, not a heal: it
+  pays max(stored refund, the verified earn 0.95). A stale entry re-staling
+  never re-stores the penalized value. The refund is a future confidence, so
+  import caps it per source exactly like confidence itself. Every
+  confidence write stays ROUND(...,6) (CONF).
+- I-R1b: reverify applies remember's whole evidence policy (secret scan on
+  command AND output, non-empty both, output digested never stored), and an
+  entry of ANY source gains verified through fresh evidence, remember's own
+  rule, stated in the tool description.
 - I-R3: any state change replicating through LWW bumps updated_at strictly
   (bump_updated_at), and the new column travels the JSONL wire additively
   (omitted when NULL; old binaries ignore it; import clamps to [0,1]).
@@ -43,7 +53,9 @@ changes the tool API and the API freezes at 1.0.
   re-resolves against the current index (symbol anchors re-read their slot
   hash, file anchors the file hash; any failure refuses, I-R1);
   evidence_cmd/digest/ran_at re-stamped; source='verified';
-  confidence=ROUND(COALESCE(conf_before_stale, confidence),6);
+  confidence = the verified earn (0.95) or the stored refund when higher,
+  quantized (a fresh proof is never worth less than a new verified fact;
+  found by the dogfood draining a pre-v8 item to the 0.5 floor);
   conf_before_stale=NULL; status='active'; stale_reason=NULL;
   bump_updated_at. Returns {id, anchors_rebound, confidence}.
 - admin {op:"consolidate"}: read-only candidate clusters. Group
@@ -72,22 +84,22 @@ changes the tool API and the API freezes at 1.0.
 
 ## Task Implementation Checklist: 0.16.0
 
-- [ ] T2 store.rs: schema v8 (entries.conf_before_stale ALTER, self-gate,
+- [x] T2 store.rs: schema v8 (entries.conf_before_stale ALTER, self-gate,
       SCHEMA_V1 DDL, SCHEMA_VERSION 7->8, version tests, reopen no-op test);
       export/import carry the field (clamp+quantize on import)
-- [ ] T2 anchor.rs resolve_all: stale transition stores pre-penalty value;
+- [x] T2 anchor.rs resolve_all: stale transition stores pre-penalty value;
       heal transition refunds + clears; branch-switch round-trip test
       proving confidence-neutral; re-stale-while-stale keeps stored value
-- [ ] T1 tools.rs + memory: admin reverify op per SURFACES + tool schema +
+- [x] T1 tools.rs + memory: admin reverify op per SURFACES + tool schema +
       README; tests: drain-own-queue shape (stale verified fact reverifies
       to active with refunded confidence + new digest), refusal on
       unresolvable anchor, refusal on superseded/archived/invalidated,
       secret in command refused, LWW bump proven
-- [ ] T3 tools.rs: admin consolidate op + tests (cluster found on
+- [x] T3 tools.rs: admin consolidate op + tests (cluster found on
       same-anchor high-overlap episodes; unrelated bodies excluded; caps)
-- [ ] T4 main.rs doctor: stale server-image advisory + fixture-free unit
+- [x] T4 main.rs doctor: stale server-image advisory + fixture-free unit
       test for the etime parser; never flips ok
-- [ ] Docs: README (verify_queue -> reverify loop, consolidate, doctor
+- [x] Docs: README (verify_queue -> reverify loop, consolidate, doctor
       note), ROADMAP (0.16 -> Shipped), tool schema text, docs_in_sync
 - [ ] QA: full suite, clippy 0, ratchet, bench 4.0x+, demo, two-process
       v7->v8 dogfood on a copy of the real store (drain one real queue item
