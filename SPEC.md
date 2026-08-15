@@ -1,7 +1,7 @@
 # SPEC: the refinement loop, v0.16.0
 
-Status: IN PROGRESS (2026-08-15). Personal-tool phase: gates unchanged,
-adoption pressure dropped by owner decision.
+Status: QA COMPLETE (2026-08-15), shipping. Personal-tool phase: gates
+unchanged, adoption pressure dropped by owner decision.
 
 Closes the re-verification half of refinement: a flagged memory gets a
 first-class path back to trusted. Must land before v1.0 because reverify
@@ -101,9 +101,19 @@ changes the tool API and the API freezes at 1.0.
       test for the etime parser; never flips ok
 - [x] Docs: README (verify_queue -> reverify loop, consolidate, doctor
       note), ROADMAP (0.16 -> Shipped), tool schema text, docs_in_sync
-- [ ] QA: full suite, clippy 0, ratchet, bench 4.0x+, demo, two-process
-      v7->v8 dogfood on a copy of the real store (drain one real queue item
-      live), whole-branch adversarial review workflow, em-dash sweep
+- [x] QA (2026-08-15): 15/15 suites (13 refinement tests), clippy 0 (known
+      MSRV lint only), ratchet ok, bench 4.2x/5.4x, demo exit 0, em-dash 0.
+      Two-process v7->v8 dogfood on a live-store copy: schema 8, statuses
+      unchanged, REAL queue item drained over stdio (mcp-publisher validate
+      re-run, entry active at 0.95, queue 3->2), consolidate clean.
+      Whole-branch adversarial review (25 agents): 9 confirmed findings = 5
+      distinct defects, ALL FIXED same day: per-source cap on imported
+      refunds (laundering closed), multi-body slot + multi-home refusals in
+      the reverify rebind (plus single-home rename follow), LWW refund-wash
+      preservation, consolidate twin self-pair dedupe + whole-cluster
+      mean_overlap + group caps + anchors_elsewhere, in-tx status guard,
+      output secret scan, doctor wording, docs_in_sync coverage. 1 refuted
+      (git-mv dead-end: fqn embeds the path, so the scenario cannot occur).
 - [ ] Ship: 0.16.0 sync via /deploy-limpet
 
 ---
