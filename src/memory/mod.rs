@@ -8,7 +8,7 @@ use crate::index::now_iso;
 use crate::store::Store;
 use crate::util::ulid;
 use anyhow::{bail, Context, Result};
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 
 pub const KINDS: [&str; 5] = ["fact", "decision", "episode", "insight", "intent"];
 pub const SOURCES: [&str; 3] = ["explicit", "mined", "verified"];
@@ -595,7 +595,7 @@ fn ordered_significant_tokens(text: &str) -> Vec<String> {
 }
 
 /// Set view of `ordered_significant_tokens`, for overlap ratios.
-fn significant_tokens(text: &str) -> std::collections::HashSet<String> {
+pub(crate) fn significant_tokens(text: &str) -> std::collections::HashSet<String> {
     ordered_significant_tokens(text).into_iter().collect()
 }
 
@@ -640,7 +640,7 @@ const DUP_MIN_OVERLAP: f64 = 0.9;
 /// must also agree before a write is refused.
 const DUP_MIN_BIGRAM_OVERLAP: f64 = 0.6;
 
-fn jaccard<T: std::hash::Hash + Eq>(
+pub(crate) fn jaccard<T: std::hash::Hash + Eq>(
     a: &std::collections::HashSet<T>,
     b: &std::collections::HashSet<T>,
 ) -> f64 {
@@ -728,6 +728,202 @@ pub fn add_link(store: &Store, src: &str, dst: &str, rel: &str) -> Result<()> {
         )?;
     }
     Ok(())
+}
+
+/// What `reverify` reports back: how many anchors re-bound to current code
+/// and the confidence the entry returned to.
+#[derive(Debug)]
+pub struct ReverifyResult {
+    pub anchors_rebound: usize,
+    pub confidence: f64,
+}
+
+/// Accept fresh evidence for an entry and return it to trusted: the closure
+/// of the verify_queue loop. The queue hands out the proving command; this
+/// takes the id plus the fresh run (command, output), re-stamps the evidence
+/// digest and timestamp, re-binds every anchor to the CURRENT index, refunds
+/// the stale confidence penalty, and returns the entry to active as
+/// `verified`. Never guesses (I-R1): an anchor whose exact slot or file no
+/// longer resolves refuses the whole call naming the anchor, because a fact
+/// re-proven against current code must attach to current code; a memory
+/// whose code is gone gets superseded, not laundered back to active.
+pub fn reverify(store: &Store, id: &str, command: &str, output: &str) -> Result<ReverifyResult> {
+    let command = command.trim();
+    if command.is_empty() {
+        bail!("evidence command is empty; reverify needs the command that was actually run");
+    }
+    if output.trim().is_empty() {
+        bail!("evidence output is empty; run the command and paste what it printed");
+    }
+    if output.len() > MAX_BODY_BYTES {
+        bail!(
+            "evidence output is {} bytes; the limit is {MAX_BODY_BYTES}. \
+             Quote the decisive lines, not the whole log.",
+            output.len()
+        );
+    }
+    if let Some(kind) = crate::secrets::detect(command) {
+        bail!("evidence command looks like it contains {kind}; scrub it and retry");
+    }
+    // Same rule as remember: the output only persists as a digest, but a
+    // digest of a credential is still a stable fingerprint of it, and the
+    // scan keeps the two evidence paths policy-identical.
+    if let Some(kind) = crate::secrets::detect(output) {
+        bail!("evidence output looks like it contains {kind}; redact it and retry");
+    }
+
+    let row: Option<(String, String, f64, Option<f64>)> = store
+        .conn
+        .query_row(
+            "SELECT status, source, confidence, conf_before_stale
+             FROM entries WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()?;
+    let Some((status, _source, confidence, conf_before)) = row else {
+        bail!("no memory with id {id}");
+    };
+    match status.as_str() {
+        "superseded" => bail!("memory {id} is superseded; reverify its successor instead"),
+        "invalidated" => bail!(
+            "memory {id} is invalidated (its anchors are gone); \
+             re-anchor the fact with a new remember + supersedes link"
+        ),
+        _ => {}
+    }
+    let archived: bool = store.conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM archived WHERE entry_id = ?1)",
+        [id],
+        |r| r.get(0),
+    )?;
+    if archived {
+        bail!("memory {id} is archived; restore it before reverifying");
+    }
+
+    // Re-bind every anchor against the CURRENT index, all-or-nothing. The
+    // sweep already ran this tool call, so follows/respells are applied;
+    // what remains must resolve exactly (fqn + slot + file, or the file row).
+    let anchors: Vec<(i64, String, Option<String>, Option<String>)> = {
+        let mut stmt = store.conn.prepare(
+            "SELECT id, file, symbol_fqn, disamb FROM anchors WHERE entry_id = ?1",
+        )?;
+        let rows = stmt
+            .query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows
+    };
+    // (anchor id, new hash, new file when the row moved). Two refusal
+    // shapes, both I-R1: a slot with several distinct bodies is ambiguous
+    // (a cfg-gated twin pair shares one NULL slot: which body was proven is
+    // unknowable), and a slot found nowhere is gone. When the anchor's
+    // recorded file is stale but the slot lives whole in exactly ONE other
+    // file (the ladder's extensionless-fqn rename shape, util.js ->
+    // util.ts), the rebind follows it and repairs anchors.file; two homes
+    // refuse rather than pick.
+    let mut rebound: Vec<(i64, String, Option<String>)> = Vec::with_capacity(anchors.len());
+    for (aid, file, fqn, disamb) in &anchors {
+        match fqn {
+            Some(f) => {
+                let mut stmt = store.conn.prepare(
+                    "SELECT DISTINCT body_hash FROM symbols
+                     WHERE fqn = ?1 AND disamb IS ?2 AND file = ?3 LIMIT 2",
+                )?;
+                let hashes: Vec<String> = stmt
+                    .query_map(params![f, disamb, file], |r| r.get(0))?
+                    .collect::<rusqlite::Result<_>>()?;
+                match hashes.as_slice() {
+                    [h] => rebound.push((*aid, h.clone(), None)),
+                    [_, ..] => bail!(
+                        "anchor {file} :: {f} names a slot holding more than one distinct \
+                         body; which one the evidence proves is unknowable. Anchor the \
+                         exact twin via remember with an @<disamb> spec instead."
+                    ),
+                    [] => {
+                        let mut hstmt = store.conn.prepare(
+                            "SELECT DISTINCT file, body_hash FROM symbols
+                             WHERE fqn = ?1 AND disamb IS ?2 LIMIT 3",
+                        )?;
+                        let homes: Vec<(String, String)> = hstmt
+                            .query_map(params![f, disamb], |r| Ok((r.get(0)?, r.get(1)?)))?
+                            .collect::<rusqlite::Result<_>>()?;
+                        match homes.as_slice() {
+                            [(nf, h)] => rebound.push((*aid, h.clone(), Some(nf.clone()))),
+                            [] => bail!(
+                                "anchor {file} :: {f} no longer resolves in the current \
+                                 index; the code this fact describes moved or vanished. \
+                                 Supersede the memory (or re-anchor via remember) instead \
+                                 of reverifying it."
+                            ),
+                            _ => bail!(
+                                "anchor {file} :: {f} resolves in more than one place; \
+                                 which one the evidence proves is unknowable. Re-anchor \
+                                 via remember instead."
+                            ),
+                        }
+                    }
+                }
+            }
+            None => {
+                let hash: Option<String> = store
+                    .conn
+                    .query_row("SELECT hash FROM files WHERE path = ?1", [file], |r| r.get(0))
+                    .optional()?;
+                match hash {
+                    Some(h) => rebound.push((*aid, h, None)),
+                    None => bail!(
+                        "anchor {file} no longer resolves in the current index; the file \
+                         is gone. Supersede the memory (or re-anchor via remember) \
+                         instead of reverifying it."
+                    ),
+                }
+            }
+        }
+    }
+
+    use sha2::{Digest, Sha256};
+    let d = Sha256::digest(output.as_bytes());
+    let digest: String = d[..16].iter().map(|b| format!("{b:02x}")).collect();
+    // A reverify is a FRESH proof, not a passive heal: it earns the same
+    // confidence a brand-new verified fact gets from remember (0.95), never
+    // less. The stored refund still applies when it is somehow higher, and
+    // an entry penalized before schema v8 (no stored refund) recovers fully
+    // instead of being stuck at the stale floor its NULL would refund
+    // (found by the 0.16 dogfood: a real queue item drained to 0.5).
+    let refunded = quantize_confidence(conf_before.unwrap_or(confidence).max(0.95));
+    let now = now_iso();
+
+    let tx = store.conn.unchecked_transaction()?;
+    for (aid, h, new_file) in &rebound {
+        match new_file {
+            Some(nf) => tx.execute(
+                "UPDATE anchors SET ast_body_hash = ?1, file = ?2 WHERE id = ?3",
+                params![h, nf, aid],
+            )?,
+            None => tx.execute(
+                "UPDATE anchors SET ast_body_hash = ?1 WHERE id = ?2",
+                params![h, aid],
+            )?,
+        };
+    }
+    // The status guard re-checks inside the transaction: a supersede racing
+    // this call between the read above and here must not be resurrected.
+    let changed = tx.execute(
+        "UPDATE entries SET
+            source = 'verified', status = 'active', stale_reason = NULL,
+            confidence = ?2, conf_before_stale = NULL,
+            evidence_cmd = ?3, evidence_digest = ?4, evidence_ran_at = ?5
+         WHERE id = ?1 AND status NOT IN ('superseded', 'invalidated')",
+        params![id, refunded, command, digest, now],
+    )?;
+    if changed == 0 {
+        bail!("memory {id} changed state mid-call (superseded or invalidated); nothing written");
+    }
+    // A reverify is a deliberate state change and must win the LWW merge on
+    // peers, or an already-synced machine keeps serving the stale version.
+    crate::tools::bump_updated_at(&tx, id)?;
+    tx.commit()?;
+    Ok(ReverifyResult { anchors_rebound: rebound.len(), confidence: refunded })
 }
 
 pub fn forget(store: &Store, id: &str) -> Result<bool> {

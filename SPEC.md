@@ -1,3 +1,123 @@
+# SPEC: the refinement loop, v0.16.0
+
+Status: QA COMPLETE (2026-08-15), shipping. Personal-tool phase: gates
+unchanged, adoption pressure dropped by owner decision.
+
+Closes the re-verification half of refinement: a flagged memory gets a
+first-class path back to trusted. Must land before v1.0 because reverify
+changes the tool API and the API freezes at 1.0.
+
+## INVARIANTS
+
+- I-R1: reverify never guesses. An anchor that cannot re-resolve against the
+  CURRENT index refuses the whole op naming the anchor, and so does a slot
+  holding more than one distinct body or resolving in more than one file
+  (which body the evidence proves is unknowable); no half-reverified entry
+  exists. A slot found whole in exactly ONE other file follows the rename
+  and repairs anchors.file.
+- I-R2: confidence refund is decay-once-per-reason. The pre-stale value is
+  stored on the active->stale transition ONLY, HEAL restores exactly it, and
+  it clears after either consumer. Reverify is a fresh proof, not a heal: it
+  pays max(stored refund, the verified earn 0.95). A stale entry re-staling
+  never re-stores the penalized value. The refund is a future confidence, so
+  import caps it per source exactly like confidence itself. Every
+  confidence write stays ROUND(...,6) (CONF).
+- I-R1b: reverify applies remember's whole evidence policy (secret scan on
+  command AND output, non-empty both, output digested never stored), and an
+  entry of ANY source gains verified through fresh evidence, remember's own
+  rule, stated in the tool description.
+- I-R3: any state change replicating through LWW bumps updated_at strictly
+  (bump_updated_at), and the new column travels the JSONL wire additively
+  (omitted when NULL; old binaries ignore it; import clamps to [0,1]).
+- I-R4: consolidation LISTS, never writes. The distilled entry and its
+  supersedes links go through the existing guarded write paths.
+- I-R5: doctor advisories never flip the ok flag (0.10 contract); the
+  stale-image check is best-effort, silent on any parse failure, and
+  read-only surfaces stay guard-free.
+- I-R6: schema v8 is additive (conf_before_stale REAL), pragma self-gated,
+  true no-op on re-run, no refill (no derived data changed).
+- Carried: I3, BENCH >= 4.0x, CONF, POS, hot-path panic ratchet.
+
+## STATE / DATA MODEL
+
+- entries.conf_before_stale REAL NULL (v8). Written on active->stale with
+  the pre-penalty value; read+cleared on heal (resolve_all) and reverify.
+- Export line: "conf_before_stale": <f64> omitted when NULL.
+- No new tables. verify_queue query unchanged.
+
+## SURFACES
+
+- admin {op:"reverify", id, command, output}: entry must exist, not
+  superseded/archived/invalidated; command+output non-empty; command
+  secret-scanned (remember's evidence rules). Effects, one tx: every anchor
+  re-resolves against the current index (symbol anchors re-read their slot
+  hash, file anchors the file hash; any failure refuses, I-R1);
+  evidence_cmd/digest/ran_at re-stamped; source='verified';
+  confidence = the verified earn (0.95) or the stored refund when higher,
+  quantized (a fresh proof is never worth less than a new verified fact;
+  found by the dogfood draining a pre-v8 item to the 0.5 floor);
+  conf_before_stale=NULL; status='active'; stale_reason=NULL;
+  bump_updated_at. Returns {id, anchors_rebound, confidence}.
+- admin {op:"consolidate"}: read-only candidate clusters. Group
+  non-superseded, non-archived entries by anchored (file, symbol_fqn) with
+  >=2 members; pairwise token jaccard >= 0.5 forms a cluster; caps: 10
+  clusters, 6 members each, disclosed via truncated flag. Returns
+  {anchor, ids, kinds, previews (120ch), mean_overlap}.
+- doctor: advisory "server images" check (unix only): `ps -axo
+  pid=,etime=,command=` rows containing `limpet serve`, elapsed parsed from
+  etime; a process older than the installed binary's mtime is a stale image
+  -> note listing PIDs + restart hint. ok/warn/note only.
+
+## ATTACK SURFACE / HAZARDS
+
+- Forged reverify: output is digested, never trusted as proof of execution;
+  same trust model as remember's evidence. Secret scan on command; oversize
+  output refused (MAX_BODY_BYTES).
+- Reverify on a twin: anchors re-read THEIR slot (fqn+disamb exact), never
+  a wildcard; a vanished slot refuses (I-R1).
+- Refund poisoning via import: conf_before_stale clamped to [0,1] and
+  quantized on import; a 1e300 cannot park a future refund above cap.
+- Consolidation spam: caps + read-only.
+- Penalty CASE ordering: conf_before_stale must be SET in the same UPDATE
+  that penalizes, reading the pre-update confidence (SQLite reads old row
+  values within one UPDATE), and only WHEN status='active'.
+
+## Task Implementation Checklist: 0.16.0
+
+- [x] T2 store.rs: schema v8 (entries.conf_before_stale ALTER, self-gate,
+      SCHEMA_V1 DDL, SCHEMA_VERSION 7->8, version tests, reopen no-op test);
+      export/import carry the field (clamp+quantize on import)
+- [x] T2 anchor.rs resolve_all: stale transition stores pre-penalty value;
+      heal transition refunds + clears; branch-switch round-trip test
+      proving confidence-neutral; re-stale-while-stale keeps stored value
+- [x] T1 tools.rs + memory: admin reverify op per SURFACES + tool schema +
+      README; tests: drain-own-queue shape (stale verified fact reverifies
+      to active with refunded confidence + new digest), refusal on
+      unresolvable anchor, refusal on superseded/archived/invalidated,
+      secret in command refused, LWW bump proven
+- [x] T3 tools.rs: admin consolidate op + tests (cluster found on
+      same-anchor high-overlap episodes; unrelated bodies excluded; caps)
+- [x] T4 main.rs doctor: stale server-image advisory + fixture-free unit
+      test for the etime parser; never flips ok
+- [x] Docs: README (verify_queue -> reverify loop, consolidate, doctor
+      note), ROADMAP (0.16 -> Shipped), tool schema text, docs_in_sync
+- [x] QA (2026-08-15): 15/15 suites (13 refinement tests), clippy 0 (known
+      MSRV lint only), ratchet ok, bench 4.2x/5.4x, demo exit 0, em-dash 0.
+      Two-process v7->v8 dogfood on a live-store copy: schema 8, statuses
+      unchanged, REAL queue item drained over stdio (mcp-publisher validate
+      re-run, entry active at 0.95, queue 3->2), consolidate clean.
+      Whole-branch adversarial review (25 agents): 9 confirmed findings = 5
+      distinct defects, ALL FIXED same day: per-source cap on imported
+      refunds (laundering closed), multi-body slot + multi-home refusals in
+      the reverify rebind (plus single-home rename follow), LWW refund-wash
+      preservation, consolidate twin self-pair dedupe + whole-cluster
+      mean_overlap + group caps + anchors_elsewhere, in-tx status guard,
+      output secret scan, doctor wording, docs_in_sync coverage. 1 refuted
+      (git-mv dead-end: fqn embeds the path, so the scenario cannot occur).
+- [ ] Ship: 0.16.0 sync via /deploy-limpet
+
+---
+
 # SPEC: freshness at scale, part 2, v0.15.0
 
 Status: SHIPPED 2026-08-13 (PR #27 merged, tag v0.15.0; GitHub release 12

@@ -29,7 +29,10 @@ fn every_shipped_tool_is_documented() {
 fn every_admin_op_is_documented() {
     let readme = readme();
     // The ops tool_admin actually handles; keep the README admin row honest.
-    for op in ["index", "status", "forget", "archive", "restore", "export", "import", "ledger"] {
+    for op in [
+        "index", "status", "forget", "archive", "restore", "export", "import", "ledger",
+        "reverify", "consolidate",
+    ] {
         assert!(
             readme.contains(op),
             "admin op '{op}' is handled but not documented in README.md"
