@@ -545,7 +545,7 @@ fn tool_verify_queue(store: &Store, sweep: &SweepReport) -> Result<Value> {
 /// deliberate state change (archive/restore) always wins the export/import
 /// LWW merge on peers. `max(now, current + 1s)` covers the same-wall-clock-
 /// second case, where an equal stamp would be skipped as already-synced.
-fn bump_updated_at(tx: &rusqlite::Transaction<'_>, id: &str) -> Result<()> {
+pub(crate) fn bump_updated_at(tx: &rusqlite::Transaction<'_>, id: &str) -> Result<()> {
     let current: String = tx.query_row(
         "SELECT updated_at FROM entries WHERE id = ?1",
         [id],
@@ -685,7 +685,27 @@ fn tool_admin(store: &mut Store, root: &Path, sweep: &SweepReport, args: &Value)
             store.ledger_session_start()?;
             json!({ "reset": true })
         }
-        other => bail!("unknown admin op '{other}' (index|status|forget|archive|restore|export|import|ledger|ledger_reset)"),
+        // The verify_queue's closure: fresh evidence returns a stale
+        // verified fact to trusted, anchors re-bound to current code,
+        // penalty refunded. Refusals (missing/superseded/invalidated/
+        // archived entry, unresolvable anchor, secret-bearing command)
+        // come from memory::reverify with the fix named.
+        "reverify" => {
+            let id = str_arg(args, "id")?;
+            let command = str_arg(args, "command")?;
+            let output = str_arg(args, "output")?;
+            let r = memory::reverify(store, id, command, output)?;
+            json!({
+                "reverified": id,
+                "anchors_rebound": r.anchors_rebound,
+                "confidence": r.confidence,
+            })
+        }
+        // Read-only merge candidates: clusters of same-anchor, high-overlap
+        // entries worth distilling into one insight. Lists, never writes
+        // (I-R4); the distilled entry + supersedes links go through remember.
+        "consolidate" => consolidate_payload(store)?,
+        other => bail!("unknown admin op '{other}' (index|status|forget|archive|restore|export|import|ledger|ledger_reset|reverify|consolidate)"),
     };
     let meta = build_meta(
         store,
@@ -695,6 +715,134 @@ fn tool_admin(store: &mut Store, root: &Path, sweep: &SweepReport, args: &Value)
         0,
     );
     Ok(envelope(data, meta))
+}
+
+/// Candidate clusters for assisted consolidation: entries sharing one anchor
+/// target whose bodies overlap enough that they are probably restatements of
+/// one lesson accumulating instead of superseding. Read-only by invariant
+/// I-R4: the human or agent writes the distilled entry through remember and
+/// links `supersedes`; this op only points at where compaction is waiting.
+/// Threshold sits well below the near-dup refusal (0.9): consolidation is a
+/// suggestion, refusal is a verdict.
+fn consolidate_payload(store: &Store) -> Result<Value> {
+    const MIN_OVERLAP: f64 = 0.5;
+    const MAX_CLUSTERS: usize = 10;
+    const MAX_MEMBERS: usize = 6;
+    const PREVIEW_CHARS: usize = 120;
+
+    let mut stmt = store.conn.prepare(
+        "SELECT a.file, a.symbol_fqn, e.id, e.kind, e.body
+         FROM anchors a JOIN entries e ON e.id = a.entry_id
+         WHERE e.status IN ('active','stale')
+           AND NOT EXISTS (SELECT 1 FROM archived ar WHERE ar.entry_id = e.id)
+         ORDER BY a.file, a.symbol_fqn, e.id",
+    )?;
+    let rows: Vec<(String, Option<String>, String, String, String)> = stmt
+        .query_map([], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+
+    // (file, fqn) -> [(entry id, kind, body)]
+    type Member = (String, String, String);
+    let mut groups: std::collections::BTreeMap<(String, String), Vec<Member>> =
+        std::collections::BTreeMap::new();
+    for (file, fqn, id, kind, body) in rows {
+        let key = (file, fqn.unwrap_or_default());
+        groups.entry(key).or_default().push((id, kind, body));
+    }
+
+    let mut clusters: Vec<Value> = Vec::new();
+    let mut total = 0usize;
+    for ((file, fqn), members) in &groups {
+        if members.len() < 2 {
+            continue;
+        }
+        let toks: Vec<std::collections::HashSet<String>> = members
+            .iter()
+            .map(|(_, _, b)| memory::significant_tokens(b))
+            .collect();
+        // Connected components over the pairwise-overlap graph: A~B and B~C
+        // cluster A,B,C even when A and C drifted below the threshold, which
+        // is exactly the restated-lesson accumulation shape.
+        let n = members.len();
+        let mut comp: Vec<usize> = (0..n).collect();
+        fn find(comp: &mut [usize], i: usize) -> usize {
+            let mut r = i;
+            while comp[r] != r {
+                r = comp[r];
+            }
+            comp[i] = r;
+            r
+        }
+        let mut pair_overlap: std::collections::HashMap<(usize, usize), f64> =
+            std::collections::HashMap::new();
+        for i in 0..n {
+            for j in i + 1..n {
+                let o = memory::jaccard(&toks[i], &toks[j]);
+                if o >= MIN_OVERLAP {
+                    pair_overlap.insert((i, j), o);
+                    let (ri, rj) = (find(&mut comp, i), find(&mut comp, j));
+                    if ri != rj {
+                        comp[ri] = rj;
+                    }
+                }
+            }
+        }
+        let mut by_root: std::collections::BTreeMap<usize, Vec<usize>> =
+            std::collections::BTreeMap::new();
+        for i in 0..n {
+            let r = find(&mut comp, i);
+            by_root.entry(r).or_default().push(i);
+        }
+        for (_, idxs) in by_root {
+            if idxs.len() < 2 {
+                continue;
+            }
+            total += 1;
+            if clusters.len() >= MAX_CLUSTERS {
+                continue;
+            }
+            let shown: Vec<usize> = idxs.iter().copied().take(MAX_MEMBERS).collect();
+            let mut overlaps: Vec<f64> = Vec::new();
+            for &i in &shown {
+                for &j in &shown {
+                    if i < j {
+                        if let Some(o) = pair_overlap.get(&(i, j)) {
+                            overlaps.push(*o);
+                        }
+                    }
+                }
+            }
+            let mean = if overlaps.is_empty() {
+                0.0
+            } else {
+                overlaps.iter().sum::<f64>() / overlaps.len() as f64
+            };
+            let anchor = if fqn.is_empty() {
+                file.clone()
+            } else {
+                format!("{file} :: {fqn}")
+            };
+            clusters.push(json!({
+                "anchor": anchor,
+                "ids": shown.iter().map(|&i| members[i].0.clone()).collect::<Vec<_>>(),
+                "kinds": shown.iter().map(|&i| members[i].1.clone()).collect::<Vec<_>>(),
+                "previews": shown
+                    .iter()
+                    .map(|&i| members[i].2.chars().take(PREVIEW_CHARS).collect::<String>())
+                    .collect::<Vec<_>>(),
+                "mean_overlap": (mean * 100.0).round() / 100.0,
+                "members_truncated": idxs.len() > MAX_MEMBERS,
+            }));
+        }
+    }
+    Ok(json!({
+        "clusters": clusters,
+        "candidates_found": total,
+        "truncated": total > MAX_CLUSTERS,
+        "next": "distill a cluster into one entry via remember, then link supersedes to its members",
+    }))
 }
 
 /// The full ledger payload: session + lifetime + the method string that
@@ -838,13 +986,15 @@ pub fn tool_schemas() -> Value {
         },
         {
             "name": "admin",
-            "description": "Maintenance: op=index (full reindex), status (includes private and archived counts), forget (id, permanent), archive / restore (id: archive hides a memory from recall, the verify queue, and map without deleting it; its staleness keeps tracking the code underneath, and restore brings it back with its current, truthful status), export / import (JSONL at .limpet/memory.jsonl for team sharing via git; private memories are withheld from export and counted in private_withheld; archived entries export with an archived flag), ledger (token-savings receipt: session + lifetime + methodology) / ledger_reset.",
+            "description": "Maintenance: op=index (full reindex), status (includes private and archived counts), forget (id, permanent), archive / restore (id: archive hides a memory from recall, the verify queue, and map without deleting it; its staleness keeps tracking the code underneath, and restore brings it back with its current, truthful status), export / import (JSONL at .limpet/memory.jsonl for team sharing via git; private memories are withheld from export and counted in private_withheld; archived entries export with an archived flag), ledger (token-savings receipt: session + lifetime + methodology) / ledger_reset, reverify (id + command + output: accept a fresh run of a verify_queue item's proving command; re-stamps the evidence digest and timestamp, re-binds every anchor to the current code, refunds the stale confidence penalty, and returns the entry to active as verified; refuses when any anchor no longer resolves, when the entry is superseded/invalidated/archived, or when the command carries a credential), consolidate (read-only merge candidates: clusters of same-anchor entries whose bodies overlap enough to be one lesson restated; distill a cluster into one entry via remember and link supersedes to its members; nothing is merged automatically).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "op": { "type": "string", "enum": ["index","status","forget","archive","restore","export","import","ledger","ledger_reset"] },
+                    "op": { "type": "string", "enum": ["index","status","forget","archive","restore","export","import","ledger","ledger_reset","reverify","consolidate"] },
                     "id": { "type": "string" },
-                    "path": { "type": "string" }
+                    "path": { "type": "string" },
+                    "command": { "type": "string", "description": "reverify: the proving command that was actually run." },
+                    "output": { "type": "string", "description": "reverify: what the command printed; the decisive lines, not the whole log." }
                 },
                 "required": ["op"]
             }
@@ -861,5 +1011,92 @@ pub fn dispatch_for_test(name: &str, store: &Store, args: &Value) -> Result<Valu
     match name {
         "map" => tool_map(store, &sweep, args),
         other => Err(anyhow!("unknown tool '{other}'")),
+    }
+}
+
+#[cfg(test)]
+mod consolidate_tests {
+    use super::*;
+    use crate::memory::{self, AnchorSpec};
+    use crate::store::Store;
+
+    fn seeded() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("ship.rs"),
+            "pub fn deploy(n: u32) -> u32 {\n    let mut t = 0;\n    for i in 0..n {\n        t += i;\n    }\n    t\n}\npub fn retry(n: u32) -> u32 {\n    n * 2\n}\n",
+        )
+        .unwrap();
+        let store = Store::open_in_memory().unwrap();
+        crate::index::full_index(&store, dir.path()).unwrap();
+        (dir, store)
+    }
+
+    fn note(store: &Store, body: &str, symbol: &str) -> String {
+        memory::remember(
+            store,
+            "episode",
+            body,
+            "explicit",
+            None,
+            &[AnchorSpec { file: "ship.rs".into(), symbol: Some(symbol.into()) }],
+            None,
+            &[],
+            None,
+            false,
+            None,
+            false,
+        )
+        .unwrap()
+        .id
+    }
+
+    #[test]
+    fn overlapping_same_anchor_entries_cluster_and_strangers_do_not() {
+        let (_dir, store) = seeded();
+        let a = note(&store, "deploy fails when the cache dir is missing on staging", "deploy");
+        let b = note(&store, "deploy fails when the cache dir is missing on prod boxes too", "deploy");
+        let c = note(&store, "the retry loop backs off after three failures with jitter", "retry");
+
+        let v = consolidate_payload(&store).unwrap();
+        let clusters = v["clusters"].as_array().unwrap();
+        assert_eq!(clusters.len(), 1, "{v}");
+        let ids: Vec<&str> =
+            clusters[0]["ids"].as_array().unwrap().iter().map(|x| x.as_str().unwrap()).collect();
+        assert!(ids.contains(&a.as_str()) && ids.contains(&b.as_str()), "{v}");
+        assert!(!ids.contains(&c.as_str()), "an unrelated anchor never joins: {v}");
+        assert!(clusters[0]["anchor"].as_str().unwrap().contains("deploy"), "{v}");
+        assert!(clusters[0]["mean_overlap"].as_f64().unwrap() >= 0.5, "{v}");
+        assert_eq!(v["candidates_found"], 1, "{v}");
+        assert_eq!(v["truncated"], false, "{v}");
+    }
+
+    #[test]
+    fn low_overlap_same_anchor_entries_do_not_cluster() {
+        let (_dir, store) = seeded();
+        note(&store, "deploy fails when the cache dir is missing on staging", "deploy");
+        note(&store, "rollback needs the previous artifact kept for two versions", "deploy");
+        let v = consolidate_payload(&store).unwrap();
+        assert_eq!(v["clusters"].as_array().unwrap().len(), 0, "{v}");
+    }
+
+    #[test]
+    fn superseded_and_archived_entries_never_appear() {
+        let (_dir, store) = seeded();
+        let a = note(&store, "deploy fails when the cache dir is missing on staging", "deploy");
+        let b = note(&store, "deploy fails when the cache dir is missing on prod boxes too", "deploy");
+        store
+            .conn
+            .execute("UPDATE entries SET status='superseded' WHERE id = ?1", [&a])
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO archived(entry_id, archived_at) VALUES (?1, '2026-08-15T00:00:00Z')",
+                [&b],
+            )
+            .unwrap();
+        let v = consolidate_payload(&store).unwrap();
+        assert_eq!(v["clusters"].as_array().unwrap().len(), 0, "{v}");
     }
 }

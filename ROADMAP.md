@@ -77,34 +77,21 @@ built.
   50k-file repo pays 1.2s per sweep call (p50, against a 250 ms bar), so the
   FS-event watcher graduates from "unbuilt unless proven needed" to a
   designed backlog item, gated on this bench (see the bets table).
-
-## v0.16: the refinement loop
-
-The staleness engine closes the detect half of refinement: rot is flagged
-deterministically and nothing goes stale silently. The 0.14 truth layer closed
-the write-time half (conflicts surfaced, duplicates refused). This milestone
-closes the re-verification half, so a flagged memory has a first-class path
-back to trusted instead of a manual supersede. It must land before the v1.0
-freeze because `reverify` adds a tool op and the tool API freezes at 1.0.
-
-- **`reverify` op.** `verify_queue` hands out the proving command but nothing
-  accepts the result; the only closure today is a new entry plus a supersedes
-  link, and `evidence_ran_at` can never refresh in place. The op takes an
-  entry id plus fresh evidence (command, output), re-stamps the digest and
-  timestamp, restores confidence, and returns the entry to active. Gate: the
-  verify queue drains measurably on limpet's own store, and the envelope
-  carries the new digest.
-- **Healing refunds confidence.** `resolve_all` heals status but the stale
-  penalty is permanent, so transient disappearances (branch switches, mid
-  rebase) compound the penalty with zero knowledge change. Store the
-  pre-stale confidence and restore it when the same hash returns. Gate: a
-  fixture proving a branch-switch round trip is confidence-neutral. This is
-  the "decay once per reason" principle applied to reasons that evaporate.
-- **Assisted consolidation.** Episodes accumulate forever; there is no
-  assisted path to distill a cluster (same anchor, high body overlap) into
-  one insight that supersedes its parts. An admin op lists merge candidates;
-  the human or agent writes the distilled entry. Gate: recall precision holds
-  and the store-growth receipt shows the compaction.
+- **v0.16.0: the refinement loop.** The staleness engine already closed the
+  detect half (rot flagged deterministically) and 0.14 closed the write-time
+  half (conflicts surfaced, duplicates refused); this closes re-verification,
+  landing before the v1.0 freeze because it changes the tool API. `admin
+  {op:"reverify"}` accepts a fresh run of a verify_queue item's proving
+  command: evidence digest and timestamp re-stamped, every anchor re-bound to
+  the current code (refused, never guessed, when one no longer resolves), and
+  the entry returned to active as verified. Healing became confidence-neutral:
+  schema v8 stores the pre-stale confidence and refunds it when the reason
+  evaporates, so a branch switch costs a memory nothing (decay once per
+  reason). `admin {op:"consolidate"}` lists same-anchor, high-overlap
+  clusters worth distilling into one superseding entry, and never merges
+  anything itself. `limpet doctor` now names `limpet serve` processes running
+  a code image older than the installed binary, so a post-update session that
+  suddenly errors is diagnosed in one line instead of debugged.
 
 ## v1.0: the stability contract (not features)
 

@@ -614,6 +614,15 @@ fn doctor_run(args: &[String], post_update: bool) -> Result<bool> {
         Err(e) => println!("note statusline: cannot locate Claude config dir: {e}"),
     }
 
+    // 3b. Server images (advisory, never flips ok). After `limpet update`
+    // replaces the binary on disk, every already-running `limpet serve`
+    // keeps its old code image; the version guard blocks their writes
+    // loudly (issue #9), but the sessions they serve just see erroring
+    // tools with no explanation. Surface which PIDs are stale so the user
+    // restarts the right clients instead of debugging a "broken" store.
+    #[cfg(unix)]
+    server_image_advisory(&exe);
+
     // 4. This repo's store.
     let root = root_from(args)?;
     let db = store::Store::default_db_path(&root);
@@ -773,4 +782,87 @@ fn uninstall() -> Result<()> {
     let data_dir = base.parent().and_then(|p| p.parent()).unwrap_or(&base);
     println!("memory stores under {} are untouched.", data_dir.display());
     Ok(())
+}
+
+/// Parse a `ps` etime value (`[[dd-]hh:]mm:ss`) to seconds. None on any
+/// deviation: this feeds an advisory, and a wrong guess is worse than
+/// silence.
+fn parse_etime_secs(s: &str) -> Option<u64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let (days, rest) = match s.split_once('-') {
+        Some((d, r)) => (d.parse::<u64>().ok()?, r),
+        None => (0, s),
+    };
+    let parts: Vec<&str> = rest.split(':').collect();
+    let (h, m, sec): (u64, u64, u64) = match parts.as_slice() {
+        [h, m, sec] => (h.parse().ok()?, m.parse().ok()?, sec.parse().ok()?),
+        [m, sec] => (0, m.parse().ok()?, sec.parse().ok()?),
+        _ => return None,
+    };
+    if m >= 60 || sec >= 60 {
+        return None;
+    }
+    Some(days * 86_400 + h * 3_600 + m * 60 + sec)
+}
+
+/// Doctor advisory: list `limpet serve` processes that started BEFORE the
+/// installed binary was last replaced, i.e. stale code images. Best effort
+/// by contract (advisories never flip ok): any read or parse failure prints
+/// nothing. The 5-second slack absorbs a swap racing this very check.
+#[cfg(unix)]
+fn server_image_advisory(installed: &std::path::Path) {
+    let Ok(meta) = std::fs::metadata(installed) else { return };
+    let Ok(modified) = meta.modified() else { return };
+    let Ok(binary_age) = modified.elapsed() else { return };
+    let Ok(out) = std::process::Command::new("ps")
+        .args(["-axo", "pid=,etime=,command="])
+        .output()
+    else {
+        return;
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut stale: Vec<String> = Vec::new();
+    for line in text.lines() {
+        if !line.contains("limpet serve") {
+            continue;
+        }
+        let mut it = line.split_whitespace();
+        let (Some(pid), Some(etime)) = (it.next(), it.next()) else { continue };
+        if let Some(elapsed) = parse_etime_secs(etime) {
+            if elapsed > binary_age.as_secs() + 5 {
+                stale.push(pid.to_string());
+            }
+        }
+    }
+    if !stale.is_empty() {
+        println!(
+            "note server images: {} `limpet serve` process(es) predate the installed \
+             binary (pid {}). They run an older code image; the version guard blocks \
+             their writes, but their sessions' limpet tools will error until those \
+             clients restart.",
+            stale.len(),
+            stale.join(", ")
+        );
+    }
+}
+
+#[cfg(test)]
+mod etime_tests {
+    use super::parse_etime_secs;
+
+    #[test]
+    fn parses_every_ps_etime_shape() {
+        assert_eq!(parse_etime_secs("05:09"), Some(309));
+        assert_eq!(parse_etime_secs("01:02:03"), Some(3723));
+        assert_eq!(parse_etime_secs("2-01:02:03"), Some(2 * 86_400 + 3723));
+        assert_eq!(parse_etime_secs("  00:07 "), Some(7));
+        assert_eq!(parse_etime_secs(""), None);
+        assert_eq!(parse_etime_secs("99"), None);
+        assert_eq!(parse_etime_secs("aa:bb"), None);
+        assert_eq!(parse_etime_secs("10:99"), None, "seconds field over 59 is junk");
+        assert_eq!(parse_etime_secs("1-2-3"), None);
+    }
 }

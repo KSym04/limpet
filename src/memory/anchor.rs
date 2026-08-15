@@ -718,8 +718,18 @@ pub fn resolve_all(store: &crate::store::Store) -> Result<ResolveReport> {
             // update status, so an already-stale entry keeps its confidence.
             // ROUND(..., 6): quantize the penalized confidence so f64 chains
             // stay clean in the store and export roundtrips bit-exactly.
+            // Decay once per reason, refunded when the reason evaporates
+            // (schema v8): the active->stale transition stores the
+            // pre-penalty confidence beside the penalized one. Both column
+            // expressions read the OLD row, so the stored value is the
+            // unpenalized confidence; an already-stale entry keeps whatever
+            // it stored on ITS transition (re-staling never re-stores a
+            // penalized value).
             store.conn.execute(
                 "UPDATE entries SET
+                    conf_before_stale = CASE
+                        WHEN status = 'active' THEN confidence
+                        ELSE conf_before_stale END,
                     confidence = ROUND(CASE
                         WHEN status = 'active' AND source = 'verified'
                             THEN MIN(confidence, 0.5)
@@ -731,8 +741,15 @@ pub fn resolve_all(store: &crate::store::Store) -> Result<ResolveReport> {
                 params![entry_id, reason],
             )?;
         } else {
+            // Healing refunds the exact pre-stale confidence and clears the
+            // stored value. Entries that were never penalized (already
+            // active, or invalidated without a stale transition) carry NULL
+            // and pass through unchanged.
             store.conn.execute(
-                "UPDATE entries SET status = 'active', stale_reason = NULL
+                "UPDATE entries SET
+                    confidence = ROUND(COALESCE(conf_before_stale, confidence), 6),
+                    conf_before_stale = NULL,
+                    status = 'active', stale_reason = NULL
                  WHERE id = ?1 AND status != 'superseded'",
                 [entry_id],
             )?;

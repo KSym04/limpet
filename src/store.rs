@@ -10,7 +10,7 @@ use rusqlite::Connection;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 
 pub struct Store {
     pub conn: Connection,
@@ -79,7 +79,8 @@ CREATE TABLE IF NOT EXISTS entries (
   branch TEXT,
   evidence_cmd TEXT,
   evidence_digest TEXT,
-  evidence_ran_at TEXT
+  evidence_ran_at TEXT,
+  conf_before_stale REAL
 );
 
 CREATE TABLE IF NOT EXISTS anchors (
@@ -298,6 +299,28 @@ fn migrate_to_v6(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Schema v8 (lazy migration): additive `entries.conf_before_stale`, the
+/// pre-penalty confidence stored on the active->stale transition and
+/// refunded on heal or reverify (decay once per reason, refunded when the
+/// reason evaporates). Pragma self-gated like v5/v7; no derived data, so no
+/// refill and no mtime zeroing.
+fn migrate_to_v8(conn: &Connection) -> Result<()> {
+    let present: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('entries') WHERE name = 'conf_before_stale'",
+        [],
+        |r| r.get(0),
+    )?;
+    if present == 0 {
+        add_column_tolerating_race(conn, "ALTER TABLE entries ADD COLUMN conf_before_stale REAL")?;
+    }
+    conn.execute(
+        "INSERT INTO meta_kv(k, v) VALUES('schema_version', ?1)
+         ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+        [SCHEMA_VERSION.to_string()],
+    )?;
+    Ok(())
+}
+
 /// Attempt an ADD COLUMN, tolerating exactly the multi-process race: two
 /// processes can both pass the pragma gate, SQLite serializes the ALTERs, and
 /// the loser fails with "duplicate column name". That failure means the column
@@ -424,6 +447,7 @@ impl Store {
         migrate_to_v5(&conn)?;
         migrate_to_v6(&conn)?;
         migrate_to_v7(&conn)?;
+        migrate_to_v8(&conn)?;
         refill_v7_content_once(&conn)?;
         Ok(Store { conn, session_base: std::cell::Cell::new(Ledger::default()) })
     }
@@ -439,6 +463,7 @@ impl Store {
         migrate_to_v5(&conn)?;
         migrate_to_v6(&conn)?;
         migrate_to_v7(&conn)?;
+        migrate_to_v8(&conn)?;
         refill_v7_content_once(&conn)?;
         Ok(Store { conn, session_base: std::cell::Cell::new(Ledger::default()) })
     }
@@ -640,7 +665,8 @@ impl Store {
             "SELECT id, kind, body, created_at, updated_at, source, confidence,
                     status, stale_reason, branch, evidence_cmd, evidence_digest,
                     evidence_ran_at, origin,
-                    EXISTS(SELECT 1 FROM archived a WHERE a.entry_id = entries.id)
+                    EXISTS(SELECT 1 FROM archived a WHERE a.entry_id = entries.id),
+                    conf_before_stale
              FROM entries WHERE private = 0 ORDER BY id",
         )?;
         let ids: Vec<serde_json::Value> = stmt
@@ -665,6 +691,11 @@ impl Store {
                 // only archived entries pay for the field on the wire.
                 if r.get::<_, bool>(14)? {
                     obj["archived"] = serde_json::json!(true);
+                }
+                // The stored refund travels too, or a heal on the peer
+                // restores nothing; only penalized entries pay for it.
+                if let Some(cb) = r.get::<_, Option<f64>>(15)? {
+                    obj["conf_before_stale"] = serde_json::json!(cb);
                 }
                 Ok(obj)
             })?
@@ -922,8 +953,9 @@ impl Store {
             tx.execute(
                 "INSERT INTO entries(id, kind, body, created_at, updated_at, source,
                                      confidence, status, stale_reason, branch,
-                                     evidence_cmd, evidence_digest, evidence_ran_at, origin)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
+                                     evidence_cmd, evidence_digest, evidence_ran_at, origin,
+                                     conf_before_stale)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
                  ON CONFLICT(id) DO UPDATE SET
                    kind=excluded.kind, body=excluded.body,
                    created_at=excluded.created_at, updated_at=excluded.updated_at,
@@ -932,7 +964,8 @@ impl Store {
                    branch=excluded.branch, evidence_cmd=excluded.evidence_cmd,
                    evidence_digest=excluded.evidence_digest,
                    evidence_ran_at=excluded.evidence_ran_at,
-                   origin=COALESCE(excluded.origin, origin)",
+                   origin=COALESCE(excluded.origin, origin),
+                   conf_before_stale=excluded.conf_before_stale",
                 rusqlite::params![
                     id,
                     kind,
@@ -957,6 +990,11 @@ impl Store {
                     obj["evidence_digest"].as_str(),
                     obj["evidence_ran_at"].as_str(),
                     origin,
+                    // Same clamp discipline as confidence: a hostile refund
+                    // must not park a future confidence outside [0,1].
+                    obj["conf_before_stale"]
+                        .as_f64()
+                        .map(|c| crate::memory::quantize_confidence(c.clamp(0.0, 1.0))),
                 ],
             )?;
             // Archival travels with the line: a winning (added/updated) line
@@ -1457,7 +1495,7 @@ mod tests {
             .unwrap();
         assert_eq!(private, 0, "pre-existing rows default to not-private");
         assert_eq!(origin, None);
-        assert_eq!(s.kv_get("schema_version").unwrap().as_deref(), Some("7"));
+        assert_eq!(s.kv_get("schema_version").unwrap().as_deref(), Some("8"));
     }
 
     #[test]
@@ -1560,7 +1598,7 @@ mod tests {
             .conn
             .query_row("SELECT v FROM meta_kv WHERE k='schema_version'", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(ver, "7");
+        assert_eq!(ver, "8");
         // Insert + read back an edge (CHECK constraint honored).
         store
             .conn
@@ -1599,7 +1637,7 @@ mod tests {
             .conn
             .query_row("SELECT v FROM meta_kv WHERE k='schema_version'", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(ver, "7");
+        assert_eq!(ver, "8");
         for rel in ["embeds", "mixin", "extends"] {
             store
                 .conn
@@ -1658,7 +1696,7 @@ mod tests {
             [], |r| r.get(0),
         ).unwrap();
         assert_eq!(present, 1, "fresh DDL must carry body_len");
-        assert_eq!(s.kv_get("schema_version").unwrap().as_deref(), Some("7"));
+        assert_eq!(s.kv_get("schema_version").unwrap().as_deref(), Some("8"));
     }
 
     #[test]
@@ -1840,7 +1878,7 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM symbols", [], |r| r.get(0))
             .unwrap();
         assert_eq!(kept, 1, "migration must not touch existing symbol rows");
-        assert_eq!(s.kv_get("schema_version").unwrap().as_deref(), Some("7"));
+        assert_eq!(s.kv_get("schema_version").unwrap().as_deref(), Some("8"));
     }
 
     #[test]
