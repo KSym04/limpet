@@ -17,6 +17,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      # Clippy runs on all three OSes, not on ubuntu alone, because the tree
+      # has real platform-gated code (src/util.rs #[cfg(windows)], src/main.rs
+      # #[cfg(unix)]). A single-OS lint never expands the other branch, so it
+      # would leave exactly the kind of hole this gate exists to close. Runs
+      # before the test build so a lint failure fails fast.
+      - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
       - run: cargo build --release --locked
       # Ratchet: no new panic sites on the MCP hot path (count can only go down).
@@ -24,3 +32,48 @@ jobs:
       # Full read-path smoke test on every OS: active -> stale -> healed, exits
       # non-zero on any unexpected state.
       - run: cargo run --locked -- demo
+
+  # Dependency advisories. Ubuntu only: the lockfile is one file and the
+  # verdict does not vary by runner OS, so three copies would only cost time.
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # Installed from crates.io rather than through the RustSec action: that
+      # action wants a GITHUB_TOKEN and `checks: write` to post annotations,
+      # and this workflow stays on `contents: read` with no secrets. The tool
+      # version is pinned so a cargo-audit release cannot silently change the
+      # verdict, and --locked builds it from its own lockfile.
+      - run: cargo install cargo-audit --locked --version 0.22.2
+      # The advisory DB is an explicit, named checkout instead of an implicit
+      # git fetch inside cargo-audit, so the source of the verdict is visible
+      # in the log and the job does no unlogged network access. It is tracking
+      # the DB's default branch on purpose and is NOT frozen to a commit:
+      # RUSTSEC-2026-0204 (published 2026-07-06) is the advisory that put this
+      # job here, so a frozen DB would read green through precisely the case
+      # the gate is meant to catch.
+      - uses: actions/checkout@v4
+        with:
+          repository: rustsec/advisory-db
+          ref: main
+          path: advisory-db
+      - run: cargo audit --no-fetch --db advisory-db
+
+  # The declared floor in Cargo.toml (`rust-version`) is only a promise until
+  # something builds on it. The toolchain is read from that field, not pinned
+  # here, so the two cannot drift in either direction: raising the floor
+  # without a matching toolchain is covered by cargo's own manifest check, and
+  # lowering it to a floor nothing builds turns this job red instead of green.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: msrv
+        run: echo "version=$(sed -n 's/^rust-version *= *"\(.*\)"/\1/p' Cargo.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      # Build only, not test: the gate is "the declared floor still compiles".
+      # The full suite already runs on stable across three OSes above.
+      - run: cargo build --locked

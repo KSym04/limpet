@@ -24,6 +24,24 @@ pub enum Lang {
 }
 
 impl Lang {
+    /// Every shipped grammar, in registry order. This is the canonical
+    /// enumeration the doc guard in `tests/docs_in_sync.rs` iterates, so a
+    /// grammar cannot be added without the README coverage lists being
+    /// checked for it. A new variant belongs here and in the matches below.
+    pub const ALL: [Lang; 11] = [
+        Lang::Php,
+        Lang::Js,
+        Lang::Ts,
+        Lang::Py,
+        Lang::Rust,
+        Lang::Cpp,
+        Lang::Go,
+        Lang::Java,
+        Lang::Ruby,
+        Lang::CSharp,
+        Lang::Bash,
+    ];
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Lang::Php => "php",
@@ -97,7 +115,7 @@ pub fn detect_with(path: &std::path::Path, ext_map: &HashMap<String, Lang>) -> O
                 let matches = name.len() > suffix.len()
                     && name.as_bytes()[name.len() - suffix.len() - 1] == b'.'
                     && name.ends_with(suffix.as_str());
-                if matches && best.map_or(true, |(len, _)| suffix.len() > len) {
+                if matches && best.is_none_or(|(len, _)| suffix.len() > len) {
                     best = Some((suffix.len(), *lang));
                 }
             }

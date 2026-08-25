@@ -1,13 +1,42 @@
 [package]
 name = "limpet"
-version = "0.16.0"
+version = "0.16.1"
 edition = "2021"
+# MSRV. Verified by building and testing on this exact toolchain, not guessed.
+# The floor is set by the dependency tree, not by limpet's own source: ureq ->
+# url -> idna -> idna_adapter -> icu_* 2.2 declare `rust-version = 1.86`, and
+# below that ureq -> rustls -> zeroize 1.9 is an edition-2024 crate, which
+# needs 1.85 just to parse. limpet's own code compiles well under this.
+# The CI `msrv` job pins this same version, so a bump here that is not built
+# fails CI instead of shipping.
+rust-version = "1.86"
 description = "small shell. long memory. Memory for AI coding agents that goes stale when your code does: AST-anchored, evidence-verified, local MCP server, zero network calls."
 license = "MIT"
 repository = "https://github.com/KSym04/limpet"
 readme = "README.md"
 keywords = ["mcp", "memory", "code-intelligence", "ai-agents", "tree-sitter"]
 categories = ["development-tools", "command-line-utilities"]
+# The publish surface, as an allowlist. Without this, `cargo package` takes
+# every git-tracked file, which shipped `.limpet/memory.jsonl` (this repo's
+# own memory export) inside the .crate tarball, plus bench fixtures, docs
+# images, and examples as dead weight. A crates.io tarball is immutable: a
+# version can be yanked, but what was uploaded stays downloadable, so the
+# allowlist has to be right before the publish, not after it.
+# What is here and why: `src/**` also carries the two `include_str!` targets
+# (src/skill.md via src/main.rs, src/ui.html via src/ui.rs); Cargo.lock is
+# what `cargo publish --locked` and `cargo install --locked` build against;
+# README.md, LICENSE, and SECURITY.md are what a reader needs to judge and
+# report against the crate. There is no build.rs, and the tests read only
+# README.md and src/**, so nothing outside this list is compiled or read.
+# Adding a file the build reads means adding it here in the same change.
+include = [
+    "src/**",
+    "Cargo.toml",
+    "Cargo.lock",
+    "README.md",
+    "LICENSE",
+    "SECURITY.md",
+]
 
 [dependencies]
 anyhow = "1"

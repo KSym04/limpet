@@ -2,9 +2,9 @@
 
 Versions are indicative: features earn their tag, they are not scheduled to a
 calendar. The spine through everything below is one rule: **every feature
-must feed one of the receipts (bench, ledger, rework counter) or the honesty
-envelope.** Anything that cannot show its number in `limpet stats` or flag its
-own staleness does not ship. That discipline is the product.
+must feed one of the receipts (bench, ledger) or the honesty envelope.**
+Anything that cannot show its number in `limpet stats` or flag its own
+staleness does not ship. That discipline is the product.
 
 The wedge is one capability no adjacent tool has: limpet notices when its own
 context goes stale. A vector index or a hand-written architecture doc returns
@@ -13,12 +13,13 @@ that: age is not truth, and a schedule cannot name which memory an edit broke.
 A deterministic AST-hash anchor is the only thing that flags the lie. Everything below deepens that edge or it does
 not ship.
 
-**Current focus (post-0.15): adoption before features.** The core promise is
-built and receipted; the bottleneck is people using it. The 0.14 truth-layer
-release carries that focus in the binary: `limpet demo` is the reproducible
-anchor-lifecycle proof (anchor -> edit -> stale -> heal, self-verifying), and
-`limpet seed` lets a working MEMORY.md come along instead of being abandoned.
-Feature work continues under the evidence gates below, unchanged.
+**Current focus (post-0.16): a personal tool.** 0.16 shipped the refinement
+loop, and with it the owner's decision that limpet is built for one person's
+own work: adoption is no longer a goal, so uptake is not a measure of
+anything here. Feature work continues under the same evidence gates below,
+unchanged. The next milestone is the 1.0 stability contract, and its value is
+plain from that framing: the store holds the owner's own memory, so the
+format and the API it depends on have to outlive the releases.
 
 ## Shipped
 
@@ -92,6 +93,19 @@ built.
   anything itself. `limpet doctor` now names `limpet serve` processes running
   a code image older than the installed binary, so a post-update session that
   suddenly errors is diagnosed in one line instead of debugged.
+- **v0.16.1: audit follow-ups.** The 2026-08-17 status audit's one security
+  defect and its cluster of unkept claims, closed. Secret detection stopped
+  depending on a credential being whitespace-delimited: sentence punctuation
+  ends a token, edges are peeled under a constant contraction budget (linear
+  time, DoS-proof, verified by timed tests), and the same classifier rules
+  apply unchanged. The ledger's `session` block is counted as recalls are
+  served, never inferred from a boot snapshot, and surfaces that serve no
+  recalls (the `stats` CLI, the UI) drop the key instead of publishing a
+  permanent zero. CI now gates clippy with warnings denied, `cargo audit`
+  against a live advisory DB, and the declared MSRV read from Cargo.toml.
+  Docs claims are tied to code by test: the `admin` op schema must equal the
+  dispatcher, and the README's own enumerating rows are read instead of the
+  whole file.
 
 ## v1.0: the stability contract (not features)
 
@@ -101,8 +115,7 @@ built.
   signature rather than a same-origin checksum.
 - Security review of the three choke points: path validation, parameterized
   SQL, secret detection.
-- Docs restructured around the three receipts: benchmark, live ledger,
-  rework-avoided.
+- Docs restructured around the two receipts: benchmark and live ledger.
 
 1.0 means one thing: your memory is safe to depend on for years.
 
