@@ -488,8 +488,13 @@ fn an_old_peer_line_cannot_wash_away_a_pending_refund() {
 
     let mut out = Vec::new();
     store.export_jsonl(&mut out).unwrap();
-    let mut obj: serde_json::Value =
-        serde_json::from_str(String::from_utf8(out).unwrap().lines().next().unwrap()).unwrap();
+    let text = String::from_utf8(out).unwrap();
+    // Skip the wire-format header: the peer line under edit is the ENTRY.
+    let entry_line = text
+        .lines()
+        .find(|l| l.contains("\"id\""))
+        .expect("export carries the entry");
+    let mut obj: serde_json::Value = serde_json::from_str(entry_line).unwrap();
     obj.as_object_mut().unwrap().remove("conf_before_stale");
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

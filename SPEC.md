@@ -1,3 +1,157 @@
+# SPEC: the stability contract, v1.0 (code half)
+
+Status: IN PROGRESS 2026-08-25. Source: the v1.0 roadmap milestone plus the
+0.16.1 audit's deferred table. This builds the ENGINEERING half of the
+contract: the guards, wire format, and tests that make the store safe to
+depend on for years. It does NOT tag 1.0, does not bump any version, and
+does not build the signed-binary half (deprioritized in the personal-tool
+phase). Tagging 1.0 is the owner's call once this has soaked.
+
+## INVARIANTS
+
+- I-S1: an older binary never writes to a store whose stamped schema_version
+  exceeds its own SCHEMA_VERSION. `Store::open` refuses loudly, naming both
+  versions and the fix, BEFORE any migration runs. Read-only display
+  surfaces (statusline, hook) never run this check: they open read-only,
+  print nothing, and exit 0 on any problem, unchanged.
+- I-S2: the schema_version stamp is monotonic on disk. No code path lowers
+  it: migrations stamp only forward, and re-running the chain on an
+  already-migrated store leaves the stamp untouched.
+- I-S3: the JSONL export names its format. The first line is a header
+  record `{"limpet_export": 1, "schema_version": N}`; import accepts a
+  missing header (every pre-1.0 file) unchanged, skips the header line as
+  data, and refuses the whole FILE loudly, naming both versions, when the
+  header claims a format newer than the binary supports. Per-line entry
+  guards and LWW semantics are byte-for-byte unchanged.
+- I-S4: one migration chain. `open` and `open_in_memory` run the same list
+  through one function, and a test asserts the two paths produce identical
+  schemas (sqlite_master SQL compared), so the chain cannot fork again.
+- I-S5: `limpet ui` is proven read-only and closed. Tests pin: an unknown
+  `?project=` key is refused (never opens an arbitrary path, proven against
+  a planted decoy store outside the data dir), unknown routes 404, and a
+  full request sweep leaves the store's logical content identical (every
+  real table dumped whole; file bytes are not the assertion because WAL
+  bookkeeping moves them). Scope: read-only is proven for current-schema
+  stores; on an older store the ui migrates forward like every read-write
+  surface, by design.
+- I-S6: every SQL statement in the tree binds values through parameters;
+  the only string interpolation in SQL text is compile-time constants.
+  Verified by review sweep, recorded here, and the secrets choke point
+  carries the 0.16.1 linear-time guarantee.
+- Carried: I3, BENCH >= 4.0x, CONF, POS, panic ratchet, docs_in_sync,
+  display surfaces read-only, migrations no-op on re-run, I-A1..I-A7.
+
+## ATTACK SURFACE / HAZARDS
+
+- The downgrade rewrite: 0.16.1 and earlier, an older binary opening a
+  newer store re-runs its own chain (each migration self-gated on table
+  state, so no DDL fires) and stamps its OWN SCHEMA_VERSION over the newer
+  stamp. The store then reads as old while carrying new columns, and the
+  next new binary re-stamps forward: the flip-flop is silent. I-S1/I-S2
+  close it.
+- A future export format read by an old import: measured, not assumed. A
+  0.16-and-earlier importer hits the header's missing `id` and ABORTS the
+  whole import transactionally ("entry missing id"): safe, nothing partial,
+  but unfriendly; the remedy is the current binary. The graceful refusal
+  naming both formats only exists going FORWARD (a 1.x binary reading a
+  2.x file).
+- `?project=` on the UI is attacker-adjacent input on a localhost socket;
+  resolve_project must stay an exact-match lookup against enumerated store
+  keys, never a path component.
+- The schema guard must not brick a LEGITIMATE downgrade rescue: refusal
+  names the exact remedy (run a current binary, or export from one), and
+  read paths (recall over an old serve) still work because the guard sits
+  on `open`'s migrating path... refusal IS the behavior there too; the
+  error text carries the way out. Display surfaces stay silent by design.
+
+## Task Implementation Checklist: v1.0 code half
+
+- [x] S1 schema guard + monotonic stamp (I-S1, I-S2): RED first (both tests
+      failed at branch base: the open succeeded and the stamp was rewritten
+      down), then `schema_guard` (refuses before any migration, names both
+      versions and the remedy) and `stamp_schema_version` (SQL-layer
+      forward-only WHERE clause) replacing the seven hand-copied stamps
+- [x] S2 export header + import format gate (I-S3): RED first (header and
+      future-format tests failed), then the header line on export and the
+      header/format branch on import. Two existing tests that parsed export
+      line 0 as an entry were updated to find the entry line (suite at S2
+      completion: 390 passed / 0 failed; the final tally lives in S6)
+- [x] S3 shared migration chain `run_migrations` called by both open paths,
+      with a sqlite_master equality test pinning the two schemas identical
+      (I-S4)
+- [x] S4 ui hardening tests (I-S5): unknown and traversal-shaped
+      `?project=` keys refused with no filesystem effect, unknown routes
+      404, and a full request sweep (hostile inputs included) leaves the
+      store's logical content identical (entries + meta_kv dump compared;
+      file bytes are not the assertion because WAL checkpoints move them)
+- [x] S5 SQL parameter sweep: every statement binds through parameters; the
+      only dynamic SQL text in the tree is the generated placeholder list
+      for remember's near-dup IN clause (src/memory/mod.rs:450-453), values
+      bound. STABILITY.md written at the repo root: frozen surfaces, the
+      guards enforcing them, and the explicit non-promises (I-S6)
+- [x] S6 QA, with one honest caveat. Pre-review gate (all green, local):
+      release build 0, suite 393 passed / 0 failed, clippy --all-targets 0
+      warnings, ratchet ok, bench true-exit 0 at 4.2x / 5.4x, demo 0, cargo
+      audit 0, em-dash 0 authored. Whole-branch adversarial review ran (18
+      confirmed findings, all fixed, round record below) and the fix suite
+      passed 15/15. Then the machine entered the documented Kaspersky kavd
+      exec semi-wedge (every fresh process launch stalls 10-22 s wall at ~0
+      CPU; `limpet demo` measured real 22.2 s / user 0.04 s), which expires
+      the ui tests' readiness windows: 3 ui tests in stability.rs AND the
+      untouched ledger_session ui test (green on this diff's base in
+      three-OS CI) fail locally on child-startup timeouts. That is the
+      machine, not the tree: the post-fix full local tally reads 394/3 with
+      exactly those wedge-shaped failures. CI (no Kaspersky, 3 OSes) is the
+      authoritative gate for this branch; the wedge clears only by the
+      owner restarting Kaspersky or rebooting
+- [ ] S7 PR on green CI; NO version bump, NO tag; 1.0 tagging is the
+      owner's tap after soak
+
+## S6 whole-branch review round (2026-08-25)
+
+Four dimensions (schema-guard, wire-format, ui-tests, docs-truth), every
+finding re-verified by an adversarial refuter with live repros. 19 raised, 1
+refuted, 18 confirmed. All fixed in this round:
+
+- IMPORTANT: I-S1 held only at open. A live `serve` handle kept writing
+  after a newer binary migrated the store forward through `limpet ui`
+  (which never stamps code_version), demonstrated end-to-end. Fixed:
+  `version_guard`, which every tool call runs, now also refuses when the
+  schema stamp exceeds the binary's SCHEMA_VERSION, read with the same CAST
+  coercion the monotonic stamp uses (a second finding: a strict Rust parse
+  disagreed with SQL CAST on stamps like '9x'). Pinned by a live-handle
+  test.
+- IMPORTANT: a failed bootstrap auto-import burned the one shot
+  (`indexed_at` stamps before the import runs), so a 0.16 teammate hitting
+  a headered export would silently never receive the shared memory even
+  after upgrading. Fixed: a `bootstrap_import_pending` marker makes the
+  next index retry until an import succeeds; pinned by a fail-repair-retry
+  test.
+- IMPORTANT x3, test blindness: the traversal test could not catch a
+  request-string-pathing resolve_project (fixed: planted decoy store
+  outside the data dir, key `../outside` must refuse); content_dump was
+  blind to archived/anchors/links/inherits (fixed: generic every-real-table
+  dump, rows sorted); the refused-open test proved nothing about migration
+  order (fixed: a dropped v8 column must stay dropped through the refusal,
+  which only holds when the guard precedes the chain).
+- Header lines carrying entry data were silently dropped uncounted (fixed:
+  only an id-less line is a header; a marker riding on an entry imports as
+  data), and a non-integer marker fabricated format 9223372036854775807 in
+  the refusal (fixed: honest "unrecognized marker" refusal). Both pinned.
+- Test hygiene: ui children now die via a Drop guard instead of leaking on
+  assert failure; spawn retries three fresh ports against the bind-race.
+- Docs: I-S5 and the schema_guard comment overclaimed ("bytes identical",
+  "byte-for-byte untouched"); both scoped to logical content with the WAL
+  caveat. STABILITY.md's refusal claims re-scoped and now true via the
+  version_guard extension; its SQL sweep sentence names both
+  runtime-assembled sites. ROADMAP's signed-binary line carries the owner's
+  deprioritization so the 1.0 tag cannot falsify it. S2's suite receipt
+  dated.
+- Refuted (1): the S2 "390 passed" receipt as drift; it reconciles as a
+  point-in-time record, kept with an explicit date instead.
+
+---
+
 # SPEC: audit follow-ups, v0.16.1
 
 Status: IN PROGRESS 2026-08-18. Source: the 2026-08-17 status audit (six

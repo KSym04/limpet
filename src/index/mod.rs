@@ -391,7 +391,31 @@ pub fn index_and_bootstrap(
 ) -> Result<(IndexReport, Option<ImportReport>)> {
     let was_fresh = store.kv_get("indexed_at")?.is_none();
     let report = full_index(store, root)?;
-    let import = if was_fresh { maybe_auto_import(store, root)? } else { None };
+    // A failed bootstrap import must not burn the one shot (2026-08-25
+    // review): `full_index` has already stamped `indexed_at` by the time the
+    // import runs, so without a retry marker one bad `.limpet/memory.jsonl`
+    // (for example a wire format this binary predates) would mean the shared
+    // memory is silently never delivered, even after the file or the binary
+    // is fixed. The marker survives until an attempt succeeds.
+    let retry = store.kv_get("bootstrap_import_pending")?.is_some();
+    let import = if was_fresh || retry {
+        match maybe_auto_import(store, root) {
+            Ok(r) => {
+                if retry {
+                    store
+                        .conn
+                        .execute("DELETE FROM meta_kv WHERE k='bootstrap_import_pending'", [])?;
+                }
+                r
+            }
+            Err(e) => {
+                store.kv_set("bootstrap_import_pending", "1")?;
+                return Err(e);
+            }
+        }
+    } else {
+        None
+    };
     Ok((report, import))
 }
 

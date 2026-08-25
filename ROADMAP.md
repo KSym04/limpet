@@ -112,7 +112,9 @@ built.
 - Store schema, JSONL export format, and tool API frozen, with documented
   migration guarantees; the version guard extends to schema migrations.
 - Signed release binaries (minisign), so `limpet update` verifies a maintainer
-  signature rather than a same-origin checksum.
+  signature rather than a same-origin checksum. Deprioritized in the
+  personal-tool phase (owner decision, 2026-08-15): it returns to scope only
+  if distribution ever matters again, and the 1.0 tag does not wait for it.
 - Security review of the three choke points: path validation, parameterized
   SQL, secret detection.
 - Docs restructured around the two receipts: benchmark and live ledger.
