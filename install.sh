@@ -22,7 +22,7 @@ arch=$(uname -m)
 case "$os/$arch" in
   Darwin/arm64)          target="aarch64-apple-darwin" ;;
   Linux/x86_64|Linux/amd64) target="x86_64-unknown-linux-gnu" ;;
-  *) fail "no prebuilt binary for $os/$arch — install Rust (https://rustup.rs) then run: cargo install limpet && limpet install" ;;
+  *) fail "no prebuilt binary for $os/$arch: install Rust (https://rustup.rs) then run: cargo install limpet && limpet install" ;;
 esac
 asset="limpet-$target"
 
@@ -61,7 +61,7 @@ say "verifying sha256"
   else
     fail "need shasum or sha256sum to verify the download"
   fi
-) || fail "sha256 mismatch — download corrupted or tampered, aborting"
+) || fail "sha256 mismatch: download corrupted or tampered, aborting"
 
 # --- install -----------------------------------------------------------------
 mkdir -p "$INSTALL_DIR"
@@ -74,11 +74,11 @@ say "installed $INSTALL_DIR/limpet"
 
 case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;
-  *) say "note: $INSTALL_DIR is not on your PATH — add this to your shell profile:"
+  *) say "note: $INSTALL_DIR is not on your PATH, add this to your shell profile:"
      say "  export PATH=\"$INSTALL_DIR:\$PATH\"" ;;
 esac
 
 # --- register with Claude Code -------------------------------------------------
 say "registering with Claude Code"
 "$INSTALL_DIR/limpet" install
-say "done — restart Claude Code, then type /limpet in any project"
+say "done, restart Claude Code, then type /limpet in any project"

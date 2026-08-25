@@ -189,7 +189,7 @@ cargo build --release
 python3 bench/token_savings.py
 ```
 
-And the number is not just a benchmark: limpet keeps **your own receipt**. Every recall is priced against its file-reading counterfactual with the same methodology, and `limpet stats` (or `admin {op:"ledger"}`, or the UI header) shows session and lifetime savings: tokens saved, reads avoided, recalls gross and distinct. Negative savings are shown, never floored, and anchorless memories count zero baseline, so the figure is a conservative floor, not marketing.
+And the number is not just a benchmark: limpet keeps **your own receipt**. Every recall is priced against its file-reading counterfactual with the same methodology. Inside a running server, `admin {op:"ledger"}` reports both a real session figure (tokens saved, reads avoided, recalls) and the lifetime one (the same, plus distinct queries); the `limpet stats` CLI and the UI header report lifetime only, because neither serves recalls and a session block there could only ever be a permanent zero. Negative savings are shown, never floored, and anchorless memories count zero baseline, so the figure is a conservative floor, not marketing.
 
 <p align="center">
   <img src="docs/statusline-savings.svg" alt="terminal statusline segment showing 9 active memories and 134k tokens saved" width="420">
@@ -312,7 +312,7 @@ Everyday commands:
 | `/limpet status` | counts and anything needing attention |
 | `/limpet review` | re-verify stale facts using their stored proof commands |
 | `/limpet export` | write `.limpet/memory.jsonl` to commit and share with the team |
-| `limpet stats` | the token-savings receipt: session + lifetime, methodology included |
+| `limpet stats` | the token-savings receipt: lifetime totals, methodology included (session figures come from `admin {op:"ledger"}` inside a running server) |
 | `limpet doctor` | one-screen setup diagnosis; also runs automatically after install and update |
 | `limpet ui` | knowledge graph at http://127.0.0.1:9748, all projects in one view |
 | `limpet statusline` | the statusline segment (memories + tokens saved), read-only and instant |
@@ -420,7 +420,7 @@ An optional `.limpet.json` at the repository root tunes two things. It is a plai
 
 ## 🧭 Roadmap
 
-See [ROADMAP.md](ROADMAP.md) for what has shipped (portable repo identity, the statusline doctor, the structural lineage graph, grammar wave 2 with eleven languages, the 0.13 freshness pass, and the 0.14 truth layer: verification as a ranking signal, contradictions surfaced and duplicates refused at write time), what this release carries (freshness at scale, part 2: FQN disambiguation with @-addressable twins, the slot-first anchor ladder, matched terms on recall items, and the lag-bench watcher verdict), and what is next (the refinement loop that closes the re-verification cycle, then the 1.0 stability contract). One rule governs all of it: a feature ships only if it feeds a receipt (`limpet stats`, the benchmark, rework-avoided) or the honesty envelope.
+See [ROADMAP.md](ROADMAP.md) for what has shipped (portable repo identity, the statusline doctor, the structural lineage graph, grammar wave 2 with eleven languages, the 0.13 freshness pass, the 0.14 truth layer: verification as a ranking signal, contradictions surfaced and duplicates refused at write time, 0.15 freshness at scale, part 2: FQN disambiguation with @-addressable twins, the slot-first anchor ladder, matched terms on recall items, and the lag-bench watcher verdict, and 0.16 the refinement loop: `admin` reverify returning a re-proved memory to active, the schema v8 confidence refund behind it, read-only consolidation candidates, and a doctor advisory, on macOS/Linux, for a stale running server image), what this release carries (the audit follow-ups: punctuation-boundary secret detection in guaranteed linear time, a `session` ledger figure that is counted rather than inferred and never published by a surface that served nothing, and CI gates for clippy, dependency advisories, and the declared MSRV), and what is next (the 1.0 stability contract). One rule governs all of it: a feature ships only if it feeds a receipt (the `limpet stats` ledger or the benchmark) or the honesty envelope.
 
 ## ⚖️ Reliance and license
 

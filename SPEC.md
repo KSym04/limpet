@@ -1,3 +1,276 @@
+# SPEC: audit follow-ups, v0.16.1
+
+Status: IN PROGRESS 2026-08-18. Source: the 2026-08-17 status audit (six
+assessors plus an adversarial critic, gates re-run live on 2499752). The audit
+found the codebase healthy and every gate green (344 tests, clippy 1 known
+MSRV lint, bench 4.33x true gate, 12 assets published) and surfaced one
+security defect plus a cluster of claims the repo makes and does not keep.
+This spec closes the defect and the false claims. It does NOT open v1.0 work
+(schema-guard extension, JSONL format version, rework counter, ui.rs tests):
+those are recorded at the end as the v1.0 backlog, unbuilt.
+
+## INVARIANTS
+
+- I-A1: secret detection never depends on a credential being delimited by
+  whitespace or the 2026-07 punctuation set. Sentence punctuation ends a
+  token, and leading/trailing punctuation is trimmed before any length or
+  charset gate, so `AKIA...` at the end of a sentence, in markdown emphasis,
+  or in parentheses classifies exactly as the bare token does. Detection stays
+  high-precision: ordinary prose about tokens must still store cleanly (the
+  existing negative tests are the floor, not the ceiling).
+- I-A2: the trim is a boundary rule, never a charset relaxation. A trimmed
+  token is classified by the SAME provider rules; no rule loosens its length
+  or charset test to absorb punctuation, so `AKIA` + 16 alnum + `X` is still
+  not a key.
+- I-A3: every receipt a doc names exists in code. `rework-avoided` has no
+  counter, no field, and no op, so the claim goes; the two real receipts
+  (bench, ledger) stay. Docs may not assert a capability the binary does not
+  carry.
+- I-A4: the `session` block in the ledger payload reports THIS process. A
+  surface that serves recalls counts them as it serves them; a surface that
+  structurally serves none (the `stats` CLI, `limpet ui`) drops the key rather
+  than publishing a permanent zero or a copy of lifetime. Lifetime figures are
+  unchanged by this fix. It binds EVERY surface that serves the payload: the
+  review round found `limpet ui` publishing the same copy.
+- I-A5: CI gates what the local QA gate gates. Clippy runs with warnings
+  denied, `cargo audit` runs at a pinned tool version against an advisory DB
+  tracking upstream, and the declared MSRV is built, so a "green CI" claim
+  covers the same surface the release checklist claims. The DB tracks upstream
+  deliberately: a commit-frozen DB would have read green straight through
+  RUSTSEC-2026-0204, the advisory that created the job. Any lint deliberately
+  kept carries an inline `#[allow]` with its reason, never an unexplained
+  warning.
+- I-A6: the agent-facing instruction file (`src/skill.md`) names every tool op
+  the shipped binary carries. A headline feature unreachable through the
+  documented flow is a shipped regression, not a docs nit. Enforced, not
+  remembered: `tests/docs_in_sync.rs` reads the shipped `admin` op enum and
+  asserts skill.md names each one.
+- I-A7: the em-dash sweep is byte-accurate over TRACKED files of every type
+  (`LC_ALL=C git grep $'\xe2\x80\x94'`), never an extension-filtered grep. The
+  0.14 and 0.16 receipts read "em-dash 0" while `install.sh` carried four: a
+  filtered sweep is a fabricated green. One exclusion is sanctioned and must
+  be NAMED in every receipt that uses it: `.limpet/memory.jsonl` holds
+  exported memory bodies, store data rather than authored text, and rewriting
+  stored bodies to satisfy a style sweep would falsify the data; the receipt
+  therefore reports authored files at zero and that file's own count beside
+  it, never a silent global zero.
+- Carried: I3, BENCH >= 4.0x, CONF, POS, hot-path panic ratchet, docs_in_sync,
+  display surfaces read-only, migrations no-op on re-run.
+
+## SURFACES
+
+- `secrets::detect`: the boundary is a CLASS, not a list. A character ends a
+  candidate token unless it is alphanumeric, `-`, `_`, or `.`, which covers
+  every Unicode punctuation and symbol (smart quotes, ellipsis, dashes,
+  fullwidth and ideographic marks) plus the ASCII characters an enumerated set
+  kept missing (`&` `%` `$` `^`, the URL query-string surface). `-` and `_`
+  stay unsplit because credential bodies embed them; `.` stays unsplit because
+  a JWT is three dot-joined segments, and is peeled at the token EDGES instead,
+  which reaches the sentence period without touching interior segments.
+  Classification then runs in two peels: pass 1 keeps `-`/`_` so a 39-char
+  `AIza` key ending in one is not trimmed THROUGH the exact `n == 39` gate;
+  pass 2 peels them too and only runs on a token pass 1 already rejected.
+  Applies on every write path that already scans: `remember` body + evidence,
+  `reverify` command + output, `import` per line.
+- `tools::ledger_payload`: `session` stopped being inferred (lifetime minus a
+  boot snapshot) and became COUNTED: `ledger_add`, the single sink every
+  recall already passes through, tallies an in-process accumulator beside the
+  shared meta_kv counters, so `session` can never go negative and never
+  mirrors lifetime. The `stats` CLI arm and `src/ui.rs` `/api/ledger` serve no
+  recalls, so both drop the `session` key entirely (`ui.html` reads `lifetime`
+  alone, so the panel is unchanged on screen); `serve` keeps reporting its own
+  honest tally. `ledger_session_start` survives as the `ledger_reset` guard:
+  the wiping process must not report a session larger than the lifetime it
+  just cleared.
+- `src/index/lang.rs`: `map_or` becomes `is_none_or`, unblocked by the
+  declared MSRV. The floor is 1.86, NOT 1.82: the ladder was run rung by rung
+  and 1.82/1.83/1.84 fail on the edition2024 gate (rustls -> zeroize 1.9.0)
+  and 1.85 fails on icu_* 2.2 / idna_adapter 1.2.2 (ureq -> url -> idna). No
+  MSRV comment existed to delete, and the justification was already false:
+  `src/store.rs:226` calls `is_none_or` today, so the tree required 1.82+
+  before this change.
+- `.github/workflows/ci.yml`: adds clippy (`-D warnings`), `cargo audit`, and
+  an MSRV build job to the existing 3-OS matrix.
+- Docs: `src/skill.md` (`/limpet review` drives `admin {op:"reverify"}` and
+  reports `{op:"consolidate"}` candidates), `README.md` roadmap pointer,
+  `ROADMAP.md` current-focus and spine rule, `install.sh` output strings.
+
+## ATTACK SURFACE / HAZARDS
+
+- The audit's proof of the defect: a credential followed by `.` became a
+  21-byte token, missing the `n == 20` AWS gate, the `n == 39` Google gate,
+  and the all-alphanumeric GitHub gate. It was then stored AND written to
+  `.limpet/memory.jsonl`, which is git-tracked against a public remote, while
+  `src/secrets.rs:3-5`, `SECURITY.md`, and `README.md:403` promised the
+  opposite. Reproduced end-to-end over MCP stdio against the shipped binary.
+- Trim widens what reaches the classifier, so the false-POSITIVE risk rises:
+  prose like "rotate the sk-key." must still store. Every negative test in the
+  existing suite is re-run, and new prose negatives are added alongside the
+  new positives.
+- Widening the split set cannot be done by adding `-` or `_`: Slack, OpenAI,
+  Stripe, and GitHub PAT bodies embed them, and splitting there would break
+  detection instead of fixing it.
+- The committed `.limpet/memory.jsonl` is 44 days and 46 entries stale (72
+  lines against 118 live). Refreshing it publishes real memory bodies to a
+  public repo, so the re-export is prepared, scanned with the FIXED binary,
+  and held for the owner's explicit tap. Not automatic.
+
+## Task Implementation Checklist: 0.16.1
+
+- [x] T1 src/secrets.rs: punctuation-boundary fix per I-A1/I-A2; unit tests
+      covering each provider at end-of-sentence, in parentheses, in markdown
+      emphasis, and after a comma already covered; prose negatives re-run and
+      extended; body + evidence + import paths proven through the public API.
+      RED first: 11 of 18 tests failed at HEAD and `remember` returned a
+      successful RememberResult for a body carrying a period-terminated AWS
+      key, the leak reproduced through the public API. Review then found two
+      CRITICAL holes in the first fix, both real, both closed: an
+      `is_ascii_punctuation` trim ate the `-`/`_` a 39-char Google key can end
+      on (a DETECTION REGRESSION against HEAD), and an ASCII-only rule let
+      Unicode punctuation walk past. classify_token is byte-for-byte unchanged
+      (I-A2 holds)
+- [x] T2 docs truth pass: src/skill.md names reverify + consolidate (I-A6),
+      README roadmap pointer moves to 0.16 shipped / v1.0 next and drops the
+      rework-avoided claim (I-A3), ROADMAP current focus replaced with the
+      personal-tool phase and the spine rule drops the third receipt,
+      install.sh em dashes removed (I-A7). Review caught the v1.0 backlog line
+      still naming the three-receipt set; fixed. Controller additions:
+      skill.md now routes an archived entry through restore-then-reverify,
+      states what `import` actually enforces, and makes `working_set` explicit
+      on the recall steps per the T5 measurement
+- [x] T3 CI + toolchain: declare `rust-version` (verified by building on that
+      exact toolchain), `cargo update -p crossbeam-epoch` to clear
+      RUSTSEC-2026-0204, is_none_or, clippy `-D warnings` + `cargo audit` +
+      MSRV jobs in ci.yml (I-A5). MSRV proved by ladder at 1.86; lockfile diff
+      is 2 insertions / 2 deletions, crossbeam-epoch alone; clippy went into
+      the 3-OS matrix rather than an ubuntu-only job because the tree carries
+      real `#[cfg(windows)]` / `#[cfg(unix)]` code a single-OS lint never
+      expands
+- [x] T4 session honesty: `session` is now counted per recall by `ledger_add`
+      in the serving process, never inferred from a boot snapshot; the `stats`
+      CLI serves no recalls and drops the `session` key, with
+      tests/ledger_session.rs proving the CLI and ui drops, the per-handle
+      tally, cross-server isolation, and that a reset in another process can
+      never produce negative counts (5/5 red on a HEAD clone) (I-A4).
+      Review found `limpet ui` publishing the same lie at src/ui.rs:216;
+      closed by dropping the key (ui.html never read it, confirmed by grep)
+      with a test that spawns the real `ui` arm and asserts no session block
+- [x] T5 measurement (no code): ten real recalls against the live 118-entry
+      store, judged for usefulness, recorded below. The audit's own finding was
+      that every quality number to date is synthetic (bench/fixture-repo is a
+      self-graded exam); this is the first honest read on real data
+- [x] T6 QA (2026-08-25, all receipts from real runs on the fixed tree):
+      release build exit 0, test 382 passed / 0 failed across 16 targets,
+      clippy --all-targets 0 warnings, panic ratchet ok, bench true-exit 0 at
+      4.2x overall / 5.4x lineage, demo exit 0, cargo audit exit 0 (1226
+      advisories loaded), em-dash sweep 0 over authored tracked files with
+      the named `.limpet/memory.jsonl` exclusion at 5 (I-A7). Whole-branch
+      adversarial review: five dimensions + per-finding refutation, 11
+      confirmed findings all fixed (round record below). Two-process dogfood
+      on the release binary: index in one serve process, a second serve then
+      proved the period-terminated AWS key refused end-to-end, prose stored,
+      recall + honest session block, reverify bogus-id refusal, consolidate
+      reachable, and the stats CLI publishing lifetime with no session key;
+      11/11 checks green
+- [ ] T7 Ship: version sync, PR, merge on green CI, /deploy-limpet 0.16.1
+
+## T6 whole-branch review round (2026-08-25)
+
+Five-dimension adversarial review (secrets, ledger-session, ci-toolchain,
+docs-truth, seams), every finding independently re-verified by a refuting
+agent against the working tree. 14 findings raised, 3 refuted with receipts,
+11 confirmed (10 distinct; the quadratic surfaced twice). All confirmed
+findings fixed in this round:
+
+- CRITICAL `classify_candidate` was O(n^2) on `prefix + alnum-run +
+  trailing -/_ run` (measured 4x per doubling; ~627 ms per 64 KB detect;
+  ~31 s for 50 import lines; evidence/reverify paths uncapped). Fixed with
+  `CONTRACTION_BUDGET = 64`: the trim and emphasis passes already take
+  maximal runs in one step, so real decoration resolves in a handful of
+  contractions and the loop is now O(budget * n). Perf test pins the timed
+  shapes; a positive test pins that decorated credentials still classify.
+  Import now runs its O(1) size gate before the O(n) secret scan.
+- SPEC prose described a session-base-stamping stats arm that was never
+  shipped; rewritten to the counted model (I-A4 wording, SURFACES, T4).
+- I-A7 read 0 only under a silent exclusion: `.limpet/memory.jsonl` carries
+  5 em-dash lines in exported memory bodies. The invariant now sanctions
+  exactly that one exclusion by name, receipts must report it.
+- `src/mcp.rs` boot comment still described the removed baseline-snapshot
+  model; rewritten.
+- CI msrv job hard-pinned 1.86.0, one-directional vs `rust-version`;
+  toolchain now read from Cargo.toml, drift caught both directions.
+- `docs_in_sync` guards strengthened: the schema op enum is now asserted
+  equal to the `tool_admin` dispatch arms (scraped from source), and the
+  README op guard reads the `admin` row's own words (mutation-tested; the
+  old bare `contains` let six of eleven ops survive deletion).
+- skill.md and README stated the doctor server-image advisory
+  unconditionally; both now name it macOS/Linux (`#[cfg(unix)]`, needs
+  `ps`).
+- `.cargo/audit.toml` and `tests/ledger_session.rs` were untracked while
+  ci.yml and CONTRIBUTING.md referenced them; added to the commit.
+
+Owner tap, not code: no branch protection on main, so the new CI jobs are
+advisory at the merge boundary. One command makes them required:
+`gh api -X PUT repos/KSym04/limpet/branches/main/protection` with
+required_status_checks contexts `test (ubuntu-latest)`, `test
+(macos-latest)`, `test (windows-latest)`, `audit`, `msrv` (session
+permissions blocked repo-settings writes; deliberate).
+
+## T5 result: the first non-synthetic quality number
+
+Ten questions were written and timestamped BEFORE any memory body was read,
+then run twice through `limpet serve` over stdio against the live 118-entry
+store (64 live, 35 active / 29 stale at run time). Result is bimodal, and the
+variable is one argument:
+
+| Run | Hit (yes) | Usable (yes+partial) | Precision | Noise | Misleading |
+|---|---|---|---|---|---|
+| Cold, no `working_set` | 40% | 90% | 17/54 = 31.5% | 64.8% | 2/54 = 3.7% |
+| With `working_set` | 90% | 100% | 33/51 = 64.7% | 29.4% | 3/51 = 5.9% (strict) |
+
+Mechanism, read off `src/memory/recall.rs:252-270`: score = 0.45 text + 0.25
+proximity + 0.20 confidence + 0.10 recency, plus kind and source bonuses. With
+no working_set, proximity is identically 0 for every candidate, deleting a
+quarter of the signal. FTS matched 61 of 64 live entries for essentially every
+question, so retrieval discriminates almost nothing and the scorer does all the
+work. Cold, six high-confidence verified facts filled 36 of 54 slots (67%)
+regardless of topic, and 12 of 54 returned items carried no significant task
+term at all.
+
+The cold misses were RANKING failures, not corpus gaps: the literal answers to
+Q4 and Q7 were ACTIVE in the store and absent from the pack, and both are
+`kind=insight, source=explicit`, the combination the bonuses penalize by 0.20
+against `fact + verified`. Both came back at rank 3 and rank 1 with a
+working_set.
+
+Staleness earned its keep: 0 stale items were returned without their flag, 9 of
+11 distinct stale bodies audited against source are still TRUE, and the 2 that
+had rotted into falsehood (the ROADMAP receipt-set memory and the pre-0.16
+refinement-gap audit) both surfaced flagged, for the right mechanical reason.
+
+Honest reading: in the mode an agent actually works in (files open,
+working_set passed) recall is genuinely useful, and this is the first quality
+number this project has that is not self-graded. The cold path is weak, and the
+published 4.33x bench does not measure any of this.
+
+Acted on here: `src/skill.md` now makes `working_set` explicit on both recall
+steps. NOT acted on, recorded as a bet: rebalancing the kind and source bonuses
+so explicit insights stop being buried is a scoring change and needs the bench
+plus `recall_eval` as its gate, not a patch release.
+
+## Deferred to v1.0 (found by this audit, NOT built here)
+
+| Gap | Evidence | Why deferred |
+|---|---|---|
+| version_guard ignores schema | `src/store.rs:615` reads `code_version` only; migrations run first at `:443-451` and stamp SCHEMA_VERSION unconditionally, so an older binary opening a newer store rewrites the stamp downward | Behaviour change to the open path; belongs with the frozen-schema contract |
+| JSONL export carries no format version | `src/store.rs:663-748` writes no version key; import (`:787-790`) reads only id + updated_at | Wire-format change; must land WITH the freeze, not before it |
+| `rework-avoided` receipt does not exist | Named `ROADMAP.md:5`, asserted `README.md:423`, absent from `Ledger` (`src/store.rs:1173-1179`) and `ledger_payload` | 0.16.1 removes the false claim; building the counter is a feature |
+| Migration chain hand-duplicated | `src/store.rs:444-451` vs `:460-467`, no test asserts they agree | Needs a shared migration list plus a test; touches every migration |
+| `src/ui.rs` has zero tests | 390 lines, written security posture, no test in src/ or tests/ references `ui::` | The v1.0 item already promises a choke-point security review |
+| verify_queue shows only `source='verified'` | `src/tools.rs:514`; 28 of 29 stale entries invisible | NOT a bug: an unverified entry has no `evidence_cmd` to hand out, so the queue is the re-provable set by design. The real gap is a stale-listing surface. Owner decision, recorded not built |
+
+---
+
 # SPEC: the refinement loop, v0.16.0
 
 Status: SHIPPED 2026-08-15 (PR #28 merged on green 3-platform CI, tag

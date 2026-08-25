@@ -222,11 +222,22 @@ fn handle_conn(mut stream: std::net::TcpStream, root: &Path, default_key: &str) 
                     p => p,
                 };
                 match resolve_project(param, root) {
-                    Ok((store, _)) => (
-                        "200 OK",
-                        "application/json",
-                        crate::tools::ledger_payload(&store).to_string(),
-                    ),
+                    Ok((store, _)) => {
+                        // Lifetime only (I-A4). `session` means "the recalls
+                        // THIS process served", and a `ui` process serves
+                        // none: recalls come from `serve`. This endpoint also
+                        // opens a fresh store per request, so its session
+                        // base is always zero and the block could only ever
+                        // be lifetime under a second name. ui.html reads
+                        // `lifetime` alone, so dropping the key changes
+                        // nothing on screen and stops the endpoint claiming
+                        // work it never did.
+                        let mut payload = crate::tools::ledger_payload(&store);
+                        if let Some(obj) = payload.as_object_mut() {
+                            obj.remove("session");
+                        }
+                        ("200 OK", "application/json", payload.to_string())
+                    }
                     Err(e) => (
                         "500 Internal Server Error",
                         "application/json",

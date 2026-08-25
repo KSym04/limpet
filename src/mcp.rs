@@ -16,9 +16,11 @@ pub const PROTOCOL_VERSION: &str = "2025-06-18";
 pub fn serve(root: PathBuf) -> Result<()> {
     let db_path = Store::default_db_path(&root);
     let mut store = Store::open(&db_path)?;
-    // Session baseline for the savings ledger (in-memory, per process).
-    // Taken only after the guard: a stale image must not touch the store,
-    // and the read itself is harmless but the ordering keeps the rule clean.
+    // Reset the in-process session accumulator for the savings ledger. No
+    // baseline is read anymore: the session figure is accumulated per recall
+    // in this process, so this call is a documented no-op at a fresh boot.
+    // Kept behind the guard anyway: a stale image touches nothing, and the
+    // ordering keeps the rule clean.
     if store.version_guard().is_ok() {
         let _ = store.ledger_session_start();
     }

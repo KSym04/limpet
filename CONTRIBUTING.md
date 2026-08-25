@@ -38,6 +38,33 @@ not volume:
   updater, the UI server) get extra scrutiny and, where practical, an
   adversarial test.
 
+## When the audit gate blocks a release
+
+CI runs `cargo audit` against a live checkout of the RustSec advisory
+database (`rustsec/advisory-db` at `main`, not pinned to a commit). That is
+deliberate: a frozen database would have read green straight through the
+advisory that put the job there. The cost is that an advisory published
+upstream against any crate in `Cargo.lock` can turn `main` and every open
+pull request red without anyone here changing a line of code.
+
+Unblock it in this order:
+
+1. **Upgrade out of it.** Bump the dependency, run `cargo test --locked`,
+   and commit the `Cargo.lock` change. This is the right answer in most
+   cases, and it is the only one that actually removes the vulnerability.
+2. **If there is nothing to upgrade to yet**, add the advisory to the
+   `ignore` list in [`.cargo/audit.toml`](.cargo/audit.toml), following the
+   rules at the top of that file: the advisory ID, one line on why limpet's
+   use of the crate is not exploitable (or why the fix cannot land yet), and
+   the condition that removes the entry again. An entry with no removal
+   condition does not pass review.
+
+Do not reach for `.github/workflows/ci.yml` to skip, soften, or
+`continue-on-error` the audit step. That disarms the gate for every future
+advisory rather than today's one, and it does it in a diff that reads like a
+routine CI tweak. The audit config exists so that an exception arrives as a
+narrow, reviewable change with an expiry attached.
+
 ## Reporting security issues
 
 Do not open a public issue for a vulnerability. Follow
@@ -49,4 +76,10 @@ Do not open a public issue for a vulnerability. Follow
   no one.
 - Match the surrounding style; the code is deliberately dependency-light and
   free of `unsafe`.
+- If you add a file the build reads (a new `include_str!` target, a new
+  source directory), add it to the `include` allowlist in `Cargo.toml` in the
+  same change. That list is the published crate's whole contents, and no CI
+  job packages the crate, so a missing entry does not surface until
+  `cargo publish` runs on a release tag. Check with
+  `cargo package --list --allow-dirty`.
 - Keep commits focused and messages plain about the "why".

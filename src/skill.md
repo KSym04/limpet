@@ -15,10 +15,16 @@ their code changes. Work with it in this order.
    resolution counts in one line.
 2. Call `recall` with the user's current goal as `task` (if they stated one)
    or `"project orientation: architecture, constraints, known gotchas"`.
+   Pass `working_set` whenever you have even a rough idea which files the
+   work touches: proximity is a quarter of the ranking signal, and a recall
+   without it measurably returns more true-but-irrelevant filler and can
+   miss an active memory that answers the question exactly.
    Present what came back, one line per memory. Show stale or contradicted
    flags exactly as returned; never present a flagged memory as current fact.
 3. Call `verify_queue`. If it is non-empty, tell the user how many verified
-   facts need re-proof and offer to run their reverify commands now.
+   facts need re-proof and offer to run their proving commands now; each
+   pass is recorded with `admin` `{"op": "reverify", ...}` (see
+   `/limpet review`).
 4. Start the visual memory UI unless one is already running: if nothing is
    listening on 127.0.0.1:9748 (`lsof -nP -iTCP:9748 -sTCP:LISTEN`), run
    `limpet ui` as a background shell task and report the graph is live at
@@ -34,8 +40,9 @@ their code changes. Work with it in this order.
   memories your diff put at risk and which decisions bound the code you
   changed.
 - **Recall before read.** Before grepping or reading a file to answer a
-  question about this project, call `recall` with the question. If an
-  active memory answers it, do not read the file at all.
+  question about this project, call `recall` with the question, and name the
+  files you are working in as `working_set`. If an active memory answers it,
+  do not read the file at all.
 - **Remember as you learn.** When you discover something durable, call
   `remember` immediately, anchored to the relevant symbol:
   - `decision`: a choice plus the reason and rejected alternatives
@@ -57,8 +64,25 @@ their code changes. Work with it in this order.
   secret can never reach the store or a shared `.limpet/memory.jsonl`.
 - **Trust recall before re-deriving.** If recall answers the question, do
   not re-read files to confirm what an active memory already states. If the
-  memory is flagged stale, verify against the code first, then update it:
-  store the corrected entry with a `supersedes` link to the old one.
+  memory is flagged stale, verify against the code first, then update it: a
+  fact that still holds and carries a proving command goes back to active
+  through `admin` `{"op": "reverify", ...}`; anything whose value actually
+  changed gets a corrected entry with a `supersedes` link to the old one.
+- **Housekeeping is explicit.** The remaining `admin` ops are called
+  directly, never on your own initiative: `{"op": "archive", "id": ...}` and
+  `{"op": "restore", "id": ...}` shelve a memory and bring it back,
+  `{"op": "forget", "id": ...}` deletes one permanently, `{"op": "import"}`
+  merges a teammate's `.limpet/memory.jsonl` line by line (the same secret
+  scan and provenance rules as `remember`, newest write wins per id), and
+  `{"op": "ledger_reset"}` wipes the savings counters.
+  Import is not line-isolated end to end: a line failing a content rule
+  (a secret, an unknown kind, status, or source, an oversize or empty
+  body, a clashing origin) is counted in `rejected` and the rest still
+  land, but a line that is not valid JSON, is missing `id`, or exceeds
+  the 1 MiB line cap errors out and rolls the whole batch back, so
+  nothing is imported. Read the returned counts before reporting: an
+  errored import applied nothing.
+  Ask before you forget, import, or reset anything.
 
 ## Seeding a project: /limpet scan
 
@@ -70,8 +94,9 @@ docs, long-body commits, and the assistant's project memory directory.
    coverage. A non-empty store means gap-fill mode: drop any candidate a
    recall already answers. If the limpet binary was updated during this
    session, the MCP server may still run the old image and will silently
-   drop `private`/`origin` arguments; restart the session before
-   seeding.
+   drop `private`/`origin` arguments; `limpet doctor` names any `limpet
+   serve` process older than the installed binary (macOS/Linux; the check
+   needs `ps`), so restart the session before seeding.
 2. Quality pre-check, before curating: percentage of commits with
    non-empty bodies, merge count, docs present. Thin history gets said
    plainly upfront ("history thin, expect few candidates") and shrinks
@@ -109,9 +134,21 @@ docs, long-body commits, and the assistant's project memory directory.
 - `/limpet` or `/limpet index`: run the invocation sequence above.
 - `/limpet status`: call `admin` `{"op": "status"}` and `verify_queue`;
   report counts and anything needing attention.
-- `/limpet review`: work through `verify_queue`; for each item run its
-  reverify command, then update the memory with fresh evidence or supersede
-  it if the fact changed.
+- `/limpet review`: work through `verify_queue`. For each item, run the
+  proving command it hands you, then call `admin` `{"op": "reverify", "id":
+  "<id>", "command": "<the command you ran>", "output": "<the decisive
+  lines>"}`. That re-stamps the evidence digest and timestamp, re-binds every
+  anchor to the current code, restores the entry to active as `verified` at
+  the full verified confidence, and returns `anchors_rebound`. It refuses
+  rather than guesses: an anchor that no longer resolves, or an entry that is
+  superseded, archived, or invalidated, fails the whole op. An archived entry
+  is `restore`d first, then reverified. Otherwise, on a refusal or when the
+  command shows the fact itself changed, store the corrected entry with a
+  `supersedes` link instead. Then call `admin` `{"op":
+  "consolidate"}` and report the candidate clusters it returns: same-anchor
+  entries whose bodies say one lesson several ways. It is read-only and
+  merges nothing; distilling a cluster means writing one entry with
+  `remember` that `supersedes` its members, only with the user's go-ahead.
 - `/limpet ui`: start the visual memory UI (step 4 of the invocation
   sequence) without re-running the index/recall flow, and report the URL.
 - `/limpet export`: call `admin` `{"op": "export"}` so the memory can be

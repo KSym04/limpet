@@ -135,10 +135,18 @@ fn run() -> Result<()> {
             let root = root_from(&args)?;
             let store = store::Store::open(&store::Store::default_db_path(&root))?;
             store.version_guard()?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&tools::ledger_payload(&store))?
-            );
+            // Lifetime only (I-A4), the same rule the `ui` endpoint follows.
+            // `session` means "the recalls THIS process served", and a
+            // `stats` process serves none: recalls come from `serve`. Its
+            // session block is therefore all zeros by construction, forever,
+            // and a surface with no honest session figure drops the key
+            // instead of publishing a permanent zero. Lifetime is the real
+            // receipt here and is printed untouched.
+            let mut payload = tools::ledger_payload(&store);
+            if let Some(obj) = payload.as_object_mut() {
+                obj.remove("session");
+            }
+            println!("{}", serde_json::to_string_pretty(&payload)?);
             Ok(())
         }
         "update" => {
@@ -173,7 +181,7 @@ USAGE:
   limpet ui      [--root <path>] [--port <n>]   visual memory at 127.0.0.1:9748
   limpet index   [--root <path>]   full index of the repository
   limpet status  [--root <path>]   index and memory counts
-  limpet stats   [--root <path>]   token-savings ledger (session + lifetime)
+  limpet stats   [--root <path>]   token-savings ledger (lifetime totals)
   limpet doctor  [--root <path>]   diagnose install/registration/store issues
   limpet statusline [--root <path>]   render the statusline segment (read-only)
   limpet hook    [--root <path>]   SessionStart brief for Claude Code hooks (read-only)
@@ -787,6 +795,12 @@ fn uninstall() -> Result<()> {
 /// Parse a `ps` etime value (`[[dd-]hh:]mm:ss`) to seconds. None on any
 /// deviation: this feeds an advisory, and a wrong guess is worse than
 /// silence.
+///
+/// Same platform life as its only caller (`server_image_advisory`, unix
+/// only): on Windows the caller is stripped, so an ungated function here
+/// has zero users and `-D warnings` fails the build on dead_code. `test`
+/// keeps the unit tests below compiling on every platform.
+#[cfg(any(unix, test))]
 fn parse_etime_secs(s: &str) -> Option<u64> {
     let s = s.trim();
     if s.is_empty() {

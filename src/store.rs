@@ -14,10 +14,16 @@ pub const SCHEMA_VERSION: i64 = 8;
 
 pub struct Store {
     pub conn: Connection,
-    /// This process's session baseline for the savings ledger. In-memory on
-    /// purpose: a shared-kv base let one server boot (or a ledger_reset in
-    /// another process) corrupt every other process's session view.
-    session_base: std::cell::Cell<Ledger>,
+    /// What THIS process actually served: an accumulator `ledger_add`
+    /// increments with the same committed figures it writes to meta_kv,
+    /// never a view of those shared counters. A boot snapshot cannot carry
+    /// the claim, because the ledger.* rows are cross-process: subtracting
+    /// one from lifetime also collects every recall a SECOND `limpet serve`
+    /// (another project window, another editor) served afterwards, and a
+    /// `ledger_reset` in that process drives the subtraction negative.
+    /// Counting our own calls is exact by construction and cannot go
+    /// below zero.
+    session: std::cell::Cell<Ledger>,
 }
 
 const SCHEMA_V1: &str = r#"
@@ -449,7 +455,7 @@ impl Store {
         migrate_to_v7(&conn)?;
         migrate_to_v8(&conn)?;
         refill_v7_content_once(&conn)?;
-        Ok(Store { conn, session_base: std::cell::Cell::new(Ledger::default()) })
+        Ok(Store { conn, session: std::cell::Cell::new(Ledger::default()) })
     }
 
     /// Open an in-memory store (tests).
@@ -465,7 +471,7 @@ impl Store {
         migrate_to_v7(&conn)?;
         migrate_to_v8(&conn)?;
         refill_v7_content_once(&conn)?;
-        Ok(Store { conn, session_base: std::cell::Cell::new(Ledger::default()) })
+        Ok(Store { conn, session: std::cell::Cell::new(Ledger::default()) })
     }
 
     /// Default database path for a repository root.
@@ -810,16 +816,18 @@ impl Store {
                 continue;
             }
 
-            // Secrets must never enter the store, not even from a peer.
+            // Secrets must never enter the store, not even from a peer. The
+            // size gate runs first: it is O(1) and the scan is O(len), so an
+            // oversized line never buys a scan it was going to fail anyway.
             let body = obj["body"].as_str().unwrap_or_default();
             let ev_cmd = obj["evidence_cmd"].as_str().unwrap_or_default();
-            if crate::secrets::detect(body).is_some()
-                || crate::secrets::detect(ev_cmd).is_some()
-            {
+            if body.len() > crate::memory::MAX_BODY_BYTES {
                 report.rejected += 1;
                 continue;
             }
-            if body.len() > crate::memory::MAX_BODY_BYTES {
+            if crate::secrets::detect(body).is_some()
+                || crate::secrets::detect(ev_cmd).is_some()
+            {
                 report.rejected += 1;
                 continue;
             }
@@ -1181,18 +1189,12 @@ pub struct Ledger {
 impl Ledger {
     pub fn saved(&self) -> i64 {
         // Never floored (I-L2): a pack that cost more than the files it
-        // replaced reports a real negative.
+        // replaced reports a real negative. That licence is about TOKENS
+        // only. Counts (recalls, distinct queries, reads avoided) are
+        // tallies of things that happened and have no negative value,
+        // which is why no subtraction of one Ledger from another exists
+        // here any more: `session` is counted directly by ledger_add.
         self.baseline - self.served
-    }
-
-    pub fn diff(&self, base: &Ledger) -> Ledger {
-        Ledger {
-            recalls: self.recalls - base.recalls,
-            distinct_queries: self.distinct_queries - base.distinct_queries,
-            served: self.served - base.served,
-            baseline: self.baseline - base.baseline,
-            reads_avoided: self.reads_avoided - base.reads_avoided,
-        }
     }
 }
 
@@ -1227,6 +1229,11 @@ impl Store {
     /// seen (lifetime): first sighting bumps distinct_queries. The whole
     /// read-modify-write runs in one IMMEDIATE transaction so concurrent
     /// serve processes can neither lose updates nor tear the counters.
+    ///
+    /// This is the ONLY writer of the ledger, so it is also where the
+    /// per-process session tally is kept: on commit, the very figures that
+    /// went into meta_kv are added to `session` too. Session is therefore
+    /// counted, not inferred, and no other process can move it.
     pub fn ledger_add(
         &self,
         served: i64,
@@ -1235,7 +1242,7 @@ impl Store {
         query_hash: &str,
     ) -> Result<()> {
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
-        let outcome = (|| -> Result<()> {
+        let outcome = (|| -> Result<bool> {
             let cur = self.ledger_read();
             let seen_key = format!("ledger.q.{query_hash}");
             let newly_seen = self
@@ -1255,11 +1262,26 @@ impl Store {
             if self.kv_get("ledger.since")?.is_none() {
                 self.kv_set("ledger.since", &crate::index::now_iso())?;
             }
-            Ok(())
+            Ok(newly_seen)
         })();
         match outcome {
-            Ok(()) => {
+            Ok(newly_seen) => {
                 self.conn.execute_batch("COMMIT")?;
+                // Only committed work counts as served: a rolled-back
+                // recall never reaches this line.
+                let mut mine = self.session.get();
+                mine.recalls += 1;
+                // Distinct here means "queries this process was first to
+                // ask", the same first-sighting rule the lifetime counter
+                // uses. Not published in any session block today; kept
+                // consistent so it cannot become a lie if it ever is.
+                if newly_seen {
+                    mine.distinct_queries += 1;
+                }
+                mine.served += served;
+                mine.baseline += baseline;
+                mine.reads_avoided += reads_avoided;
+                self.session.set(mine);
                 Ok(())
             }
             Err(e) => {
@@ -1279,16 +1301,21 @@ impl Store {
         Ok(())
     }
 
-    /// Snapshot the current lifetime figures as this process's session base.
-    /// Session view = lifetime - base. In-memory: shared-kv storage let one
-    /// server boot clobber every other process's session view.
+    /// Begin this process's session tally at zero. A fresh `Store` already
+    /// starts there, so a server boot calling this is a no-op by design;
+    /// the live use is `ledger_reset`, which wipes the shared counters and
+    /// must not leave the wiping process reporting a session larger than
+    /// the lifetime it just cleared. Other processes keep their own tallies
+    /// untouched, which is the point: their counts stay true and, unlike
+    /// the old lifetime-minus-snapshot subtraction, can never go negative.
     pub fn ledger_session_start(&self) -> Result<()> {
-        self.session_base.set(self.ledger_read());
+        self.session.set(Ledger::default());
         Ok(())
     }
 
-    pub fn ledger_session_base(&self) -> Ledger {
-        self.session_base.get()
+    /// The recalls THIS process served, counted as it served them.
+    pub fn ledger_session(&self) -> Ledger {
+        self.session.get()
     }
 }
 
@@ -1352,7 +1379,7 @@ mod tests {
     }
 
     #[test]
-    fn ledger_accumulates_diffs_and_resets() {
+    fn ledger_accumulates_lifetime_and_session_and_resets() {
         let s = Store::open_in_memory().unwrap();
         assert_eq!(s.ledger_read(), Ledger::default());
 
@@ -1368,19 +1395,34 @@ mod tests {
         assert_eq!(l.reads_avoided, 3);
         assert!(s.ledger_since().is_some());
 
-        // Session view = lifetime minus the boot stamp.
-        s.ledger_session_start().unwrap();
-        s.ledger_add(10, 500, 1, "q3").unwrap();
-        let session = s.ledger_read().diff(&s.ledger_session_base());
-        assert_eq!(session.recalls, 1);
-        assert_eq!(session.saved(), 490);
+        // Session counts this handle's OWN calls: the three above are its
+        // own work, so they are in the tally, and nothing else can be.
+        let session = s.ledger_session();
+        assert_eq!(session.recalls, 3);
+        assert_eq!(session.distinct_queries, 2);
+        assert_eq!(session.served, 230);
+        assert_eq!(session.saved(), 900);
+        assert_eq!(session.reads_avoided, 3);
 
-        // Negative savings survive (I-L2).
+        // A restart begins the tally at zero and only the recall served
+        // after it lands in the new session.
+        s.ledger_session_start().unwrap();
+        assert_eq!(s.ledger_session(), Ledger::default());
+        s.ledger_add(10, 500, 1, "q3").unwrap();
+        assert_eq!(s.ledger_session().recalls, 1);
+        assert_eq!(s.ledger_session().saved(), 490);
+        assert_eq!(s.ledger_read().recalls, 4, "lifetime keeps counting across a restart");
+
+        // Negative savings survive (I-L2). Negative COUNTS cannot happen:
+        // a wipe of the shared rows leaves the tally of what was really
+        // served alone, it does not subtract it into nonsense.
         s.ledger_reset().unwrap();
         assert_eq!(s.ledger_read(), Ledger::default());
         assert!(s.ledger_since().is_none(), "reset restamps since lazily");
+        assert_eq!(s.ledger_session().recalls, 1, "a wipe cannot un-serve a served recall");
         s.ledger_add(1000, 300, 0, "q4").unwrap();
         assert_eq!(s.ledger_read().saved(), -700);
+        assert_eq!(s.ledger_session().recalls, 2, "the tally keeps counting past a wipe");
     }
 
     #[test]

@@ -682,6 +682,11 @@ fn tool_admin(store: &mut Store, root: &Path, sweep: &SweepReport, args: &Value)
         "ledger" => ledger_payload(store),
         "ledger_reset" => {
             store.ledger_reset()?;
+            // The wipe clears the shared counters, so this process's own
+            // tally starts over with them: otherwise the resetting server
+            // would keep reporting a session bigger than the lifetime it
+            // just emptied. Other live processes keep their own tallies,
+            // which stay true (and non-negative) for the work they did.
             store.ledger_session_start()?;
             json!({ "reset": true })
         }
@@ -888,9 +893,17 @@ fn consolidate_payload(store: &Store) -> Result<Value> {
 
 /// The full ledger payload: session + lifetime + the method string that
 /// makes the number checkable rather than believed (I-L6).
+///
+/// `session` is this process's own tally, counted by `ledger_add` as it
+/// served each recall (I-A4). It is deliberately NOT lifetime minus a boot
+/// snapshot: the lifetime counters live in meta_kv and are shared by every
+/// process on this store, so that subtraction credited one server with a
+/// second server's recalls and went negative after a `ledger_reset`.
+/// Callers that serve no recalls at all (`ui`, `stats`) drop the key rather
+/// than publish a permanently-zero block.
 pub fn ledger_payload(store: &Store) -> Value {
     let lifetime = store.ledger_read();
-    let session = lifetime.diff(&store.ledger_session_base());
+    let session = store.ledger_session();
     json!({
         "session": {
             "recalls": session.recalls,

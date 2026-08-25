@@ -1,0 +1,32 @@
+# cargo-audit configuration. The tool reads `.cargo/audit.toml` relative to
+# the working directory, which is the repo root in the CI `audit` job
+# (`cargo audit --no-fetch --db advisory-db`).
+#
+# Why this file exists. That job checks out rustsec/advisory-db at `ref: main`
+# on purpose, not frozen to a commit: a pinned DB would have read green
+# straight through RUSTSEC-2026-0204, the advisory that put the gate there in
+# the first place. The price of a live DB is that an advisory published
+# upstream against any of the crates in Cargo.lock turns main and every open
+# pull request red with no change on our side, usually at the worst moment.
+#
+# This file is the only sanctioned lever for that. Do not edit the workflow to
+# skip, soften, or `continue-on-error` the audit step: that disarms the gate
+# for every advisory, permanently, in a diff that reads like a CI tweak. Add a
+# scoped entry here instead, and the exception arrives as a reviewable change
+# that a later reader can find and expire.
+#
+# Every entry requires, in the comment directly above it:
+#   1. the advisory ID (RUSTSEC-YYYY-NNNN) and the crate it fires on,
+#   2. one line of justification: why limpet's use is not exploitable, or why
+#      the real fix cannot land yet,
+#   3. the condition that removes the entry: the dependency version that
+#      clears it, the upstream release being waited on, or the date it gets
+#      re-argued.
+# An entry with no removal condition is not an exception, it is a silenced
+# alarm. Upgrading the dependency is always the first answer; ignoring is the
+# fallback when there is nothing to upgrade to yet.
+#
+# CONTRIBUTING.md ("When the audit gate blocks a release") states the same
+# procedure in prose. Keep the two in step.
+[advisories]
+ignore = []
