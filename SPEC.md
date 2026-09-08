@@ -1,7 +1,8 @@
 # SPEC: the brain view, v0.17.0 (ui restyle)
 
-Status: IN PROGRESS 2026-09-08. Source: the owner's ask that the visual
-memory graph read as a brain, validated on 2026-09-08 with three throwaway
+Status: SHIPPED 2026-09-08 as v0.17.0 (tag v0.17.0 on merge commit 9544d39,
+GitHub release 12 assets, crates.io 0.17.0, MCP registry isLatest). Source:
+the owner's ask that the visual memory graph read as a brain, validated on 2026-09-08 with three throwaway
 mockups over the real 601-node all-projects graph (neuron rendering alone did
 not read as a brain; a brain-silhouette containment layout did, at 601 and
 at 248 nodes; the combined variant encoded semantics in position and read
@@ -227,8 +228,18 @@ changes, so the v1.0 contract in STABILITY.md is untouched. It ships as
       controller's own load of the limpet view for the README asset (190
       nodes, calm at 588 ticks, 0 errors) and the 4 http tests over the
       real socket path
-- [ ] B8 ship: version sync 0.17.0, PR, 3-OS CI green, merge,
-      /deploy-limpet, post-release verification
+- [x] B8 ship: versions synced (Cargo.toml, server.json, Cargo.lock), PR #31
+      opened on the branch that also carried the stability contract's code
+      half, CI green 5/5 (ubuntu, macos, windows, audit, msrv), merged as
+      9544d39 (PR #30 closed as merged with it), merged tree byte-identical
+      to the gated commit d378cd2. Tagged v0.17.0 annotated and pushed over
+      HTTPS: release workflow 8m17s / 12 assets, mcp-registry 26s, main CI
+      5m23s, all green. Verified: GitHub release Latest with 12 assets,
+      crates.io max_version 0.17.0, registry isLatest True. Local binary
+      self-updated 0.16.0 to 0.17.0 (the 0.16 doctor advisory correctly
+      named three `limpet serve` processes on an older image; a Claude Code
+      restart loads the new one, and 0.16.1 is covered by the same restart
+      because its binary was never installed locally)
 
 ---
 
