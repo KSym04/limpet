@@ -17,9 +17,10 @@ not ship.
 loop, and with it the owner's decision that limpet is built for one person's
 own work: adoption is no longer a goal, so uptake is not a measure of
 anything here. Feature work continues under the same evidence gates below,
-unchanged. The next milestone is the 1.0 stability contract, and its value is
-plain from that framing: the store holds the owner's own memory, so the
-format and the API it depends on have to outlive the releases.
+unchanged. The 1.0 stability contract's code half shipped in 0.17.0; the
+1.0 tag follows once it has soaked, and its value is plain from that
+framing: the store holds the owner's own memory, so the format and the API
+it depends on have to outlive the releases.
 
 ## Shipped
 
@@ -106,17 +107,51 @@ built.
   Docs claims are tied to code by test: the `admin` op schema must equal the
   dispatcher, and the README's own enumerating rows are read instead of the
   whole file.
+- **v0.17.0: the stability contract's code half, and the brain.** The v1.0
+  guards landed without the tag: an older binary refuses a newer store
+  before any migration runs, the schema stamp only moves forward, the
+  per-call guard checks the stamp on live handles, the JSONL export names
+  its format and import refuses a newer one loudly, file and in-memory
+  stores share one migration chain, a failed bootstrap import retries, and
+  `limpet ui` is pinned read-only and closed by tests (decoy traversal,
+  404s, a hostile sweep leaving every table identical). STABILITY.md states
+  what is frozen and what is not promised; the 1.0 tag waits for the
+  owner's soak. The visual memory page was relaid as a brain: a
+  signed-distance silhouette holds the graph, memories settle in the cortex
+  band and code in the white matter, stores spread over nine lobes in the
+  all-projects view (largest first, shared past nine), and the picture is
+  deterministic (id-hashed seeds, no randomness), does no per-frame work
+  once settled, and says so below forty visible nodes; the health encoding
+  is byte-identical to 0.16. Measured on the owner's 604-node all-projects
+  graph: every node inside the outline (the first cut left 184 rims over
+  it), 0.42 ms per simulation tick and 0.18 ms per draw, settled in 2.4 s
+  from 7.1 s, and the settled state holds through a thousand further
+  ticks. The same work
+  found and fixed a `limpet ui` defect present since the 2026-07 hardening:
+  every browser request waited out the 5 s read timeout because the header
+  drain dropped bytes it had already read, and an over-long request line
+  was truncated and served instead of refused (now 414). A test that talks
+  to the server the way a browser does pins the first; a second pins the
+  414 at exactly the cap; and the request now carries a wall-clock deadline
+  and a write timeout, so a slow-drip or never-reading client cannot hold a
+  thread past five seconds.
 
 ## v1.0: the stability contract (not features)
 
-- Store schema, JSONL export format, and tool API frozen, with documented
-  migration guarantees; the version guard extends to schema migrations.
+The code half shipped in 0.17.0 (above). What the tag still waits for:
+
+- Soak: the schema guard, monotonic stamp, wire-format header, and single
+  migration chain running on the owner's own stores across real upgrades
+  without a refusal that was not earned. The tag is the owner's call.
 - Signed release binaries (minisign), so `limpet update` verifies a maintainer
   signature rather than a same-origin checksum. Deprioritized in the
   personal-tool phase (owner decision, 2026-08-15): it returns to scope only
   if distribution ever matters again, and the 1.0 tag does not wait for it.
-- Security review of the three choke points: path validation, parameterized
-  SQL, secret detection.
+- Security review of the three choke points. Parameterized SQL was swept
+  for the code half (every statement binds through parameters; the one
+  runtime-assembled placeholder list binds its values), secret detection was
+  reworked and DoS-proofed in 0.16.1; path validation is the one still owed
+  a recorded review.
 - Docs restructured around the two receipts: benchmark and live ledger.
 
 1.0 means one thing: your memory is safe to depend on for years.

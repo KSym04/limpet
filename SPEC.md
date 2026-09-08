@@ -1,3 +1,237 @@
+# SPEC: the brain view, v0.17.0 (ui restyle)
+
+Status: IN PROGRESS 2026-09-08. Source: the owner's ask that the visual
+memory graph read as a brain, validated on 2026-09-08 with three throwaway
+mockups over the real 601-node all-projects graph (neuron rendering alone did
+not read as a brain; a brain-silhouette containment layout did, at 601 and
+at 248 nodes; the combined variant encoded semantics in position and read
+worse). This ports the silhouette layout into the shipped `src/ui.html`. It
+is a restyle of one display surface: no tool, store, export, or route
+changes, so the v1.0 contract in STABILITY.md is untouched. It ships as
+0.17.0 together with the stability contract's code half.
+
+## INVARIANTS
+
+- I-B1: the health encoding is byte-identical to 0.16. Memory fill colours
+  (`#3fb96f` active, `#e0a437` stale, `#e05252` invalidated, `#6b7885`
+  superseded, `#8296a8` unknown), the 2px `#d8e1ea` verified ring, the
+  dashed `#7f8ea3` private ring, the `7 + conf * 8` radius rule, the code
+  square, and the four relation strokes (contradicts red dashed, supersedes
+  blue, supports green, anchor neutral) are unchanged in value. The
+  silhouette may change WHERE a node sits, never what its health looks like.
+- I-B2: the settle/idle contract holds. A settled, idle tab does zero
+  per-frame work beyond the calm check; every motion is finite by
+  construction (the simulation stops at CALM_FRAMES of low energy, and a
+  hard budget of MAX_TICKS_PER_WAKE ticks per wake forces calm if energy
+  never settles; measured settle is 556 ticks at 604 nodes against a 4000
+  budget); a poll that returns the
+  same visible set never wakes the layout; a poll that adds nodes rescales
+  positions but never resets the user's pan or zoom. `fitView` runs only on
+  load, project switch, and filter change.
+- I-B3: determinism. No `Math.random` anywhere in the file. Every per-node
+  quantity (initial position, lobe seed) derives from a hash of the node id,
+  so two loads of identical data settle to the same picture.
+- I-B4: the surface stays closed and read-only. No new routes, no new
+  fetches, GET only, one embedded file, zero external references (the only
+  URL in the file is the SVG namespace of the favicon). The I-S5 ui tests
+  are untouched and stay green; a new `tests/ui_html.rs` pins single-file,
+  no-external-ref (absolute and scheme-relative), no-`Math.random`, and a
+  `node --check` syntax pass on the extracted script body when node is on
+  PATH (a missing node fails the test under `CI`, and only skips on a
+  developer machine).
+- I-B5: the silhouette is honest. Its scale follows the VISIBLE node count;
+  below 40 visible nodes the footer says the shape needs density instead of
+  pretending; a single-project view draws no lobes; the all-projects view
+  spreads stores over the nine lobes largest first (keyed by the id prefix
+  the server already emits, never by display name, so two stores that
+  share a name are distinct in the map; past nine stores a lobe is shared)
+  and labels each store's centroid with its project name (stores under
+  five visible nodes get a smaller label, and only once node labels are
+  showing). A node fatter than the silhouette's thinnest region (the
+  brainstem, about 0.19 units) is held by its centre with its containment
+  radius capped at 0.09 * S; at 51 or more visible nodes the cap exceeds
+  the largest radius and nothing changes, below that a high-confidence
+  memory routed into the stem may show its rim over the line rather than
+  being shoved every tick.
+- I-B6: docs truth. The footer legend, the README "Visual memory" section,
+  its caption, and `docs/limpet-ui.png` describe what the binary draws. The
+  screenshot is taken from the shipped binary on the limpet project's own
+  store (no other project names in a public asset).
+- Carried: I3, BENCH >= 4.0x, CONF, POS, panic ratchet, docs_in_sync,
+  display surfaces read-only, migrations no-op on re-run, I-A1..I-A7,
+  I-S1..I-S6.
+
+## SURFACES
+
+- `src/ui.html` only, in the script block plus the footer markup and one
+  footer CSS rule (`flex-wrap`). Header, stats, filters, project select,
+  detail panel, pan/zoom, click hit-test, the `esc()` HTML escaper, and the three fetch paths
+  are unchanged. The isotropic centering force is replaced by: a signed-
+  distance containment along a hand-authored side-view brain polygon
+  (Catmull-Rom smoothed, SDF grid built once at load), a cortex bias for
+  memory nodes and an interior bias for code nodes, a short-range softened
+  repulsion kernel with a cutoff, per-store lobe attraction in the
+  all-projects view and a weak isotropic pull in a project view. The
+  silhouette, cortex band, and two fissure lines are drawn under the graph.
+  Lobe labels sit at each store's centroid, counter-scaled to 11px (9px and
+  only when zoomed in for stores under five visible nodes). Polls are tagged
+  with the project they were issued for: a response for a project the user
+  has since left is discarded, and a switch that lands during a poll is
+  queued instead of dropped.
+- `tests/ui_html.rs` (new): the I-B4 guards.
+- `README.md`: the Visual memory section, caption, and command-table row;
+  `docs/limpet-ui.png` regenerated.
+- `ROADMAP.md`: 0.17.0 folded into Shipped; `SPEC.md` marked shipped at the
+  tag.
+
+## ATTACK SURFACE / HAZARDS
+
+- Perf: repulsion runs on a uniform grid (cell = cutoff, 3x3 neighbourhood)
+  with the cutoff at 0.25 * S floored at 60 px. Measured on the shipped page
+  at 604 nodes (B4 receipts): 0.42 ms per tick (was 0.83 with the plain
+  O(n^2) loop at a 0.55 * S cutoff), 0.18 ms per draw, 556 ticks / 2.4 s to
+  settle (was 930 / 7.1 s; three ticks per frame while hot, two while warm,
+  one cooling, presettle 100 ticks), nearest-neighbour p10 up 9.7%. The
+  grid alone at the old cutoff was SLOWER (1.33 vs 1.08 ms): the tighter
+  cutoff is what makes it pay, and a 60 px floor keeps a 13-node view from
+  clumping (p10 fell 33% without it).
+- View theft: a 5s poll that changes the visible count must not refit the
+  view under the user (I-B2). Positions scale by the ratio; the view stays.
+- Lobe flapping: recomputing lobe order from counts on every poll would
+  migrate a whole store to another lobe when counts cross. The lobe map is
+  built once per page load or project switch and only ever grows.
+- Reduced motion: synchronous settle is capped (600 ticks, about 0.4 s at
+  604 nodes at the measured 0.66 ms presettle tick) so the page never
+  stalls.
+- Containment and settle (B4): forces alone could not hold the outline
+  (F.out 3.0 still left 133 rims over it) and a projection alone left
+  energy humps; the shipped page uses both: F.out 3.0 plus a deterministic
+  projection after integration that moves an overshooting rim back along
+  the field gradient (max 3 iterations, outward velocity dropped). Result 0
+  rims outside at 604 / 190 / 13 nodes, unchanged after 1200 further ticks.
+  Residual energy is a slow collective creep of interior memories toward
+  the cortex, not wall chatter: cool-phase damping 0.5 once energy drops
+  below 0.1 * N keeps the settled state under the threshold through 1000
+  further ticks with a 2.2x margin (the mockup's 9% margin failed the
+  200-tick check at 190 nodes).
+- Label legibility: labels are gated on on-screen spacing rather than a
+  fixed zoom, so 601 nodes at fit scale draw no labels and a zoomed view
+  draws them; lobe labels carry a dark halo.
+- The all-projects payload prefixes every id with `<store key>:`; a single
+  project payload does not. The lobe key is `id.slice(0, id.indexOf(":"))`
+  only in the all view; store keys never contain a colon.
+- The SDF build runs once at page load (~16k cells x 216 segments); it is
+  synchronous and measured at well under 50 ms.
+
+## Task Implementation Checklist: 0.17.0 brain view
+
+- [x] B1 SPEC section (this) on branch `feat/brain-ui-0.17` off the
+      stability branch (0af07df)
+- [x] B2 RED first: `tests/ui_html.rs` pins no external refs, no
+      `Math.random`, single script block, and `node --check` on the script
+      body; the `Math.random` guard failed on 0.16's file (2 passed / 1
+      failed at branch base), green after B3
+- [ ] B3 port the silhouette layout into `src/ui.html`: forces core,
+      silhouette + cortex band + fissures drawn under the graph, per-store
+      lobes with labels, density note, footer legend and CSS; keep fetch,
+      poll, select, and server keys; `fitView` policy per I-B2; lobe map
+      persistence per the hazard above
+- [x] B3 port landed (src/ui.html +500/-71, guard tests 3/3, node --check
+      ok). Live on the release binary against a COPY of the real stores:
+      604-node all view settles deterministic (position checksum identical
+      across two loads), idle settled tab 0 draws / 0 ticks in 2 s, two
+      unchanged polls left view and S bit-identical, filter click refits,
+      two stores named `limpet` took two lobes, sparse 13-node view shows the
+      density note. NOT yet met, handed to B4: 184 of 604 rims overshoot the
+      outline (occipital/cerebellum bulge), settle margin 9%, brainstem
+      clipped at fit scale.
+- [x] B3b (found by B3's live check, fixed RED-first in `tests/ui_http.rs`
+      + `src/ui.rs`): every browser request to `limpet ui` paid the full 5 s
+      read timeout since the 2026-07 hardening (measured 5.0 s per request
+      on the shipped 0.16.0 AND 0.16.1 binaries): each header line got a
+      fresh inner BufReader over the take that swallowed the remaining
+      header bytes, and the next read blocked on an empty socket. The route
+      tests never saw it because they shut down their write half and handed
+      the drain an EOF. Second defect from the same test file: an over-cap
+      request line was truncated at 8 KB and SERVED 200 instead of refused;
+      now 414. Fix, after the review round: one shared BufReader read
+      through `read_line_by_deadline`, which arms what is left of a 5 s
+      wall-clock deadline before EVERY recv (a plain `read_line` loops
+      inside one call and only sees the per-recv timeout, so a client
+      dripping one byte per 250 ms held the thread ~15 s: caught by the new
+      drip test, which FAILED against the first fix), plus a write timeout
+      for a client that never reads its response. Receipts: ui_http 4/4
+      green (browser-shaped keep-alive answered in ms, drip answered at the
+      deadline, 414 at exactly the cap in one write, cap-minus-one routed
+      200; the first two were RED at 5.0068 s and a 200 on a 9 KB line),
+      stability 15/15, ledger_session 5/5, docs_in_sync 7/7, clippy
+      --all-targets 0 warnings
+- [x] B4 optimize with receipts (headless Chromium, 1440x900, real store
+      copy: all 604, limpet 190, sunoku 13). Kept: grid repulsion with a
+      0.25 * S cutoff floored at 60 px; 3/2/1 ticks per frame by energy and
+      presettle 100; F.out 3.0 plus the post-integration projection; cool
+      damping 0.5 below 0.1 * N; fitView on the real polygon bbox with an
+      18 px rim pad (brainstem no longer clipped). Receipts, baseline ->
+      final: outside 184 -> 0 (max overshoot 11.05 -> 0 px), tick 0.83 ->
+      0.42 ms, draw 0.18 ms, settle 930 -> 556 ticks and 7086 -> 2449 ms,
+      p10 16.9 -> 18.6 px, energy after calm 13.7 max vs 30.2 threshold at
+      604 and 6.0 vs 9.5 at 190 (baseline FAILED at 190: 53 of 200 ticks
+      above), deterministic checksum identical on two loads, idle 0 ticks /
+      0 draws in 2 s, server latency 0.001 to 0.08 s per endpoint. Rejected
+      with figures: grid at 0.55 * S (slower), cutoff 0.35 * S (149 rims
+      outside), no px floor (13-node p10 -33%), F.out without projection
+      (133 rims), projection without F.out (humps), global damping 0.6/0.7,
+      early cool switch. Post-B4 controller edits: per-wake tick budget
+      (MAX_TICKS_PER_WAKE 4000) so I-B2 is finite by construction, footer
+      lobe wording, reduced-motion comment
+- [x] B5 docs: README Visual memory section, caption, alt text, and roadmap
+      pointer rewritten (0.16.1 folded into shipped, 0.17.0 named as this
+      release, next = the 1.0 tag after soak); `docs/limpet-ui.png` retaken
+      from the 0.17.0 release binary on a copy of the limpet store (190
+      nodes, 1180x820, no other project's name in the asset); ROADMAP
+      0.17.0 Shipped entry with the B4 numbers and the v1.0 section
+      narrowed to what the tag still waits for; docs_in_sync 7/7 green.
+      Review corrections applied: lobe wording (nine lobes, largest first,
+      shared past nine) in README, ROADMAP, I-B5, and the footer; "costs
+      nothing" -> "does no per-frame work" (a settled tab still redraws once
+      per 5 s poll); `esc()` named as the HTML escaper; the unbalanced
+      parenthesis in the roadmap pointer
+- [x] B6 adversarial review, two rounds, read-only agents with line-cited
+      repros. Round 1 (ui.rs fix, both test files, docs): 19 findings, all
+      addressed: wall-clock request deadline + write timeout (the deadline's
+      first form FAILED the new drip test at 15.27 s, replaced by a
+      fill_buf-driven reader that re-arms before every recv), 414 pinned at
+      exactly the cap in one write plus a cap-minus-one routed case, early
+      child-exit detection in spawn, scheme-relative and CI-node guards in
+      ui_html, lobe wording (nine lobes, shared past nine) in README /
+      ROADMAP / I-B5 / footer, "costs nothing" corrected, `esc()`
+      clarified, a stray parenthesis, B1/B2 ticked; two findings were
+      pre-existing on main and fixed anyway (write timeout, drip). Round 2
+      (final ui.html, JS correctness + honesty envelope, 47 verified-ok
+      items): 6 findings, all fixed: project switch during an in-flight
+      poll was dropped and the stale payload merged under the new view
+      (IMPORTANT; polls now tagged and the switch queued), a filter click
+      before the first payload consumed its refit, a node fatter than the
+      brainstem was shoved every tick (radius cap), lobe-label gating
+      undocumented, a false gradAt comment, ledger fetch untagged
+- [x] B7 QA (2026-09-08 22:24 to 22:25 local, on the final tree with
+      version 0.17.0 synced in Cargo.toml, server.json, Cargo.lock): release
+      build 0 (`limpet 0.17.0`), tests 404 passed / 0 failed across 19
+      suites, clippy --all-targets 0 warnings, panic ratchet 0, bench 4.2x
+      overall / 5.4x lineage (gate 4.0x), demo 0, cargo audit 0, cargo
+      package 0, mcp-publisher validate ok, em-dash 0 authored files with
+      the named `.limpet/memory.jsonl` exclusion at 5. Browser checks on the
+      release binary against a store COPY: B4's receipts (all 604 / limpet
+      190 / sparse 13: 0 rims outside, settle 556 ticks, idle 0 ticks and 0
+      draws in 2 s, deterministic checksum, 0 console errors) plus the
+      controller's own load of the limpet view for the README asset (190
+      nodes, calm at 588 ticks, 0 errors) and the 4 http tests over the
+      real socket path
+- [ ] B8 ship: version sync 0.17.0, PR, 3-OS CI green, merge,
+      /deploy-limpet, post-release verification
+
+---
+
 # SPEC: the stability contract, v1.0 (code half)
 
 Status: IN PROGRESS 2026-08-25. Source: the v1.0 roadmap milestone plus the
