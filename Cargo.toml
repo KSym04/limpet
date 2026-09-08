@@ -1,6 +1,6 @@
 [package]
 name = "limpet"
-version = "0.16.1"
+version = "0.17.0"
 edition = "2021"
 # MSRV. Verified by building and testing on this exact toolchain, not guessed.
 # The floor is set by the dependency tree, not by limpet's own source: ureq ->

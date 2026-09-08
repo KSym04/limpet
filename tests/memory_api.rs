@@ -1392,7 +1392,12 @@ fn lww_reimport_through_an_old_peer_keeps_the_local_slot() {
     let mut out = Vec::new();
     store.export_jsonl(&mut out).unwrap();
     let line = String::from_utf8(out).unwrap();
-    let mut obj: serde_json::Value = serde_json::from_str(line.lines().next().unwrap()).unwrap();
+    // Skip the wire-format header: the peer line under edit is the ENTRY.
+    let entry_line = line
+        .lines()
+        .find(|l| l.contains("\"id\""))
+        .expect("export carries the entry");
+    let mut obj: serde_json::Value = serde_json::from_str(entry_line).unwrap();
     // What an old peer emits back: no disamb on the anchor, a strictly newer
     // entry stamp from its own edit (within the import skew allowance).
     obj["anchors"][0].as_object_mut().unwrap().remove("disamb");

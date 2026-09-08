@@ -117,37 +117,120 @@ pub fn serve_ui(root: &Path, port: u16) -> Result<()> {
     Ok(())
 }
 
+/// How a line read ended.
+enum LineEnd {
+    /// A `\n` was read (the line includes it).
+    Newline,
+    /// The socket closed; `buf` holds whatever arrived before it.
+    Eof,
+    /// `cap` bytes were read without a `\n`; the rest of the line is still
+    /// in the socket.
+    Cap,
+}
+
+/// Read one line into `buf`, never more than `cap` bytes, giving up when
+/// `deadline` passes. Every recv is armed with the time left and the
+/// deadline is re-checked between recvs, so a client dripping one byte per
+/// call cannot stretch a single line past it (a plain `read_line` loops
+/// inside one call and only ever sees the per-recv timeout).
+fn read_line_by_deadline(
+    reader: &mut BufReader<std::net::TcpStream>,
+    stream: &std::net::TcpStream,
+    deadline: std::time::Instant,
+    cap: usize,
+    buf: &mut Vec<u8>,
+) -> std::io::Result<LineEnd> {
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return Err(std::io::Error::from(std::io::ErrorKind::TimedOut));
+        }
+        stream.set_read_timeout(Some(left))?;
+        let avail = reader.fill_buf()?;
+        if avail.is_empty() {
+            return Ok(LineEnd::Eof);
+        }
+        let room = cap.saturating_sub(buf.len());
+        let window = &avail[..avail.len().min(room)];
+        let (n, hit) = match window.iter().position(|&b| b == b'\n') {
+            Some(i) => (i + 1, true),
+            None => (window.len(), false),
+        };
+        buf.extend_from_slice(&window[..n]);
+        reader.consume(n);
+        if hit {
+            return Ok(LineEnd::Newline);
+        }
+        if buf.len() >= cap {
+            return Ok(LineEnd::Cap);
+        }
+    }
+}
+
 /// Serve one HTTP connection: bounded read, route, respond, close.
 fn handle_conn(mut stream: std::net::TcpStream, root: &Path, default_key: &str) {
-    // Read timeout plus hard byte/line caps keep one stuck or hostile
-    // local client from holding a thread or growing memory without
-    // bound (audit 2026-07).
-    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
-    const MAX_REQ_LINE: u64 = 8 * 1024;
+    // Timeouts plus hard byte/line caps keep one stuck or hostile local
+    // client from holding a thread or growing memory without bound (audit
+    // 2026-07). A read timeout alone is per recv, so a client dripping one
+    // byte per call stays inside it forever; `deadline` bounds the whole
+    // request on the wall clock and `read_line_by_deadline` re-arms what is
+    // left of it before EVERY recv. The write timeout covers a client that
+    // sends a valid request and never reads the response. The cloned reader
+    // shares the socket, so options set on `stream` apply to it too.
+    const REQUEST_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+    const MAX_REQ_LINE: usize = 8 * 1024;
     const MAX_HEADER_LINES: usize = 100;
+    let deadline = std::time::Instant::now() + REQUEST_DEADLINE;
+    let _ = stream.set_write_timeout(Some(REQUEST_DEADLINE));
+    // ONE buffered reader for the whole request, so bytes already pulled
+    // off the socket are never lost between lines. Through 0.16.1 every
+    // line got a fresh inner BufReader over a Take: it drained the rest of
+    // the headers into a buffer it then dropped, the next read found an
+    // empty socket, and every browser request (write half left open, as
+    // browsers do) paid the full 5 s read timeout. The route tests never
+    // saw it because they shut down their write half and handed the drain
+    // an EOF; tests/ui_http.rs now sends a browser-shaped request.
     let mut reader = BufReader::new(match stream.try_clone() {
         Ok(s) => s,
         Err(_) => return,
     });
-    let mut request_line = String::new();
-    {
-        let mut limited = std::io::Read::take(std::io::Read::by_ref(&mut reader), MAX_REQ_LINE);
-        let mut lr = BufReader::new(&mut limited);
-        if lr.read_line(&mut request_line).is_err() || request_line.is_empty() {
+    let mut raw_line: Vec<u8> = Vec::new();
+    let request_line = match read_line_by_deadline(&mut reader, &stream, deadline, MAX_REQ_LINE, &mut raw_line) {
+        // Deadline, timeout, or socket error before a request line: nothing
+        // to answer.
+        Err(_) => return,
+        Ok(LineEnd::Eof) if raw_line.is_empty() => return,
+        Ok(LineEnd::Cap) => {
+            // The cap cut the line. Refuse it outright: a truncated request
+            // line must never be routed as if it were the one the client sent.
+            let body = "request line too long";
+            let _ = write!(
+                stream,
+                "HTTP/1.1 414 URI Too Long\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.flush();
             return;
         }
-    }
-    // Drain headers (bounded); nothing in them is trusted or used.
-    let mut line = String::new();
+        // A complete line, or a partial one at EOF (a client that closed
+        // right after the request line), is routed as it was received.
+        Ok(_) => match String::from_utf8(std::mem::take(&mut raw_line)) {
+            Ok(l) => l,
+            Err(_) => return,
+        },
+    };
+    // Drain headers (bounded); nothing in them is trusted or used. A cut
+    // header line counts as one header and the rest of it as the next, so
+    // the total is bounded by MAX_HEADER_LINES x MAX_REQ_LINE and, before
+    // that, by the deadline.
     let mut header_count = 0usize;
     loop {
-        line.clear();
-        let mut limited = std::io::Read::take(std::io::Read::by_ref(&mut reader), MAX_REQ_LINE);
-        let mut lr = BufReader::new(&mut limited);
-        match lr.read_line(&mut line) {
-            Ok(0) | Err(_) => break,
+        raw_line.clear();
+        match read_line_by_deadline(&mut reader, &stream, deadline, MAX_REQ_LINE, &mut raw_line) {
+            // Deadline or EOF mid-headers: answer what was read, then close.
+            Err(_) | Ok(LineEnd::Eof) => break,
             Ok(_) => {
-                if line == "\r\n" || line == "\n" || line.is_empty() {
+                if raw_line == b"\r\n" || raw_line == b"\n" {
                     break;
                 }
                 header_count += 1;

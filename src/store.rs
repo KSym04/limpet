@@ -12,6 +12,11 @@ use std::path::{Path, PathBuf};
 
 pub const SCHEMA_VERSION: i64 = 8;
 
+/// JSONL wire-format version (I-S3). Bump ONLY when an old importer could
+/// misread the new shape; additive per-line fields do not qualify (unknown
+/// fields were always ignored), a change to line semantics does.
+pub const EXPORT_FORMAT: i64 = 1;
+
 pub struct Store {
     pub conn: Connection,
     /// What THIS process actually served: an accumulator `ledger_add`
@@ -145,6 +150,74 @@ CREATE TABLE IF NOT EXISTS archived (
 );
 "#;
 
+/// Refuse to migrate a store a NEWER schema has already shaped (I-S1).
+///
+/// Before this guard, an older binary opening a newer store re-ran its own
+/// chain (each migration self-gates on table state, so no DDL fired) and
+/// then stamped its OWN `SCHEMA_VERSION` over the newer one: the store read
+/// as old while carrying new columns, and the stamp flip-flopped silently
+/// between binaries. The guard runs before any migration, so a refused open
+/// leaves the store logically untouched: the only statements ahead of it are
+/// connection pragmas and SCHEMA_V1's IF NOT EXISTS DDL, no-ops against any
+/// existing store (WAL bookkeeping may still move file bytes). Read-only
+/// display surfaces (statusline, hook) never reach this code: they open the
+/// file read-only and never migrate.
+fn schema_guard(conn: &Connection) -> Result<()> {
+    // Read with the same CAST coercion `stamp_schema_version`'s monotonic
+    // WHERE clause uses, so the guard and the stamp can never disagree about
+    // which of two stamps is newer (a review found '9x' passing a strict
+    // Rust parse as 0 while the SQL layer read it as 9).
+    let found: i64 = conn
+        .query_row(
+            "SELECT CAST(v AS INTEGER) FROM meta_kv WHERE k='schema_version'",
+            [],
+            |r| r.get(0),
+        )
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(0),
+            other => Err(other),
+        })?;
+    if found > SCHEMA_VERSION {
+        bail!(
+            "this limpet reads store schema v{SCHEMA_VERSION} but the store is \
+             already at schema v{found}, written by a newer limpet. Upgrade this \
+             binary (limpet update) or open the store with the newer binary; \
+             migrating it backward would corrupt it."
+        );
+    }
+    Ok(())
+}
+
+/// Stamp the schema version, FORWARD only (I-S2). The `WHERE` clause makes
+/// the stamp monotonic at the SQL layer even if a future code path reaches
+/// it with a stale constant: a lower value never overwrites a higher one.
+fn stamp_schema_version(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "INSERT INTO meta_kv(k, v) VALUES('schema_version', ?1)
+         ON CONFLICT(k) DO UPDATE SET v = excluded.v
+         WHERE CAST(v AS INTEGER) < CAST(excluded.v AS INTEGER)",
+        [SCHEMA_VERSION.to_string()],
+    )?;
+    Ok(())
+}
+
+/// The one migration chain (I-S4). `open` and `open_in_memory` both run
+/// exactly this list; a test asserts the two paths produce identical
+/// schemas, so the chain cannot fork again the way the hand-duplicated
+/// copies once could.
+fn run_migrations(conn: &Connection) -> Result<()> {
+    schema_guard(conn)?;
+    migrate_to_v2(conn)?;
+    migrate_to_v3(conn)?;
+    migrate_to_v4(conn)?;
+    migrate_to_v5(conn)?;
+    migrate_to_v6(conn)?;
+    migrate_to_v7(conn)?;
+    migrate_to_v8(conn)?;
+    refill_v7_content_once(conn)?;
+    Ok(())
+}
+
 /// Schema v2 (lazy migration): `private` marks a memory that must never
 /// leave this machine via export; `origin` is a caller-supplied dedup key
 /// (the scan flow stamps `scan:git:<sha>` etc.) enforced unique so a
@@ -170,11 +243,7 @@ fn migrate_to_v2(conn: &Connection) -> Result<()> {
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_entries_origin
          ON entries(origin) WHERE origin IS NOT NULL;",
     )?;
-    conn.execute(
-        "INSERT INTO meta_kv(k, v) VALUES('schema_version', ?1)
-         ON CONFLICT(k) DO UPDATE SET v = excluded.v",
-        [SCHEMA_VERSION.to_string()],
-    )?;
+    stamp_schema_version(conn)?;
     Ok(())
 }
 
@@ -194,11 +263,7 @@ fn migrate_to_v3(conn: &Connection) -> Result<()> {
          CREATE INDEX IF NOT EXISTS idx_inherits_parent ON inherits(parent_name);
          CREATE INDEX IF NOT EXISTS idx_inherits_file   ON inherits(file);",
     )?;
-    conn.execute(
-        "INSERT INTO meta_kv(k, v) VALUES('schema_version', ?1)
-         ON CONFLICT(k) DO UPDATE SET v = excluded.v",
-        [SCHEMA_VERSION.to_string()],
-    )?;
+    stamp_schema_version(conn)?;
     Ok(())
 }
 
@@ -250,11 +315,7 @@ fn migrate_to_v4(conn: &Connection) -> Result<()> {
         // incrementally; rows (and thus symbols and anchors) are untouched.
         conn.execute("UPDATE files SET mtime_ns = 0", [])?;
     }
-    conn.execute(
-        "INSERT INTO meta_kv(k, v) VALUES('schema_version', ?1)
-         ON CONFLICT(k) DO UPDATE SET v = excluded.v",
-        [SCHEMA_VERSION.to_string()],
-    )?;
+    stamp_schema_version(conn)?;
     Ok(())
 }
 
@@ -275,11 +336,7 @@ fn migrate_to_v5(conn: &Connection) -> Result<()> {
         conn.execute_batch("ALTER TABLE symbols ADD COLUMN body_len INTEGER")?;
         conn.execute("UPDATE files SET mtime_ns = 0", [])?;
     }
-    conn.execute(
-        "INSERT INTO meta_kv(k, v) VALUES('schema_version', ?1)
-         ON CONFLICT(k) DO UPDATE SET v = excluded.v",
-        [SCHEMA_VERSION.to_string()],
-    )?;
+    stamp_schema_version(conn)?;
     Ok(())
 }
 
@@ -297,11 +354,7 @@ fn migrate_to_v6(conn: &Connection) -> Result<()> {
            archived_at TEXT NOT NULL
          );",
     )?;
-    conn.execute(
-        "INSERT INTO meta_kv(k, v) VALUES('schema_version', ?1)
-         ON CONFLICT(k) DO UPDATE SET v = excluded.v",
-        [SCHEMA_VERSION.to_string()],
-    )?;
+    stamp_schema_version(conn)?;
     Ok(())
 }
 
@@ -319,11 +372,7 @@ fn migrate_to_v8(conn: &Connection) -> Result<()> {
     if present == 0 {
         add_column_tolerating_race(conn, "ALTER TABLE entries ADD COLUMN conf_before_stale REAL")?;
     }
-    conn.execute(
-        "INSERT INTO meta_kv(k, v) VALUES('schema_version', ?1)
-         ON CONFLICT(k) DO UPDATE SET v = excluded.v",
-        [SCHEMA_VERSION.to_string()],
-    )?;
+    stamp_schema_version(conn)?;
     Ok(())
 }
 
@@ -375,11 +424,7 @@ fn migrate_to_v7(conn: &Connection) -> Result<()> {
     if present == 0 {
         add_column_tolerating_race(conn, "ALTER TABLE anchors ADD COLUMN disamb TEXT")?;
     }
-    conn.execute(
-        "INSERT INTO meta_kv(k, v) VALUES('schema_version', ?1)
-         ON CONFLICT(k) DO UPDATE SET v = excluded.v",
-        [SCHEMA_VERSION.to_string()],
-    )?;
+    stamp_schema_version(conn)?;
     Ok(())
 }
 
@@ -447,14 +492,7 @@ impl Store {
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.execute_batch(SCHEMA_V1)?;
-        migrate_to_v2(&conn)?;
-        migrate_to_v3(&conn)?;
-        migrate_to_v4(&conn)?;
-        migrate_to_v5(&conn)?;
-        migrate_to_v6(&conn)?;
-        migrate_to_v7(&conn)?;
-        migrate_to_v8(&conn)?;
-        refill_v7_content_once(&conn)?;
+        run_migrations(&conn)?;
         Ok(Store { conn, session: std::cell::Cell::new(Ledger::default()) })
     }
 
@@ -463,14 +501,7 @@ impl Store {
         let conn = Connection::open_in_memory()?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.execute_batch(SCHEMA_V1)?;
-        migrate_to_v2(&conn)?;
-        migrate_to_v3(&conn)?;
-        migrate_to_v4(&conn)?;
-        migrate_to_v5(&conn)?;
-        migrate_to_v6(&conn)?;
-        migrate_to_v7(&conn)?;
-        migrate_to_v8(&conn)?;
-        refill_v7_content_once(&conn)?;
+        run_migrations(&conn)?;
         Ok(Store { conn, session: std::cell::Cell::new(Ledger::default()) })
     }
 
@@ -618,6 +649,33 @@ impl Store {
         // binary writes its own, and proceed to write (audit 2026-07).
         self.conn.execute_batch("BEGIN IMMEDIATE")?;
         let outcome = (|| -> Result<()> {
+            // The schema stamp is checked here too, not only at open (I-S1):
+            // a long-lived handle passed open's guard when the store was
+            // still old, and a newer binary can migrate the store forward
+            // through a surface that never stamps code_version (`limpet ui`
+            // opens migrate). Without this check that older handle keeps
+            // writing into the newer schema indefinitely. Coerced with the
+            // same CAST the monotonic stamp uses, so the two layers cannot
+            // disagree about what "newer" means.
+            let schema: i64 = self
+                .conn
+                .query_row(
+                    "SELECT CAST(v AS INTEGER) FROM meta_kv WHERE k='schema_version'",
+                    [],
+                    |r| r.get(0),
+                )
+                .or_else(|e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => Ok(0),
+                    other => Err(other),
+                })?;
+            if schema > SCHEMA_VERSION {
+                bail!(
+                    "this limpet process reads store schema v{SCHEMA_VERSION} but the \
+                     store is already at schema v{schema}, migrated by a newer limpet. \
+                     Restart the MCP client (or kill lingering `limpet serve` \
+                     processes) so a current binary serves this store."
+                );
+            }
             match self.kv_get("code_version")? {
                 Some(stamped) if ver_tuple(&stamped) > ver_tuple(running) => bail!(
                     "this limpet process is running {running} but the store was \
@@ -667,6 +725,20 @@ impl Store {
     /// One entry per line, ULID-sorted, stable field order. Text format so
     /// team sharing via git produces reviewable, mergeable diffs.
     pub fn export_jsonl(&self, w: &mut impl Write) -> Result<ExportReport> {
+        // Wire-format header (I-S3), first line, so any reader knows what it
+        // holds before touching a byte of data. Importers at this format skip
+        // it; importers past it read it; importers BEFORE it (0.16 and
+        // earlier) abort the whole import loudly on the missing id, which is
+        // safe (transactional, nothing partial) if unfriendly; the remedy is
+        // the current binary.
+        writeln!(
+            w,
+            "{}",
+            serde_json::json!({
+                "limpet_export": EXPORT_FORMAT,
+                "schema_version": SCHEMA_VERSION,
+            })
+        )?;
         let mut stmt = self.conn.prepare(
             "SELECT id, kind, body, created_at, updated_at, source, confidence,
                     status, stale_reason, branch, evidence_cmd, evidence_digest,
@@ -792,6 +864,34 @@ impl Store {
             }
             let obj: serde_json::Value =
                 serde_json::from_str(&line).context("malformed JSONL line")?;
+            // Header record (I-S3): names the wire format, is never data. A
+            // future format refuses the whole file loudly; guessing at wire
+            // shapes this code has never seen is how stores get corrupted.
+            // Pre-1.0 files have no header and take the entry path as ever.
+            // Only a line WITHOUT an id can be a header: a line carrying both
+            // the marker and entry data is no shape any exporter writes, and
+            // silently discarding it would under-report dropped data, so it
+            // falls through to the entry path and is counted there.
+            if obj.get("limpet_export").is_some() && obj.get("id").is_none() {
+                match obj["limpet_export"].as_i64() {
+                    Some(fmt) if fmt > EXPORT_FORMAT => bail!(
+                        "this file is limpet export format {fmt}; this binary reads \
+                         up to format {EXPORT_FORMAT}. Import it with the limpet \
+                         that wrote it, or upgrade this one (limpet update)."
+                    ),
+                    Some(_) => {}
+                    // A marker that is not an integer is no format this code
+                    // has ever written: refuse without inventing a number.
+                    None => bail!(
+                        "this file carries an unrecognized limpet_export marker \
+                         ({}); this binary reads up to format {EXPORT_FORMAT}. \
+                         Import it with the limpet that wrote it, or upgrade this \
+                         one (limpet update).",
+                        obj["limpet_export"]
+                    ),
+                }
+                continue;
+            }
             let id = obj["id"].as_str().context("entry missing id")?.to_string();
             let incoming_updated = obj["updated_at"].as_str().unwrap_or_default();
 

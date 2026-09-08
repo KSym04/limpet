@@ -35,7 +35,7 @@
   .badge.superseded { background: var(--superseded); color: #10161c; }
   .badge.kind { background: var(--line); color: var(--text); }
   .reverify { margin-top: 10px; padding: 8px; background: #241d0d; border: 1px solid var(--stale); border-radius: 4px; font-size: 12px; word-break: break-all; }
-  footer { padding: 6px 16px; border-top: 1px solid var(--line); color: var(--dim); font-size: 11px; display: flex; gap: 18px; }
+  footer { padding: 6px 16px; border-top: 1px solid var(--line); color: var(--dim); font-size: 11px; display: flex; gap: 18px; flex-wrap: wrap; row-gap: 2px; }
   .filters { margin-left: auto; display: flex; gap: 8px; }
   .filters button { background: none; border: 1px solid var(--line); color: var(--dim); border-radius: 4px; padding: 2px 10px; font: inherit; font-size: 11px; cursor: pointer; }
   .filters button.on { color: var(--text); border-color: var(--accent); }
@@ -66,11 +66,16 @@
   <aside id="panel"></aside>
 </main>
 <footer>
-  <span>memory: circle, sized by confidence</span>
+  <span>brain outline: memory settles in the cortex band, code sits in the white matter, anchors run inward like dendrites</span>
+  <span>memory: circle, sized by confidence; bright ring: verified; dashed ring: private</span>
   <span>code: square</span>
+  <span>green: active, amber: stale, red: invalidated, grey: superseded</span>
   <span>red dashes: contradicts</span>
   <span>blue: supersedes</span>
+  <span>green line: supports</span>
+  <span>all projects: stores spread over nine lobes, largest first (shared past nine), dim label at each store with five or more nodes (every store when zoomed in)</span>
   <span>drag to pan, wheel to zoom, click a node</span>
+  <span id="density" style="color: var(--stale)"></span>
   <span id="err" style="color: var(--dead)"></span>
 </footer>
 <script>
@@ -79,6 +84,401 @@ const canvas = document.getElementById("graph");
 const ctx = canvas.getContext("2d");
 const panel = document.getElementById("panel");
 const COLORS = { active: "#3fb96f", stale: "#e0a437", invalidated: "#e05252", superseded: "#6b7885" };
+
+// ---- brain core (DOM-free) --------------------------------------------
+// Everything in this block is pure: no canvas, no document.
+
+// FNV-1a over the id string: every per-node "random" quantity derives from
+// this, never from the runtime, so the picture is identical across reloads.
+function hash32(str) {
+  let h = 2166136261;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+function unitHash(str, salt) { return hash32(salt + "|" + str) / 4294967296; }
+
+// Brain silhouette, side view, facing left. Unit space: x right, y down,
+// cerebrum roughly spans x in [-1, 1], y in [-0.7, 0.55]; cerebellum sits
+// low-rear, brainstem stub hangs below centre-rear. Control points are
+// smoothed by a closed Catmull-Rom spline into the polygon used for both
+// drawing and the signed-distance field.
+const BRAIN_CTRL = [
+  [-0.96, -0.02],           // frontal pole
+  [-0.88, -0.32],
+  [-0.66, -0.55],
+  [-0.36, -0.67],
+  [-0.02, -0.71],           // vertex
+  [ 0.30, -0.67],
+  [ 0.60, -0.55],
+  [ 0.86, -0.34],
+  [ 0.99, -0.08],           // occipital pole
+  [ 0.96,  0.16],
+  [ 0.86,  0.32],
+  [ 0.72,  0.37],           // notch above cerebellum
+  [ 0.84,  0.45],
+  [ 0.91,  0.60],
+  [ 0.84,  0.74],
+  [ 0.68,  0.81],
+  [ 0.52,  0.77],
+  [ 0.43,  0.70],           // cerebellum meets stem
+  [ 0.41,  0.96],
+  [ 0.24,  0.97],           // stem base
+  [ 0.22,  0.62],
+  [ 0.10,  0.50],
+  [-0.12,  0.53],
+  [-0.38,  0.56],           // temporal pole underside
+  [-0.62,  0.49],
+  [-0.80,  0.34],
+  [-0.92,  0.16],
+];
+const SEG = 8;
+
+function splineClosed(pts, seg) {
+  const out = [], n = pts.length;
+  for (let i = 0; i < n; i++) {
+    const p0 = pts[(i - 1 + n) % n], p1 = pts[i], p2 = pts[(i + 1) % n], p3 = pts[(i + 2) % n];
+    for (let j = 0; j < seg; j++) {
+      const t = j / seg, t2 = t * t, t3 = t2 * t;
+      out.push([
+        0.5 * (2 * p1[0] + (-p0[0] + p2[0]) * t + (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * t2 + (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * t3),
+        0.5 * (2 * p1[1] + (-p0[1] + p2[1]) * t + (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * t2 + (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * t3),
+      ]);
+    }
+  }
+  return out;
+}
+const BRAIN_POLY = splineClosed(BRAIN_CTRL, SEG);
+// Bounding box of the smoothed polygon in unit space (the spline overshoots
+// its control points a little at the stem base), used by fitView so the
+// whole silhouette, brainstem included, lands inside the canvas.
+const BRAIN_BOX = BRAIN_POLY.reduce(
+  (b, [x, y]) => ({ minX: Math.min(b.minX, x), maxX: Math.max(b.maxX, x), minY: Math.min(b.minY, y), maxY: Math.max(b.maxY, y) }),
+  { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity });
+
+// Faint interior lines that make the lobes read: lateral fissure and central
+// sulcus. Decoration only; they take no part in the forces.
+const BRAIN_LINES = [
+  splineClosed([[-0.80, 0.30], [-0.55, 0.18], [-0.25, 0.09], [0.02, 0.02], [0.24, -0.06], [0.02, 0.02], [-0.25, 0.09], [-0.55, 0.18]], 6).slice(0, 4 * 6 + 1),
+  splineClosed([[-0.10, -0.70], [-0.06, -0.48], [0.00, -0.28], [0.08, -0.10], [0.00, -0.28], [-0.06, -0.48]], 6).slice(0, 3 * 6 + 1),
+];
+
+// Signed-distance field on a coarse grid over the polygon: negative inside,
+// positive outside, in unit space. Built once (~16k cells x 216 segments).
+const SDF = (function build() {
+  const x0 = -1.35, y0 = -1.05, x1 = 1.35, y1 = 1.30, cell = 0.02;
+  const w = Math.ceil((x1 - x0) / cell) + 1, h = Math.ceil((y1 - y0) / cell) + 1;
+  const d = new Float32Array(w * h);
+  const P = BRAIN_POLY, n = P.length;
+  for (let j = 0; j < h; j++) {
+    const py = y0 + j * cell;
+    for (let i = 0; i < w; i++) {
+      const px = x0 + i * cell;
+      let best = Infinity, inside = false;
+      for (let k = 0, m = n - 1; k < n; m = k++) {
+        const ax = P[m][0], ay = P[m][1], bx = P[k][0], by = P[k][1];
+        const ex = bx - ax, ey = by - ay;
+        let t = ((px - ax) * ex + (py - ay) * ey) / (ex * ex + ey * ey);
+        t = t < 0 ? 0 : t > 1 ? 1 : t;
+        const qx = ax + ex * t - px, qy = ay + ey * t - py;
+        const dd = qx * qx + qy * qy;
+        if (dd < best) best = dd;
+        if ((ay > py) !== (by > py) && px < ax + (py - ay) * ex / ey) inside = !inside;
+      }
+      d[j * w + i] = inside ? -Math.sqrt(best) : Math.sqrt(best);
+    }
+  }
+  // Gradient field, central differences then two 3x3 box blurs. It is used
+  // UN-normalised: away from the medial axis it has unit length, on the
+  // axis (where the nearest wall switches) the blur cancels it to zero, so
+  // the radial forces fade smoothly instead of flipping sign. A normalised
+  // gradient there produced a permanent 3-cycle jitter in the brainstem.
+  let gx = new Float32Array(w * h), gy = new Float32Array(w * h);
+  for (let j = 1; j < h - 1; j++) {
+    for (let i = 1; i < w - 1; i++) {
+      gx[j * w + i] = (d[j * w + i + 1] - d[j * w + i - 1]) / (2 * cell);
+      gy[j * w + i] = (d[(j + 1) * w + i] - d[(j - 1) * w + i]) / (2 * cell);
+    }
+  }
+  for (let pass = 0; pass < 2; pass++) {
+    const bx = new Float32Array(w * h), by = new Float32Array(w * h);
+    for (let j = 1; j < h - 1; j++) {
+      for (let i = 1; i < w - 1; i++) {
+        let sx = 0, sy = 0;
+        for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) { sx += gx[(j + dj) * w + i + di]; sy += gy[(j + dj) * w + i + di]; }
+        bx[j * w + i] = sx / 9; by[j * w + i] = sy / 9;
+      }
+    }
+    gx = bx; gy = by;
+  }
+  return { x0, y0, x1, y1, cell, w, h, d, gx, gy };
+})();
+
+// Bilinear sample of the field at a unit-space point. Outside the grid the
+// nearest edge sample is used plus the Euclidean overshoot, so a node flung
+// far away is still pulled home.
+function sdfAt(ux, uy) {
+  const g = SDF;
+  let fx = (ux - g.x0) / g.cell, fy = (uy - g.y0) / g.cell, extra = 0;
+  if (fx < 0 || fy < 0 || fx > g.w - 1.001 || fy > g.h - 1.001) {
+    const cx = Math.min(Math.max(fx, 0), g.w - 1.001), cy = Math.min(Math.max(fy, 0), g.h - 1.001);
+    extra = Math.hypot(fx - cx, fy - cy) * g.cell;
+    fx = cx; fy = cy;
+  }
+  const i = fx | 0, j = fy | 0, tx = fx - i, ty = fy - j, w = g.w, d = g.d;
+  const a = d[j * w + i], b = d[j * w + i + 1], c = d[(j + 1) * w + i], e = d[(j + 1) * w + i + 1];
+  return (a * (1 - tx) + b * tx) * (1 - ty) + (c * (1 - tx) + e * tx) * ty + extra;
+}
+
+// Bilinear sample of the blurred gradient (see SDF build). Clamped to the
+// grid, whose border cells hold a zero gradient, so beyond the grid the
+// containment force fades to nothing and only the projection step (its
+// finite-difference fallback in brainTick) pulls a node home.
+function gradAt(ux, uy, out) {
+  const g = SDF;
+  const fx = Math.min(Math.max((ux - g.x0) / g.cell, 0), g.w - 1.001);
+  const fy = Math.min(Math.max((uy - g.y0) / g.cell, 0), g.h - 1.001);
+  const i = fx | 0, j = fy | 0, tx = fx - i, ty = fy - j, w = g.w;
+  const k = j * w + i;
+  out[0] = (g.gx[k] * (1 - tx) + g.gx[k + 1] * tx) * (1 - ty) + (g.gx[k + w] * (1 - tx) + g.gx[k + w + 1] * tx) * ty;
+  out[1] = (g.gy[k] * (1 - tx) + g.gy[k + 1] * tx) * (1 - ty) + (g.gy[k + w] * (1 - tx) + g.gy[k + w + 1] * tx) * ty;
+  const l = Math.hypot(out[0], out[1]);
+  if (l > 1) { out[0] /= l; out[1] /= l; }
+  return out;
+}
+
+// Lobe centres in unit space; the all-projects view hands each store one,
+// cycling when there are more stores than lobes.
+const LOBES = [
+  ["frontal",    -0.50, -0.14],
+  ["parietal",    0.24, -0.40],
+  ["temporal",   -0.28,  0.30],
+  ["occipital",   0.72, -0.04],
+  ["cerebellum",  0.66,  0.60],
+  ["insula",      0.02,  0.06],
+  ["prefrontal", -0.78, -0.08],
+  ["motor",      -0.06, -0.54],
+  ["brainstem",   0.31,  0.78],
+];
+
+// Silhouette scale in px per unit, from the visible node count: a 13-node
+// project gets a small brain instead of floating in a big empty one.
+function brainScale(count) {
+  return Math.min(460, Math.max(70, 60 + 15 * Math.sqrt(count)));
+}
+const SPARSE_BELOW = 40;
+
+// Force gains. Repulsion is a softened, short-range kernel
+// K / (d^2 + soft^2) tapered to zero at `cut` (in units of S, floored at
+// `cutMin` px so a small silhouette keeps the same neighbour reach): unlike
+// the original's long-range 1/d^2 it exerts little pressure on the outline,
+// so the gas fills the silhouette instead of bursting it, and its stiffness
+// stays under the damping stability limit at brain density. `damp` is the
+// velocity kept per tick while the layout is hot; `dampCool` replaces it
+// once the previous tick's energy fell under `coolBelow` per node, so the
+// slow late rearrangements (memories creeping to the cortex through a
+// jammed gas) carry about a third of the velocity and the settle check
+// cannot fire in a lull that precedes a hump. `out` is the containment gain
+// outside the outline (per px of overshoot); the projection step in
+// brainTick is the hard guarantee behind it. cortexT and interiorT are
+// target depths in units of S; lobeK is the per-store attraction
+// (all-projects view), centerK the isotropic pull used instead in a
+// single-project view.
+const F = {
+  repel: 2200, soft: 16, cut: 0.25, cutMin: 60,
+  damp: 0.82, dampCool: 0.5, coolBelow: 0.1,
+  anchorLen: 90, otherLen: 140, spring: 0.004,
+  out: 3.0,
+  // A node fatter than the silhouette's thinnest region (the brainstem is
+  // about 0.19 units wide) cannot fit; its containment radius is capped at
+  // this fraction of S so it is held by its centre with an accepted rim
+  // overshoot instead of being shoved every tick. At S >= 167 px (about
+  // 51 visible nodes) the cap exceeds the largest node radius (15 px) and
+  // changes nothing.
+  rimMax: 0.09,
+  cortexK: 0.011, cortexT: -0.10,
+  interiorK: 0.006, interiorT: -0.30,
+  lobeK: 0.004, lobeMax: 1.2,
+  centerK: 0.0015,
+};
+
+// Same radius rule as the renderer; the containment keeps a node's RIM
+// inside the outline, not just its centre.
+function nodeRadius(n) {
+  if (n.type !== "memory") return 6;
+  return 7 + (n.conf || 0.5) * 8;
+}
+
+// Uniform-grid scratch for the pair loop: per-cell head index, per-node
+// next pointer and cell coordinates. Grown on demand, reused every tick.
+let gridHead = new Int32Array(0), gridNext = new Int32Array(0);
+let gridCx = new Int32Array(0), gridCy = new Int32Array(0);
+const GRID_MAX = 64;
+
+// One simulation step. `nodes` carry x,y,vx,vy and a `lobe` entry from
+// LOBES (its centre times S is the target in the all view); `damp` is the
+// velocity fraction kept after integration. Returns total kinetic energy
+// so the caller can detect a settled layout and stop ticking.
+//
+// Repulsion runs on a uniform grid with cell = cutoff: every pair within
+// the cutoff shares a cell or a neighbouring one, so each node visits its
+// 3x3 neighbourhood instead of every other node (601 nodes: a few thousand
+// candidate pairs a tick instead of 180k). Cells are linked lists through
+// gridNext; the grid is capped at GRID_MAX per axis and a node beyond the
+// cap lands in the edge cell, which keeps every in-range pair adjacent (a
+// superset of the exact set, never a miss). Each pair is visited once
+// (j > i) and the sqrt is skipped beyond the cutoff.
+function brainTick(nodes, edges, byId, S, useLobes, damp) {
+  const n = nodes.length;
+  const cut = Math.max(F.cut * S, F.cutMin), cut2 = cut * cut, soft2 = F.soft * F.soft, inv = 1 / cut;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (let i = 0; i < n; i++) {
+    const a = nodes[i];
+    if (a.x < minX) minX = a.x;
+    if (a.x > maxX) maxX = a.x;
+    if (a.y < minY) minY = a.y;
+    if (a.y > maxY) maxY = a.y;
+  }
+  const cols = n ? Math.min(GRID_MAX, ((maxX - minX) * inv | 0) + 1) : 1;
+  const rows = n ? Math.min(GRID_MAX, ((maxY - minY) * inv | 0) + 1) : 1;
+  const cells = cols * rows;
+  if (gridNext.length < n) { gridNext = new Int32Array(n); gridCx = new Int32Array(n); gridCy = new Int32Array(n); }
+  if (gridHead.length < cells) gridHead = new Int32Array(cells);
+  gridHead.fill(-1, 0, cells);
+  for (let i = 0; i < n; i++) {
+    const a = nodes[i];
+    const cx = Math.min(cols - 1, (a.x - minX) * inv | 0), cy = Math.min(rows - 1, (a.y - minY) * inv | 0);
+    gridCx[i] = cx; gridCy[i] = cy;
+    const c = cy * cols + cx;
+    gridNext[i] = gridHead[c]; gridHead[c] = i;
+  }
+  for (let i = 0; i < n; i++) {
+    const a = nodes[i], ax = a.x, ay = a.y, cx = gridCx[i], cy = gridCy[i];
+    let fx = 0, fy = 0;
+    for (let dy = -1; dy <= 1; dy++) {
+      const yy = cy + dy;
+      if (yy < 0 || yy >= rows) continue;
+      for (let dx = -1; dx <= 1; dx++) {
+        const xx = cx + dx;
+        if (xx < 0 || xx >= cols) continue;
+        for (let j = gridHead[yy * cols + xx]; j >= 0; j = gridNext[j]) {
+          if (j <= i) continue;
+          const b = nodes[j];
+          const ddx = ax - b.x, ddy = ay - b.y, d2 = ddx * ddx + ddy * ddy;
+          if (d2 >= cut2) continue;
+          const d = Math.sqrt(d2) || 0.001;
+          const f = F.repel / (d2 + soft2) * (1 - d / cut) / d;
+          fx += ddx * f; fy += ddy * f;
+          b.vx -= ddx * f; b.vy -= ddy * f;
+        }
+      }
+    }
+    a.vx += fx; a.vy += fy;
+  }
+  const lenScale = Math.min(1, Math.max(0.3, S / 400));
+  for (const e of edges) {
+    const a = byId.get(e.from), b = byId.get(e.to);
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const d = Math.max(1, Math.hypot(dx, dy));
+    const want = (e.rel === "anchor" ? F.anchorLen : F.otherLen) * lenScale;
+    const f = (d - want) * F.spring;
+    a.vx += (dx / d) * f; a.vy += (dy / d) * f;
+    b.vx -= (dx / d) * f; b.vy -= (dy / d) * f;
+  }
+  // Containment + cortex/interior bias along the field gradient. The radial
+  // force is continuous through the outline so boundary nodes settle rather
+  // than chatter.
+  const invS = 1 / S, cy0 = 0.05 * S, grad = [0, 0], rimMax = F.rimMax * S;
+  for (const a of nodes) {
+    const ux = a.x * invS, uy = a.y * invS;
+    const s = sdfAt(ux, uy) * S;
+    gradAt(ux, uy, grad);
+    const gx = grad[0], gy = grad[1];
+    let f;
+    if (a.type === "memory") {
+      f = F.cortexK * (F.cortexT * S - Math.min(s, 0));
+    } else {
+      f = F.interiorK * Math.min(0, F.interiorT * S - Math.min(s, 0));
+    }
+    const over = s + Math.min(nodeRadius(a), rimMax);
+    if (over > 0) f -= F.out * over;
+    a.vx += gx * f; a.vy += gy * f;
+    if (useLobes) {
+      const lx = a.lobe[1] * S - a.x, ly = a.lobe[2] * S - a.y;
+      const ld = Math.hypot(lx, ly) || 1;
+      const lf = Math.min(F.lobeMax, ld * F.lobeK) / ld;
+      a.vx += lx * lf; a.vy += ly * lf;
+    } else {
+      a.vx -= a.x * F.centerK; a.vy -= (a.y - cy0) * F.centerK;
+    }
+  }
+  // Integrate, damp, then project: a node whose RIM is still outside the
+  // outline is moved back along the field gradient until it is inside and
+  // loses its outward velocity component (a wall collision, not a force).
+  // The containment force above does the settling; this is the hard
+  // guarantee that no rim overshoots at rest, and at rest it moves nothing.
+  let energy = 0;
+  for (const a of nodes) {
+    a.x += a.vx; a.y += a.vy;
+    a.vx *= damp; a.vy *= damp;
+    const r = Math.min(nodeRadius(a), rimMax);
+    for (let k = 0; k < 3; k++) {
+      const ux = a.x * invS, uy = a.y * invS;
+      const over = sdfAt(ux, uy) * S + r;
+      if (over <= 0) break;
+      gradAt(ux, uy, grad);
+      let nx = grad[0], ny = grad[1], gl = Math.hypot(nx, ny);
+      if (gl < 0.25) {
+        // The blurred field cancels where two walls meet (stem junction,
+        // cerebellar notch); fall back to a finite difference of the SDF.
+        const h = SDF.cell * 0.5;
+        nx = sdfAt(ux + h, uy) - sdfAt(ux - h, uy);
+        ny = sdfAt(ux, uy + h) - sdfAt(ux, uy - h);
+        gl = Math.hypot(nx, ny);
+        if (gl < 1e-9) break;
+        nx /= gl; ny /= gl; gl = 1;
+      } else {
+        nx /= gl; ny /= gl;
+      }
+      const step = (over + 0.01) / Math.max(gl, 0.5);
+      a.x -= nx * step; a.y -= ny * step;
+      const vn = a.vx * nx + a.vy * ny;
+      if (vn > 0) { a.vx -= vn * nx; a.vy -= vn * ny; }
+    }
+    energy += Math.abs(a.vx) + Math.abs(a.vy);
+  }
+  return energy;
+}
+
+// Store -> lobe assignment: biggest stores take the primary lobes, ties
+// broken by key, so the mapping is stable across reloads and filters. The
+// map only ever GROWS: a store first seen on a later poll takes the next
+// lobe in the cycle and no store already in the map is moved (recomputing
+// from counts would migrate a whole store when two counts cross).
+function assignLobes(map, keyOf, allNodes) {
+  const counts = new Map();
+  for (const n of allNodes) {
+    const k = keyOf(n);
+    if (!map.has(k)) counts.set(k, (counts.get(k) || 0) + 1);
+  }
+  const keys = [...counts.keys()].sort((a, b) => counts.get(b) - counts.get(a) || (a < b ? -1 : a > b ? 1 : 0));
+  for (const k of keys) map.set(k, LOBES[map.size % LOBES.length]);
+  return map;
+}
+
+// Deterministic initial position: near the lobe centre (all view) or spread
+// over the cerebrum (project view), offset by the id hash.
+function initPos(node, S, lobe) {
+  const ang = unitHash(node.id, "a") * Math.PI * 2;
+  const rad = Math.sqrt(unitHash(node.id, "r"));
+  if (lobe) {
+    return [lobe[1] * S + Math.cos(ang) * rad * 0.22 * S, lobe[2] * S + Math.sin(ang) * rad * 0.22 * S];
+  }
+  return [Math.cos(ang) * rad * 0.80 * S, 0.05 * S + Math.sin(ang) * rad * 0.52 * S];
+}
+// ---- end brain core ---------------------------------------------------
 
 let nodes = [], edges = [], byId = new Map();
 // Visibility is cached here and recomputed only when the data or the
@@ -92,8 +492,31 @@ let dpr = 1, cssW = 0, cssH = 0;
 // idle tab costs nothing. `wake()` rewarms after data/filter changes.
 let calm = 0, dirty = true;
 const CALM_FRAMES = 30;
+// Finite by construction: a wake gets at most MAX_TICKS_PER_WAKE simulation
+// ticks before calm is forced, so a layout whose energy never crosses the
+// settle threshold still stops. Measured settle is 556 ticks at 604 nodes;
+// the budget is about seven times that.
+let ticksThisWake = 0;
+const MAX_TICKS_PER_WAKE = 4000;
 
-function wake() { calm = 0; dirty = true; }
+// Brain state: S is the silhouette scale in px per unit (follows the visible
+// node count); useLobes is true only in the all-projects view; lobeOf maps
+// a store key to its LOBES entry and only grows within a view (reset on a
+// project switch); the two Path2Ds are rebuilt only when S changes.
+let S = brainScale(0), useLobes = true;
+let lobeOf = new Map();
+let brainPath = null, brainLines = null;
+// fitView policy: the view is refit only when `needFit` is set, and only
+// three events set it: the first data for a view, a project switch, and a
+// filter click. A poll never sets it, so a poll that changes the visible
+// count rescales positions but leaves the user's pan and zoom alone.
+let needFit = true;
+const REDUCED = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+// Energy of the previous tick; picks the damping for the next one (see F).
+let lastEnergy = Infinity;
+
+function wake() { calm = 0; dirty = true; lastEnergy = Infinity; ticksThisWake = 0; }
 
 function resize() {
   const rect = canvas.parentElement.getBoundingClientRect();
@@ -130,10 +553,11 @@ async function loadProjects() {
 }
 
 async function loadLedger() {
+  const project = currentProject;
   try {
-    const res = await fetch("/api/ledger?project=" + encodeURIComponent(currentProject));
+    const res = await fetch("/api/ledger?project=" + encodeURIComponent(project));
     const l = await res.json();
-    if (!l.lifetime) return;
+    if (project !== currentProject || !l.lifetime) return;
     document.getElementById("n-saved").textContent = l.lifetime.saved_tokens.toLocaleString();
     document.getElementById("ledger-stat").title =
       "recalls: " + l.lifetime.recalls +
@@ -143,37 +567,62 @@ async function loadLedger() {
   } catch (e) { /* cosmetic here; admin op=ledger is the source of truth */ }
 }
 
-let loading = false;
+let loading = false, reloadQueued = false;
 async function load() {
-  if (loading) return; // one poll in flight at a time
+  // One poll in flight at a time. A call that lands while one is in
+  // flight (a project switch during a poll) is queued rather than dropped,
+  // and a response for a project the user has since left is discarded, so
+  // a stale payload can never merge under the new view's lobe map or eat
+  // its one refit.
+  if (loading) { reloadQueued = true; return; }
   loading = true;
+  const project = currentProject;
   try {
-    const res = await fetch("/api/graph?project=" + encodeURIComponent(currentProject));
+    const res = await fetch("/api/graph?project=" + encodeURIComponent(project));
     const data = await res.json();
+    if (project !== currentProject) return;
     document.getElementById("indexed-at").textContent = data.indexed_at || "never";
     for (const key of ["active", "stale", "invalidated", "superseded"]) {
       document.getElementById("n-" + key).textContent = data.stats[key];
     }
+    // Lobes exist only in the all-projects view; a single project draws
+    // none and uses the isotropic pull instead.
+    useLobes = project === "all";
     merge(data.nodes, data.edges);
     loadLedger();
     document.getElementById("err").textContent = "";
   } catch (e) {
-    document.getElementById("err").textContent = "connection lost, retrying";
+    if (project === currentProject) document.getElementById("err").textContent = "connection lost, retrying";
   } finally {
     loading = false;
+    if (reloadQueued) { reloadQueued = false; load(); }
   }
+}
+
+// The all-projects payload prefixes every id with "<store key>:" and a
+// store key never contains a colon. Lobes key on that prefix, not on the
+// display name, so two stores that share a name get two lobes.
+function storeKey(id) {
+  const i = id.indexOf(":");
+  return i < 0 ? id : id.slice(0, i);
 }
 
 function merge(newNodes, newEdges) {
   const prev = byId;
   byId = new Map();
-  nodes = newNodes.map((n, i) => {
+  if (useLobes) assignLobes(lobeOf, n => storeKey(String(n.id)), newNodes);
+  nodes = newNodes.map(n => {
     const old = prev.get(n.id);
-    const angle = (i / Math.max(1, newNodes.length)) * Math.PI * 2;
+    const store = useLobes ? storeKey(String(n.id)) : null;
+    const lobe = useLobes ? (lobeOf.get(store) || LOBES[0]) : null;
+    // A surviving id keeps its position; a new one is seeded from its id
+    // hash at the current S (lobe centre in the all view, cerebrum in a
+    // project view). setScale rescales everything if the count moves S.
+    const [ix, iy] = old ? [old.x, old.y] : initPos(n, S, lobe);
     const node = Object.assign({
-      x: old ? old.x : Math.cos(angle) * 260 + (Math.random() - 0.5) * 40,
-      y: old ? old.y : Math.sin(angle) * 260 + (Math.random() - 0.5) * 40,
+      x: ix, y: iy,
       vx: old ? old.vx : 0, vy: old ? old.vy : 0,
+      lobe, store,
     }, n);
     byId.set(n.id, node);
     return node;
@@ -187,6 +636,43 @@ function merge(newNodes, newEdges) {
     else { selected = null; panel.classList.remove("open"); resize(); }
   }
   computeVisible();
+}
+
+// Silhouette scale follows the VISIBLE count. Existing positions are scaled
+// by the same ratio so a filter change or a poll that adds nodes re-settles
+// from a coherent picture rather than a fresh scatter.
+function setScale(next) {
+  if (Math.abs(next - S) < 0.5) return false;
+  const k = next / S;
+  for (const n of nodes) { n.x *= k; n.y *= k; }
+  S = next;
+  rebuildBrain();
+  return true;
+}
+
+function rebuildBrain() {
+  brainPath = new Path2D();
+  BRAIN_POLY.forEach(([x, y], i) => { if (i === 0) brainPath.moveTo(x * S, y * S); else brainPath.lineTo(x * S, y * S); });
+  brainPath.closePath();
+  brainLines = new Path2D();
+  for (const line of BRAIN_LINES) {
+    line.forEach(([x, y], i) => { if (i === 0) brainLines.moveTo(x * S, y * S); else brainLines.lineTo(x * S, y * S); });
+  }
+}
+
+// Fit the whole silhouette into the canvas: the polygon's bounding box plus
+// a rim's worth of padding (the widest node is 15 px plus its 2 px ring),
+// then a 6% margin, centred on the box so the brainstem is not cut off at
+// the bottom. Called only through `needFit` (first data, project switch,
+// filter click); pan/zoom after that is the user's.
+function fitView() {
+  const pad = 18;
+  const bw = (BRAIN_BOX.maxX - BRAIN_BOX.minX) * S + 2 * pad;
+  const bh = (BRAIN_BOX.maxY - BRAIN_BOX.minY) * S + 2 * pad;
+  view.scale = Math.min(3, Math.max(0.25, Math.min(cssW / bw, cssH / bh) * 0.94));
+  view.x = -(BRAIN_BOX.minX + BRAIN_BOX.maxX) / 2 * S * view.scale;
+  view.y = -(BRAIN_BOX.minY + BRAIN_BOX.maxY) / 2 * S * view.scale;
+  dirty = true;
 }
 
 // One O(nodes + edges) pass, run only on data or filter change. Memory
@@ -208,48 +694,72 @@ function computeVisible() {
   }
   visNodes = nodes.filter(n => keep.has(n.id));
   visEdges = edges.filter(e => keep.has(e.from) && keep.has(e.to));
+  // The silhouette follows the visible count; the view is refit only when
+  // an event asked for it, never because a poll moved the count.
+  setScale(brainScale(visNodes.length));
+  // A fit on no data (a filter click before the first payload) must not
+  // consume the fit the payload is still owed.
+  if (needFit && nodes.length) { fitView(); needFit = false; }
+  document.getElementById("density").textContent = visNodes.length < SPARSE_BELOW
+    ? "silhouette shrunk: " + visNodes.length + " nodes cannot fill a brain, the shape needs density"
+    : "";
   // Rewarm the simulation only when the visible set actually changed;
   // a steady 5s poll with identical data must not wake a settled layout.
   const fp = filter + "#" + visNodes.map(n => n.id).join("|") + "#" + visEdges.length;
   dirty = true; // colors/labels may change even when the set does not
-  if (fp !== computeVisible.fp) { computeVisible.fp = fp; wake(); }
+  if (fp !== computeVisible.fp) {
+    computeVisible.fp = fp;
+    wake();
+    // Finite pre-roll: skip the ugliest churn (100 ticks, about 60 ms for
+    // 601 nodes while they are still clustered). Under prefers-reduced-
+    // motion settle synchronously instead, capped at 600 ticks (about
+    // 0.4 s at 604 nodes at the measured 0.66 ms presettle tick) so the
+    // page never stalls; the loop finishes any rest.
+    presettle(REDUCED ? 600 : 100);
+  }
+}
+
+function presettle(maxTicks) {
+  for (let i = 0; i < maxTicks && calm <= CALM_FRAMES; i++) {
+    const energy = tick();
+    if (energy < 0.05 * Math.max(1, visNodes.length)) calm++; else calm = 0;
+  }
+  dirty = true;
 }
 
 // One simulation step over the cached visible set; returns total kinetic
-// energy so the caller can detect a settled layout and stop ticking.
+// energy so the caller can detect a settled layout and stop ticking. The
+// forces live in brainTick (core block above): short-range repulsion,
+// springs, silhouette containment, cortex/interior bias, lobe attraction.
+// Damping switches to the heavier cool-phase value once the previous
+// tick's energy fell under coolBelow per visible node.
 function tick() {
-  for (const a of visNodes) {
-    for (const b of visNodes) {
-      if (a === b) continue;
-      const dx = a.x - b.x, dy = a.y - b.y;
-      const d2 = Math.max(80, dx * dx + dy * dy);
-      const f = 1900 / d2;
-      a.vx += (dx / Math.sqrt(d2)) * f;
-      a.vy += (dy / Math.sqrt(d2)) * f;
-    }
-    a.vx -= a.x * 0.003; a.vy -= a.y * 0.003;
-  }
-  for (const e of visEdges) {
-    const a = byId.get(e.from), b = byId.get(e.to);
-    const dx = b.x - a.x, dy = b.y - a.y;
-    const d = Math.max(1, Math.hypot(dx, dy));
-    const want = e.rel === "anchor" ? 90 : 140;
-    const f = (d - want) * 0.004;
-    a.vx += (dx / d) * f; a.vy += (dy / d) * f;
-    b.vx -= (dx / d) * f; b.vy -= (dy / d) * f;
-  }
-  let energy = 0;
-  for (const n of visNodes) {
-    n.x += n.vx; n.y += n.vy;
-    n.vx *= 0.82; n.vy *= 0.82;
-    energy += Math.abs(n.vx) + Math.abs(n.vy);
-  }
-  return energy;
+  ticksThisWake++;
+  const cool = lastEnergy < F.coolBelow * Math.max(1, visNodes.length);
+  lastEnergy = brainTick(visNodes, visEdges, byId, S, useLobes, cool ? F.dampCool : F.damp);
+  return lastEnergy;
 }
 
-function radius(n) {
-  if (n.type !== "memory") return 6;
-  return 7 + (n.conf || 0.5) * 8;
+function radius(n) { return nodeRadius(n); }
+
+function drawBrain() {
+  const px = 1 / view.scale;
+  ctx.fillStyle = "rgba(74,163,223,0.06)";
+  ctx.fill(brainPath);
+  // Cortex band: a wide stroke of the outline clipped to the interior gives
+  // an exact inner offset band where memory nodes are meant to sit.
+  ctx.save();
+  ctx.clip(brainPath);
+  ctx.lineWidth = 2 * 0.14 * S;
+  ctx.strokeStyle = "rgba(74,163,223,0.07)";
+  ctx.stroke(brainPath);
+  ctx.restore();
+  ctx.lineWidth = 1.4 * px;
+  ctx.strokeStyle = "rgba(150,170,190,0.55)";
+  ctx.stroke(brainPath);
+  ctx.lineWidth = px;
+  ctx.strokeStyle = "rgba(150,170,190,0.22)";
+  ctx.stroke(brainLines);
 }
 
 function draw() {
@@ -261,50 +771,89 @@ function draw() {
   ctx.translate(cssW / 2 + view.x, cssH / 2 + view.y);
   ctx.scale(view.scale, view.scale);
 
+  drawBrain();
+
+  // Edges batched by relation: four paths, four strokes, same colours,
+  // dashes and widths as the per-edge version they replace.
+  const EP = { anchor: new Path2D(), supersedes: new Path2D(), supports: new Path2D(), contradicts: new Path2D() };
   for (const e of visEdges) {
     const a = byId.get(e.from), b = byId.get(e.to);
-    ctx.beginPath();
-    ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
-    if (e.rel === "contradicts") { ctx.strokeStyle = "#e05252"; ctx.setLineDash([5, 4]); ctx.lineWidth = 1.4; }
-    else if (e.rel === "supersedes") { ctx.strokeStyle = "#4aa3df"; ctx.setLineDash([]); ctx.lineWidth = 1.4; }
-    else if (e.rel === "supports") { ctx.strokeStyle = "#3fb96f"; ctx.setLineDash([]); ctx.lineWidth = 1; }
-    else { ctx.strokeStyle = "#2a3542"; ctx.setLineDash([]); ctx.lineWidth = 1; }
-    ctx.stroke();
-    ctx.setLineDash([]);
+    const p = EP[e.rel] || EP.anchor;
+    p.moveTo(a.x, a.y); p.lineTo(b.x, b.y);
   }
+  ctx.setLineDash([]);
+  ctx.strokeStyle = "#2a3542"; ctx.lineWidth = 1; ctx.stroke(EP.anchor);
+  ctx.strokeStyle = "#3fb96f"; ctx.lineWidth = 1; ctx.stroke(EP.supports);
+  ctx.strokeStyle = "#4aa3df"; ctx.lineWidth = 1.4; ctx.stroke(EP.supersedes);
+  ctx.strokeStyle = "#e05252"; ctx.lineWidth = 1.4; ctx.setLineDash([5, 4]); ctx.stroke(EP.contradicts);
+  ctx.setLineDash([]);
 
+  // Nodes batched by health colour; rings and squares get their own paths.
+  const NP = { active: new Path2D(), stale: new Path2D(), invalidated: new Path2D(), superseded: new Path2D(), other: new Path2D() };
+  const ring = new Path2D(), priv = new Path2D(), code = new Path2D();
   for (const n of visNodes) {
     const r = radius(n);
-    ctx.beginPath();
     if (n.type === "memory") {
-      ctx.arc(n.x, n.y, r, 0, Math.PI * 2);
-      ctx.fillStyle = COLORS[n.status] || "#8296a8";
-      ctx.fill();
-      if (n.source === "verified") {
-        ctx.lineWidth = 2; ctx.strokeStyle = "#d8e1ea"; ctx.stroke();
-      }
-      if (n.private) {
-        ctx.save();
-        ctx.setLineDash([3, 3]);
-        ctx.lineWidth = 1;
-        ctx.strokeStyle = "#7f8ea3";
-        ctx.stroke();
-        ctx.restore();
-      }
+      const p = NP[n.status] || NP.other;
+      p.moveTo(n.x + r, n.y); p.arc(n.x, n.y, r, 0, Math.PI * 2);
+      if (n.source === "verified") { ring.moveTo(n.x + r, n.y); ring.arc(n.x, n.y, r, 0, Math.PI * 2); }
+      if (n.private) { priv.moveTo(n.x + r, n.y); priv.arc(n.x, n.y, r, 0, Math.PI * 2); }
     } else {
-      ctx.fillStyle = "#3d4b5c";
-      ctx.fillRect(n.x - r, n.y - r, r * 2, r * 2);
+      code.rect(n.x - r, n.y - r, r * 2, r * 2);
     }
-    if (n === selected) {
-      ctx.lineWidth = 2; ctx.strokeStyle = "#4aa3df";
-      ctx.strokeRect(n.x - r - 3, n.y - r - 3, (r + 3) * 2, (r + 3) * 2);
-    }
-    if (n.type !== "memory" || view.scale > 0.8) {
-      ctx.fillStyle = "#8296a8";
-      ctx.font = "10px ui-monospace, monospace";
+  }
+  ctx.fillStyle = "#3d4b5c"; ctx.fill(code);
+  for (const key of ["active", "stale", "invalidated", "superseded"]) { ctx.fillStyle = COLORS[key]; ctx.fill(NP[key]); }
+  ctx.fillStyle = "#8296a8"; ctx.fill(NP.other);
+  ctx.lineWidth = 2; ctx.strokeStyle = "#d8e1ea"; ctx.stroke(ring);
+  ctx.save(); ctx.setLineDash([3, 3]); ctx.lineWidth = 1; ctx.strokeStyle = "#7f8ea3"; ctx.stroke(priv); ctx.restore();
+
+  if (selected && visNodes.includes(selected)) {
+    const n = selected, r = radius(n);
+    ctx.lineWidth = 2; ctx.strokeStyle = "#4aa3df";
+    ctx.strokeRect(n.x - r - 3, n.y - r - 3, (r + 3) * 2, (r + 3) * 2);
+  }
+
+  // Labels appear once the on-screen spacing can hold them, so 601 nodes
+  // at fit scale draw none and a zoomed view draws them.
+  const spacing = view.scale * S / Math.sqrt(Math.max(1, visNodes.length));
+  const codeLabels = spacing >= 30, memLabels = spacing >= 38;
+  if (codeLabels) {
+    ctx.fillStyle = "#8296a8";
+    ctx.font = "10px ui-monospace, monospace";
+    for (const n of visNodes) {
+      if (n.type === "memory" && !memLabels) continue;
+      const r = radius(n);
       const label = n.type === "memory" ? n.kind : String(n.id).split(".").pop();
       ctx.fillText(label, n.x + r + 4, n.y + 3);
     }
+  }
+
+  // Lobe labels: one per store at the centroid of its visible nodes, named
+  // by the project's display name, counter-scaled to stay 11px on screen;
+  // a store under five visible nodes gets a 9px label, and only once node
+  // labels are showing, so a zoomed-out view is not littered with names.
+  if (useLobes) {
+    const acc = new Map();
+    for (const n of visNodes) {
+      let a = acc.get(n.store);
+      if (!a) { a = { x: 0, y: 0, c: 0, name: String(n.project || n.store) }; acc.set(n.store, a); }
+      a.x += n.x; a.y += n.y; a.c++;
+    }
+    ctx.textAlign = "center";
+    for (const [store, a] of acc) {
+      if (a.c < 5 && !codeLabels) continue;
+      const lobe = lobeOf.get(store);
+      const size = (a.c < 5 ? 9 : 11) / view.scale;
+      ctx.font = size + "px ui-monospace, monospace";
+      ctx.fillStyle = a.c < 5 ? "rgba(130,150,168,0.55)" : "rgba(200,214,226,0.62)";
+      const shown = a.name.length > 30 ? a.name.slice(0, 29) + "\u2026" : a.name;
+      const text = shown + " \u00b7 " + (lobe ? lobe[0] : ""), tx = a.x / a.c, ty = a.y / a.c - 14 / view.scale;
+      // Dark halo so the label stays legible over the cortex band.
+      ctx.lineWidth = 3 / view.scale; ctx.strokeStyle = "rgba(15,20,25,0.85)"; ctx.strokeText(text, tx, ty);
+      ctx.fillText(text, tx, ty);
+    }
+    ctx.textAlign = "start";
   }
   ctx.restore();
 }
@@ -390,6 +939,7 @@ document.getElementById("filters").addEventListener("click", e => {
   if (!btn) return;
   filter = btn.dataset.f;
   for (const b of document.querySelectorAll(".filters button")) b.classList.toggle("on", b === btn);
+  needFit = true; // a filter click is one of the three refit events
   computeVisible();
 });
 
@@ -398,11 +948,16 @@ document.getElementById("project-select").addEventListener("change", e => {
   selected = null;
   panel.classList.remove("open");
   byId = new Map(); nodes = []; edges = []; visNodes = []; visEdges = [];
+  // A new view starts its lobe map from scratch, always wakes, and refits.
+  lobeOf = new Map();
+  computeVisible.fp = undefined;
+  needFit = true;
   resize();
   load();
 });
 
 resize();
+rebuildBrain();
 loadProjects();
 load();
 setInterval(load, 5000);
@@ -412,8 +967,16 @@ setInterval(loadProjects, 15000);
 // settled graph does no per-frame work beyond this check.
 (function loop() {
   if (calm <= CALM_FRAMES) {
-    const energy = tick();
-    if (energy < 0.05 * Math.max(1, visNodes.length)) calm++; else calm = 0;
+    // Three steps per frame while the layout is hot (energy above half a
+    // px per node), two while it is warm (above 0.15), one once it is
+    // cooling. Finite either way: the settle check stops the loop, and
+    // the per-wake tick budget stops it even if energy never settles.
+    const perNode = Math.max(1, visNodes.length);
+    let energy = tick();
+    if (energy > 0.5 * perNode) energy = tick();
+    if (energy > 0.15 * perNode) energy = tick();
+    if (energy < 0.05 * perNode) calm++; else calm = 0;
+    if (ticksThisWake >= MAX_TICKS_PER_WAKE) calm = CALM_FRAMES + 1;
     dirty = true;
   }
   if (dirty) { draw(); dirty = false; }
