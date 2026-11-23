@@ -186,6 +186,25 @@ fn failing_git_still_keys_the_store_by_remote() {
 }
 
 #[test]
+fn a_git_ownership_refusal_is_never_overridden_by_the_fallback() {
+    // git ran and refused the repository as owned by someone else
+    // (safe.directory, CVE-2022-24765). Reading .git/config behind its back
+    // would let a planted repository pick the identity; the path key stands.
+    let w = World::new("git@bitbucket.org:acme/site.git");
+    let git = w.fake_bin.path().join("git");
+    std::fs::write(
+        &git,
+        "#!/bin/sh\necho \"fatal: detected dubious ownership in repository at '$PWD'\" >&2\nexit 128\n",
+    )
+    .unwrap();
+    let out = w.run(&["index"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let dirs = w.store_dirs();
+    assert_eq!(dirs.len(), 1, "{dirs:?}");
+    assert!(dirs[0].starts_with("path-"), "a refused repository must not be keyed by its config: {dirs:?}");
+}
+
+#[test]
 fn provider_ssh_alias_keeps_the_same_store() {
     let w = World::new("git@bitbucket.org:acme/site.git");
     w.seed(&["widget returns seven"]);
@@ -252,6 +271,41 @@ fn path_key_fork_is_surfaced_and_adopt_heals_it() {
     let again = json_out(&w.run(&["adopt"]));
     assert_eq!(again["adopted"], json!([]), "{again}");
     assert_eq!(again["would_adopt"], 0);
+}
+
+#[test]
+fn adopt_judges_fork_memories_against_the_current_code() {
+    // The canonical store was last indexed on the OLD body (V1); the fork
+    // then lived on while the code moved to V2 and wrote its memory against
+    // V2. Adopt re-bases anchors onto the current store's index, so it must
+    // refresh that index first: otherwise the memory inherits h(V1) and the
+    // `limpet index` adopt recommends flags a correct memory stale.
+    let w = World::new("git@bitbucket.org:acme/site.git");
+    let out = w.run(&["index"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let canonical = w.store_dirs();
+    assert_eq!(canonical.len(), 1);
+
+    // The fork: git keyed by path (no remote readable), code at V2.
+    w.set_origin("");
+    std::fs::write(w.root.path().join("lib.rs"), "pub fn widget() -> u32 { 8 }\n").unwrap();
+    w.seed(&["widget returns eight", "widget fork private detail"]);
+    assert_eq!(w.store_dirs().len(), 2);
+
+    w.set_origin("git@bitbucket.org:acme/site.git");
+    let adopted = json_out(&w.run(&["adopt"]));
+    assert_eq!(adopted["adopted"][0]["added"], 2, "{adopted}");
+    let out = w.run(&["index"]);
+    assert!(out.status.success());
+
+    let mut srv = Mcp::start(&w);
+    let r = srv.call_tool(3, "recall", json!({ "task": "widget returns eight" }));
+    let hit = r["data"]
+        .as_array()
+        .and_then(|d| d.iter().find(|e| e["body"] == "widget returns eight"))
+        .unwrap_or_else(|| panic!("adopted memory must recall: {r}"));
+    assert!(hit.get("status").is_none() && hit.get("flags").is_none(), "an adopted memory that matches the current code is not stale: {r}");
+    assert_eq!(r["meta"]["staleness"]["stale"], 0, "{r}");
 }
 
 #[test]

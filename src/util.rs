@@ -200,10 +200,13 @@ pub fn legacy_repo_key(root: &Path) -> String {
 /// not a git repo or has no `origin`. Runs git with an argument array (never
 /// a shell). When the git invocation itself fails for a reason unrelated to
 /// the repository (macOS exits 69 until the Xcode licence is accepted, git
-/// missing from PATH, a refused `safe.directory`), the url is read from the
-/// repo's git config file instead (I-C1). Before 0.18 any such failure
-/// silently degraded the identity to the path key, which forked the store:
-/// the agent opened a brand-new empty memory with no error anywhere.
+/// missing from PATH), the url is read from the repo's git config file
+/// instead (I-C1). Before 0.18 any such failure silently degraded the
+/// identity to the path key, which forked the store: the agent opened a
+/// brand-new empty memory with no error anywhere. A repository git refuses
+/// for dubious ownership (the `safe.directory` check, CVE-2022-24765) is
+/// never read behind git's back: that refusal stands and the identity
+/// falls back to the path key, exactly as git would have it.
 pub fn git_remote_origin(root: &Path) -> Option<String> {
     let via_git = std::process::Command::new("git")
         .arg("-C")
@@ -220,10 +223,73 @@ pub fn git_remote_origin(root: &Path) -> Option<String> {
                 Some(url.to_string())
             }
         }
+        // Git ran and refused the repository as owned by someone else. The
+        // fallback must not override a security decision git made.
+        Ok(out) if refused_for_ownership(&out.stderr) => None,
         // A clean "no such remote" exit and a broken git look alike from
         // here; the config file answers both honestly (no origin in the
         // file means None either way), so one fallback covers them.
         _ => git_config_origin(root),
+    }
+}
+
+/// Whether git's stderr is its dubious-ownership refusal (git 2.35.2+).
+fn refused_for_ownership(stderr: &[u8]) -> bool {
+    String::from_utf8_lossy(stderr).contains("dubious ownership")
+}
+
+/// The account the config fallback trusts to own git metadata: git's
+/// `safe.directory` rule (CVE-2022-24765). Without it a local user who can
+/// create an ancestor `.git` (`/tmp/.git`, which is `/private/tmp/.git` on
+/// macOS) would choose the store identity of every non-repository directory
+/// beneath it whenever git is broken. On unix the owner must be the
+/// effective uid, or, when running as root under sudo, the invoking user
+/// (`SUDO_UID`, as git allows). Not modelled: a configured
+/// `safe.directory` allow-list (the fallback is stricter than git, never
+/// looser) and Windows ownership, where only git's own refusal is honoured.
+#[derive(Clone, Copy)]
+struct Owner {
+    #[cfg(unix)]
+    uid: u32,
+    #[cfg(unix)]
+    sudo_uid: Option<u32>,
+}
+
+impl Owner {
+    fn current() -> Owner {
+        #[cfg(unix)]
+        {
+            // SAFETY: geteuid has no preconditions and cannot fail.
+            let uid = unsafe { libc::geteuid() };
+            let sudo_uid = if uid == 0 {
+                std::env::var("SUDO_UID").ok().and_then(|v| v.parse().ok())
+            } else {
+                None
+            };
+            Owner { uid, sudo_uid }
+        }
+        #[cfg(not(unix))]
+        {
+            Owner {}
+        }
+    }
+
+    /// True when `path` (symlinks followed, as git stats it) belongs to the
+    /// trusted account. A path that cannot be stat'ed is not trusted.
+    fn owns(&self, path: &Path) -> bool {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            match std::fs::metadata(path) {
+                Ok(m) => m.uid() == self.uid || self.sudo_uid == Some(m.uid()),
+                Err(_) => false,
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+            true
+        }
     }
 }
 
@@ -283,7 +349,14 @@ fn resolve_git_pointer(base: &Path, written: &str) -> PathBuf {
 /// where it matters: a `.git` directory without `HEAD` is not a repository
 /// and the walk continues upward, and the walk never climbs into a
 /// `GIT_CEILING_DIRECTORIES` entry. Read-only, every file size-capped.
+/// The first repository found must pass git's ownership rule (`Owner`):
+/// one owned by another account ends the walk with None, as git stops with
+/// "dubious ownership" instead of climbing past it.
 fn find_git_config(root: &Path) -> Option<PathBuf> {
+    find_git_config_for(root, Owner::current())
+}
+
+fn find_git_config_for(root: &Path, owner: Owner) -> Option<PathBuf> {
     let start = canonicalize_plain(root).unwrap_or_else(|_| root.to_path_buf());
     let ceilings: Vec<PathBuf> = std::env::var_os("GIT_CEILING_DIRECTORIES")
         .map(|v| {
@@ -304,7 +377,7 @@ fn find_git_config(root: &Path) -> Option<PathBuf> {
             if !dotgit.join("HEAD").is_file() {
                 continue;
             }
-            dotgit
+            dotgit.clone()
         } else if dotgit.is_file() {
             let text = read_capped(&dotgit, 4096)?;
             let written = text
@@ -319,10 +392,16 @@ fn find_git_config(root: &Path) -> Option<PathBuf> {
         } else {
             continue;
         };
+        if !owner.owns(dir) || !owner.owns(&dotgit) || !owner.owns(&gitdir) {
+            return None;
+        }
         let common = match read_capped(&gitdir.join("commondir"), 4096) {
             Some(c) if !c.trim().is_empty() => resolve_git_pointer(&gitdir, c.trim()),
             _ => gitdir,
         };
+        if !owner.owns(&common) {
+            return None;
+        }
         return Some(common.join("config"));
     }
     None
@@ -856,6 +935,31 @@ mod tests {
         std::fs::create_dir_all(inner.join(".git")).unwrap();
         std::fs::write(inner.join(".git/config"), "[remote \"origin\"]\nurl = a:fake/repo\n").unwrap();
         assert_eq!(find_git_config(&inner), Some(canonicalize_plain(&outer).unwrap().join(".git/config")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_fallback_refuses_git_metadata_another_account_owns() {
+        let t = tempfile::tempdir().unwrap();
+        let repo = t.path().join("shared");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(repo.join(".git/config"), "[remote \"origin\"]\nurl = a:planted/repo\n").unwrap();
+        let project = repo.join("not-a-repo");
+        std::fs::create_dir_all(&project).unwrap();
+        let me = Owner::current();
+        assert!(find_git_config_for(&project, me).is_some(), "own metadata is trusted");
+        // The same tree seen by a different account: git says "dubious
+        // ownership" and stops, so the fallback must not read the planted
+        // config nor climb past it.
+        let stranger = Owner { uid: me.uid.wrapping_add(1), sudo_uid: None };
+        assert_eq!(find_git_config_for(&project, stranger), None);
+        assert_eq!(find_git_config_for(&repo, stranger), None);
+        // Under sudo the invoking user's own repository stays trusted.
+        let sudo = Owner { uid: me.uid.wrapping_add(1), sudo_uid: Some(me.uid) };
+        assert!(find_git_config_for(&project, sudo).is_some());
+        assert!(refused_for_ownership(b"fatal: detected dubious ownership in repository at '/x'\n"));
+        assert!(!refused_for_ownership(b"error: No such remote 'origin'\n"));
     }
 
     #[cfg(unix)]
