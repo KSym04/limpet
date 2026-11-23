@@ -542,12 +542,19 @@ impl Store {
     /// legacy key, and NEVER migrate, rename, create, or open anything.
     /// Callers treat a missing file as "no store yet".
     pub fn locate_db_path(root: &Path) -> PathBuf {
-        Self::locate_db_path_in(&Self::data_base(), root)
+        Self::locate_db_path_for(root, &crate::util::repo_identity(root))
+    }
+
+    /// `locate_db_path` for an identity the caller already computed: the
+    /// hook resolves it once and reuses it for the sibling scan, because
+    /// each `git` spawn costs tens of milliseconds at session start.
+    pub fn locate_db_path_for(root: &Path, identity: &str) -> PathBuf {
+        Self::locate_db_path_in(&Self::data_base(), root, identity)
     }
 
     /// `locate_db_path` against an explicit base (tests).
-    fn locate_db_path_in(base: &Path, root: &Path) -> PathBuf {
-        let new_db = base.join(crate::util::repo_key(root)).join("store.db");
+    fn locate_db_path_in(base: &Path, root: &Path, identity: &str) -> PathBuf {
+        let new_db = base.join(crate::util::key_from_identity(identity)).join("store.db");
         if new_db.is_file() {
             return new_db;
         }
@@ -603,35 +610,11 @@ impl Store {
     /// but every failure mode of this probe degrades to "not owned", which
     /// only means no migration happens; it can never mis-claim.
     fn legacy_store_owns_root(legacy_db: &Path, root: &Path) -> bool {
-        // SQLite URI: percent-encode the characters that would terminate or
-        // corrupt the URI, and use `/` separators on Windows.
-        let uri_path = legacy_db
-            .to_string_lossy()
-            .replace('%', "%25")
-            .replace('?', "%3F")
-            .replace('#', "%23")
-            .replace('\\', "/");
-        let Ok(conn) = Connection::open_with_flags(
-            format!("file:{uri_path}?immutable=1"),
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
-                | rusqlite::OpenFlags::SQLITE_OPEN_URI
-                | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        ) else {
+        let Some(conn) = open_immutable(legacy_db) else {
             return false;
         };
-        let stored: Option<String> = conn
-            .query_row("SELECT v FROM meta_kv WHERE k='project_root'", [], |r| r.get(0))
-            .ok();
-        match stored {
-            Some(p) => {
-                let a = crate::util::canonicalize_plain(Path::new(&p))
-                    .unwrap_or_else(|_| PathBuf::from(&p));
-                let b =
-                    crate::util::canonicalize_plain(root).unwrap_or_else(|_| root.to_path_buf());
-                a == b
-            }
-            None => false,
-        }
+        let root_canon = crate::util::canonicalize_plain(root).unwrap_or_else(|_| root.to_path_buf());
+        recorded_root_matches(&conn, &root_canon)
     }
 
     /// Refuse to serve a store that a NEWER limpet has already touched.
@@ -725,6 +708,17 @@ impl Store {
     /// One entry per line, ULID-sorted, stable field order. Text format so
     /// team sharing via git produces reviewable, mergeable diffs.
     pub fn export_jsonl(&self, w: &mut impl Write) -> Result<ExportReport> {
+        self.export_jsonl_inner(w, false)
+    }
+
+    /// The export body. `include_private` is true ONLY for `limpet adopt`,
+    /// which moves a store's memories between two stores on this same
+    /// machine: private means "never leaves this machine", and a same-machine
+    /// merge that dropped private memories would lose exactly the ones the
+    /// user chose to keep closest. Private lines carry `"private": true`;
+    /// the public export never contains a private row, so its bytes are
+    /// unchanged.
+    fn export_jsonl_inner(&self, w: &mut impl Write, include_private: bool) -> Result<ExportReport> {
         // Wire-format header (I-S3), first line, so any reader knows what it
         // holds before touching a byte of data. Importers at this format skip
         // it; importers past it read it; importers BEFORE it (0.16 and
@@ -744,11 +738,11 @@ impl Store {
                     status, stale_reason, branch, evidence_cmd, evidence_digest,
                     evidence_ran_at, origin,
                     EXISTS(SELECT 1 FROM archived a WHERE a.entry_id = entries.id),
-                    conf_before_stale
-             FROM entries WHERE private = 0 ORDER BY id",
+                    conf_before_stale, private
+             FROM entries WHERE (?1 OR private = 0) ORDER BY id",
         )?;
         let ids: Vec<serde_json::Value> = stmt
-            .query_map([], |r| {
+            .query_map([include_private], |r| {
                 let mut obj = serde_json::json!({
                     "id": r.get::<_, String>(0)?,
                     "kind": r.get::<_, String>(1)?,
@@ -774,6 +768,9 @@ impl Store {
                 // restores nothing; only penalized entries pay for it.
                 if let Some(cb) = r.get::<_, Option<f64>>(15)? {
                     obj["conf_before_stale"] = serde_json::json!(cb);
+                }
+                if r.get::<_, bool>(16)? {
+                    obj["private"] = serde_json::json!(true);
                 }
                 Ok(obj)
             })?
@@ -820,9 +817,12 @@ impl Store {
             writeln!(w, "{}", serde_json::to_string(&obj)?)?;
             count += 1;
         }
-        let private_withheld: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM entries WHERE private = 1", [], |r| r.get(0))?;
+        let private_withheld: i64 = if include_private {
+            0
+        } else {
+            self.conn
+                .query_row("SELECT COUNT(*) FROM entries WHERE private = 1", [], |r| r.get(0))?
+        };
         Ok(ExportReport { exported: count, private_withheld: private_withheld as usize })
     }
 
@@ -842,6 +842,16 @@ impl Store {
     /// fake freshness against code you do not have), and each line is read
     /// with a hard size cap.
     pub fn import_jsonl(&mut self, r: &mut impl BufRead) -> Result<ImportReport> {
+        self.import_jsonl_inner(r, false)
+    }
+
+    /// The import body. `honor_private` is true ONLY for `limpet adopt`
+    /// (a same-machine merge of this user's own stores): a winning line that
+    /// carries `"private": true` keeps its private flag here. A peer's file
+    /// never sets it, so a teammate's export cannot change what this
+    /// machine's export withholds. The flag only ever narrows: a line can
+    /// mark an entry private, never clear one.
+    fn import_jsonl_inner(&mut self, r: &mut impl BufRead, honor_private: bool) -> Result<ImportReport> {
         let mut report = ImportReport::default();
         let now = crate::index::now_iso();
         let tx = self.conn.transaction()?;
@@ -1119,6 +1129,9 @@ impl Store {
                     }),
                 ],
             )?;
+            if honor_private && obj["private"].as_bool() == Some(true) {
+                tx.execute("UPDATE entries SET private = 1 WHERE id = ?1", [&id])?;
+            }
             // Archival travels with the line: a winning (added/updated) line
             // dictates visibility on this machine too. Absent or false means
             // visible, so a restore propagates the same way an archive does.
@@ -1272,6 +1285,394 @@ impl Store {
         tx.commit()?;
         Ok(report)
     }
+}
+
+/// Open a possibly-foreign store strictly read-only with `immutable=1`.
+/// Even a READ_ONLY open of a WAL database materializes -shm/-wal files in
+/// the store's directory; an immutable open touches nothing. The price is
+/// that content still sitting in an un-checkpointed WAL is invisible, which
+/// every caller treats as "under-count, never mis-claim".
+fn open_immutable(db: &Path) -> Option<Connection> {
+    // SQLite URI: percent-encode the characters that would terminate or
+    // corrupt the URI, and use `/` separators on Windows.
+    let uri_path = db
+        .to_string_lossy()
+        .replace('%', "%25")
+        .replace('?', "%3F")
+        .replace('#', "%23")
+        .replace('\\', "/");
+    Connection::open_with_flags(
+        format!("file:{uri_path}?immutable=1"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+            | rusqlite::OpenFlags::SQLITE_OPEN_URI
+            | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()
+}
+
+/// Open a sibling store for the fork scan without writing it. A store whose
+/// server was killed (or is still running) keeps recent memories in its
+/// `-wal`, which an immutable open cannot see, so a fork would read as
+/// empty: the exact silent orphan this scan exists to catch. When both
+/// `-wal` and `-shm` already exist, open as an ordinary read-only reader:
+/// that creates no file, never checkpoints, and never touches the db or
+/// wal (it only takes read marks in the existing -shm, as any concurrent
+/// reader does). Otherwise fall back to the immutable open.
+fn open_sibling(db: &Path) -> Option<Connection> {
+    let wal = db.with_file_name("store.db-wal");
+    let shm = db.with_file_name("store.db-shm");
+    let wal_live = std::fs::metadata(&wal).map(|m| m.len() > 0).unwrap_or(false);
+    if wal_live && shm.is_file() {
+        if let Ok(conn) = Connection::open_with_flags(
+            db,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        ) {
+            // A wedged writer must not stall SessionStart.
+            let _ = conn.busy_timeout(std::time::Duration::from_millis(200));
+            return Some(conn);
+        }
+    }
+    open_immutable(db)
+}
+
+/// True only when the store's recorded `project_root` canonically equals
+/// `root_canon` (already canonical). An absent record is never a match.
+fn recorded_root_matches(conn: &Connection, root_canon: &Path) -> bool {
+    let stored: Option<String> = conn
+        .query_row("SELECT v FROM meta_kv WHERE k='project_root'", [], |r| r.get(0))
+        .ok();
+    match stored {
+        Some(p) if Path::new(&p) == root_canon => true,
+        Some(p) => crate::util::canonicalize_plain(Path::new(&p))
+            .map(|c| c == root_canon)
+            .unwrap_or(false),
+        None => false,
+    }
+}
+
+/// How many store dirs one sibling scan opens at most (hazard H5: the scan
+/// runs on every SessionStart hook). A data dir past this is reported as
+/// truncated, never silently treated as fully scanned.
+pub const SIBLING_SCAN_CAP: usize = 512;
+
+/// The meta_kv key prefix for adoption watermarks: `adopted:<dir>` holds
+/// the sibling's newest `updated_at` at the moment it was adopted.
+const ADOPTED_PREFIX: &str = "adopted:";
+
+/// Another store dir related to this project (I-C3): the visible trace of
+/// a store fork. It either recorded this same project root, or its key is a
+/// provider-alias spelling of the current remote.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OtherStore {
+    /// The store's directory name inside the data dir (its key).
+    pub dir: String,
+    /// The identity the sibling recorded when it was last indexed (`git:` or
+    /// `path:`), absent on stores written before identities were stamped.
+    pub identity: Option<String>,
+    /// True when the sibling is provably this same repository: its key is
+    /// this root's path key or a provider-alias key of the current remote,
+    /// or its recorded identity is a `path:` one or canonically equals the
+    /// current identity. Only these are adopted by default. Any other
+    /// sibling that recorded this root (a different remote: the repo moved,
+    /// or a different repository once lived at this path) is reported, and
+    /// is merged only when named with `limpet adopt --from <dir>`.
+    pub same_repo: bool,
+    /// Every memory the sibling holds (private and archived included).
+    pub entries: usize,
+    /// Memories newer than the last adoption watermark for this dir that the
+    /// current store lacks or holds an older version of: what `limpet adopt`
+    /// would add or update.
+    pub unadopted: usize,
+    /// Full path of the sibling's `store.db`.
+    #[serde(skip)]
+    pub db: PathBuf,
+}
+
+/// Result of one sibling scan.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct SiblingScan {
+    pub stores: Vec<OtherStore>,
+    /// True when the data dir held more store dirs than [`SIBLING_SCAN_CAP`].
+    pub truncated: bool,
+}
+
+impl SiblingScan {
+    /// Total memories `limpet adopt` would bring over by default (only the
+    /// siblings that are provably this repository).
+    pub fn unadopted(&self) -> usize {
+        self.stores.iter().filter(|s| s.same_repo).map(|s| s.unadopted).sum()
+    }
+
+    /// Memories sitting in siblings for a DIFFERENT remote that recorded this
+    /// root: reported, never adopted without `--from`.
+    pub fn unadopted_elsewhere(&self) -> usize {
+        self.stores.iter().filter(|s| !s.same_repo).map(|s| s.unadopted).sum()
+    }
+}
+
+/// Per-sibling outcome of `limpet adopt`.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct AdoptReport {
+    pub dir: String,
+    pub entries: usize,
+    pub added: usize,
+    pub updated: usize,
+    pub skipped: usize,
+    pub rejected: usize,
+    pub links_dropped: usize,
+}
+
+/// A private scratch directory removed on drop, so an adopt that fails
+/// halfway never leaves a copy of someone's memory lying in the temp dir.
+/// On unix it is created mode 0700: the snapshot inside holds private
+/// memories, and on Linux the temp dir is the shared `/tmp`. (A SIGKILL
+/// skips Drop; the 0700 mode is what keeps such a leftover private.)
+struct ScratchDir(PathBuf);
+
+impl ScratchDir {
+    fn create() -> Result<ScratchDir> {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("limpet-adopt-{}-{nanos}", std::process::id()));
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        // Non-recursive: an existing path is never reused.
+        builder
+            .create(&dir)
+            .with_context(|| format!("creating adopt scratch dir {}", dir.display()))?;
+        Ok(ScratchDir(dir))
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+impl Store {
+    /// Scan the data dir for OTHER stores of this project (I-C3): every
+    /// store that recorded `root`, plus every store whose key is a path or
+    /// provider-alias key equivalent to the current identity whatever root
+    /// it recorded. `current_db` is excluded; `current` (when the current
+    /// store exists) supplies the ids already present and the adoption
+    /// watermarks. At most `cap` dirs beyond the equivalent-key ones are
+    /// opened (hazard H5); a cut scan sets `truncated`. Every sibling is
+    /// opened read-only and never written (I-C4, `open_sibling`). Never
+    /// fails: an unreadable dir or store is skipped, because this feeds
+    /// display surfaces that must stay silent on any problem.
+    /// `identity` is `util::repo_identity(root)`, passed in so a caller that
+    /// already computed it does not spawn `git` twice.
+    pub fn other_stores_for_root(
+        root: &Path,
+        identity: &str,
+        current_db: &Path,
+        current: Option<&Connection>,
+        cap: usize,
+    ) -> SiblingScan {
+        Self::other_stores_in(&Self::data_base(), root, identity, current_db, current, cap)
+    }
+
+    /// `other_stores_for_root` against an explicit base and identity (tests).
+    pub(crate) fn other_stores_in(
+        base: &Path,
+        root: &Path,
+        identity: &str,
+        current_db: &Path,
+        current: Option<&Connection>,
+        cap: usize,
+    ) -> SiblingScan {
+        let mut scan = SiblingScan::default();
+        let canon = |p: &Path| crate::util::canonicalize_plain(p).unwrap_or_else(|_| p.to_path_buf());
+        let root_canon = canon(root);
+        // Both sides canonical: SQLite reports a symlink-resolved db path
+        // (`/private/var/...` for `/var/...`), and a raw comparison would
+        // list the current store as its own sibling.
+        let base = canon(base);
+        let current_dir = current_db.parent().map(canon);
+        let equivalent: std::collections::HashSet<String> =
+            crate::util::equivalent_store_keys(&root_canon, identity).into_iter().collect();
+        let current_canon = crate::util::canonical_identity(identity);
+        let (have, watermarks) = current.map(current_view).unwrap_or_default();
+        let Ok(rd) = std::fs::read_dir(&base) else {
+            return scan;
+        };
+        let mut by_key: Vec<PathBuf> = Vec::new();
+        let mut rest: Vec<PathBuf> = Vec::new();
+        for p in rd.flatten().map(|e| e.path()) {
+            if !p.join("store.db").is_file() || current_dir.as_deref() == Some(p.as_path()) {
+                continue;
+            }
+            let is_equivalent = p
+                .file_name()
+                .map(|n| equivalent.contains(n.to_string_lossy().as_ref()))
+                .unwrap_or(false);
+            if is_equivalent {
+                by_key.push(p);
+            } else {
+                rest.push(p);
+            }
+        }
+        // Equivalent-key dirs are found by name and never cost the cap.
+        // The rest are sorted so a truncated scan is at least deterministic.
+        rest.sort();
+        if rest.len() > cap {
+            scan.truncated = true;
+            rest.truncate(cap);
+        }
+        by_key.sort();
+        let n_by_key = by_key.len();
+        for (i, dir) in by_key.into_iter().chain(rest).enumerate() {
+            let by_name = i < n_by_key;
+            let Some(name) = dir.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+                continue;
+            };
+            let db = dir.join("store.db");
+            let Some(conn) = open_sibling(&db) else {
+                continue;
+            };
+            if !by_name && !recorded_root_matches(&conn, &root_canon) {
+                continue;
+            }
+            let recorded: Option<String> = conn
+                .query_row("SELECT v FROM meta_kv WHERE k='identity'", [], |r| r.get(0))
+                .ok();
+            let same_repo = by_name
+                || recorded.as_deref().is_some_and(|id| {
+                    id.starts_with("path:") || crate::util::canonical_identity(id) == current_canon
+                });
+            let wm = watermarks.get(&name);
+            let Ok(mut stmt) = conn.prepare("SELECT id, updated_at FROM entries") else {
+                continue;
+            };
+            let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            else {
+                continue;
+            };
+            let (mut entries, mut unadopted) = (0usize, 0usize);
+            for (id, updated) in rows.flatten() {
+                entries += 1;
+                let past_watermark = wm.is_none_or(|w| updated.as_str() > w.as_str());
+                // Missing here, or held here in an older version: a forked
+                // store usually bootstrapped the committed export, so the
+                // two share ids and the orphaned work is newer EDITS.
+                let newer_than_ours = have.get(&id).is_none_or(|ours| updated.as_str() > ours.as_str());
+                if past_watermark && newer_than_ours {
+                    unadopted += 1;
+                }
+            }
+            scan.stores.push(OtherStore { dir: name, identity: recorded, same_repo, entries, unadopted, db });
+        }
+        scan
+    }
+
+    /// Merge one sibling store into this one (I-C4, I-C5). A consistent
+    /// snapshot of the sibling is taken with `VACUUM INTO` on a read-only
+    /// connection (a plain copy of the db and wal files can tear when the
+    /// sibling's writer checkpoints between the two copies), into a private
+    /// scratch dir; the snapshot is opened and migrated there, so the
+    /// original is never written and an older schema reads fine. Its full
+    /// export (private included) is imported twice: the first pass lands
+    /// every entry, the second lands links whose target sorted after their
+    /// source (the import drops a link to an id it has not seen yet). Both
+    /// passes are the guarded import path, so LWW, secret, size and
+    /// confidence policy all hold, and a re-run is a no-op. On success the
+    /// `adopted:<dir>` watermark is stamped.
+    pub fn adopt_from(&mut self, other: &OtherStore) -> Result<AdoptReport> {
+        let scratch = ScratchDir::create()?;
+        let copy_db = scratch.0.join("store.db");
+        snapshot_sibling(&other.db, &copy_db)?;
+        let copy = Store::open(&copy_db).with_context(|| format!("opening a copy of {}", other.dir))?;
+        let mut buf: Vec<u8> = Vec::new();
+        copy.export_jsonl_inner(&mut buf, true)?;
+        let newest: Option<String> = copy
+            .conn
+            .query_row("SELECT MAX(updated_at) FROM entries", [], |r| r.get(0))?;
+        let entries: i64 = copy.conn.query_row("SELECT COUNT(*) FROM entries", [], |r| r.get(0))?;
+        drop(copy);
+
+        let first = self.import_jsonl_inner(&mut buf.as_slice(), true)?;
+        let second = self.import_jsonl_inner(&mut buf.as_slice(), true)?;
+        self.stamp_adopted(&other.dir, newest)?;
+        Ok(AdoptReport {
+            dir: other.dir.clone(),
+            entries: entries as usize,
+            added: first.added,
+            updated: first.updated,
+            skipped: first.skipped,
+            rejected: first.rejected,
+            // Only the second pass's drops are real: a first-pass drop of a
+            // forward link is healed by the second pass.
+            links_dropped: second.links_dropped,
+        })
+    }
+
+    /// `limpet adopt --dismiss <dir>`: mark everything the sibling holds
+    /// right now as seen WITHOUT merging it (a different repository that once
+    /// lived at this path). Later writes to that sibling surface again.
+    pub fn dismiss_sibling(&mut self, other: &OtherStore) -> Result<()> {
+        let conn = open_sibling(&other.db)
+            .with_context(|| format!("opening {} read-only", other.db.display()))?;
+        let newest: Option<String> = conn.query_row("SELECT MAX(updated_at) FROM entries", [], |r| r.get(0))?;
+        drop(conn);
+        self.stamp_adopted(&other.dir, newest)
+    }
+
+    /// Stamp the `adopted:<dir>` watermark, clamped to this machine's clock.
+    /// A row stamped in the future (skewed clock, or one the import rejected
+    /// as too far ahead) must not hide every later sibling write that sorts
+    /// below it; a clamped watermark leaves such a row visible until the
+    /// clock catches up, which over-reports rather than hides.
+    fn stamp_adopted(&mut self, dir: &str, newest: Option<String>) -> Result<()> {
+        if let Some(newest) = newest {
+            let now = crate::index::now_iso();
+            let mark = if newest > now { now } else { newest };
+            self.kv_set(&format!("{ADOPTED_PREFIX}{dir}"), &mark)?;
+        }
+        Ok(())
+    }
+}
+
+/// A transactionally consistent copy of a sibling store at `dest`, taken
+/// with `VACUUM INTO` over a read-only connection (WAL frames included when
+/// the sibling has a live wal; see `open_sibling`). The sibling is never
+/// written.
+fn snapshot_sibling(src: &Path, dest: &Path) -> Result<()> {
+    let conn = open_sibling(src).with_context(|| format!("opening {} read-only", src.display()))?;
+    conn.execute("VACUUM INTO ?1", [dest.to_string_lossy().as_ref()])
+        .with_context(|| format!("snapshotting {}", src.display()))?;
+    Ok(())
+}
+
+/// The current store's ids (with their `updated_at`) and adoption
+/// watermarks, read on the caller's connection. Read errors yield an empty
+/// view (over-report, never hide).
+fn current_view(
+    conn: &Connection,
+) -> (std::collections::HashMap<String, String>, std::collections::HashMap<String, String>) {
+    let mut have = std::collections::HashMap::new();
+    if let Ok(mut stmt) = conn.prepare("SELECT id, updated_at FROM entries") {
+        if let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))) {
+            have.extend(rows.flatten());
+        }
+    }
+    let mut wm = std::collections::HashMap::new();
+    if let Ok(mut stmt) = conn.prepare("SELECT k, v FROM meta_kv WHERE k LIKE 'adopted:%'") {
+        if let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))) {
+            for (k, v) in rows.flatten() {
+                if let Some(dir) = k.strip_prefix(ADOPTED_PREFIX) {
+                    wm.insert(dir.to_string(), v);
+                }
+            }
+        }
+    }
+    (have, wm)
 }
 
 /// Lifetime savings counters (spec v0.7.0). Purely observational (I-L5):
@@ -1654,6 +2055,404 @@ mod tests {
         assert_eq!(s.kv_get("schema_version").unwrap().as_deref(), Some("8"));
     }
 
+    /// A store dir under `base` named `dir`, recorded as owning `root`, with
+    /// `n` explicit memories, stamped with the 0.17 alias-host identity of
+    /// [`CUR_ID`] (so it is provably the same repository). Returns the ids
+    /// written, in ULID order.
+    fn forked_store(base: &Path, dir: &str, root: &Path, bodies: &[&str]) -> Vec<String> {
+        forked_store_as(base, dir, root, Some("git:ssh.bitbucket.org/acme/site"), bodies)
+    }
+
+    /// The identity every scan test runs as.
+    const CUR_ID: &str = "git:bitbucket.org/acme/site";
+
+    fn forked_store_as(base: &Path, dir: &str, root: &Path, identity: Option<&str>, bodies: &[&str]) -> Vec<String> {
+        let d = base.join(dir);
+        std::fs::create_dir_all(&d).unwrap();
+        let s = Store::open(&d.join("store.db")).unwrap();
+        s.kv_set("project_root", &crate::util::canonicalize_plain(root).unwrap().to_string_lossy())
+            .unwrap();
+        if let Some(id) = identity {
+            s.kv_set("identity", id).unwrap();
+        }
+        bodies
+            .iter()
+            .map(|b| {
+                crate::memory::remember(
+                    &s, "insight", b, "explicit", None, &[], None, &[], None, false, None, true,
+                )
+                .unwrap()
+                .id
+            })
+            .collect()
+    }
+
+    fn dir_listing(d: &Path) -> Vec<(String, u64)> {
+        let mut v: Vec<(String, u64)> = std::fs::read_dir(d)
+            .unwrap()
+            .map(|e| {
+                let e = e.unwrap();
+                (e.file_name().to_string_lossy().into_owned(), e.metadata().unwrap().len())
+            })
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn sibling_scan_reports_a_forked_store_and_ignores_other_roots() {
+        let base = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let other_root = tempfile::TempDir::new().unwrap();
+        forked_store(base.path(), "git-bitbucket-org-acme-site-aaaa0000", root.path(), &["alpha fact", "beta fact"]);
+        forked_store(base.path(), "git-github-com-unrelated-bbbb1111", other_root.path(), &["gamma fact"]);
+        // The current store: a fresh key with one memory of its own.
+        let cur_dir = base.path().join("git-ssh-bitbucket-org-acme-site-cccc2222");
+        std::fs::create_dir_all(&cur_dir).unwrap();
+        let cur_db = cur_dir.join("store.db");
+        let cur = Store::open(&cur_db).unwrap();
+        crate::memory::remember(&cur, "insight", "delta fact", "explicit", None, &[], None, &[], None, false, None, true)
+            .unwrap();
+
+        let scan = Store::other_stores_in(base.path(), root.path(), CUR_ID, &cur_db, Some(&cur.conn), SIBLING_SCAN_CAP);
+        assert!(!scan.truncated);
+        assert_eq!(scan.stores.len(), 1, "only the dir recording this root is a sibling: {scan:?}");
+        assert_eq!(scan.stores[0].dir, "git-bitbucket-org-acme-site-aaaa0000");
+        assert_eq!(scan.stores[0].entries, 2);
+        assert_eq!(scan.stores[0].unadopted, 2);
+        assert!(scan.stores[0].same_repo, "an alias-host identity is the same repository");
+        assert_eq!(scan.unadopted(), 2);
+
+        // A missing current store (the hook's "no store yet" case) still
+        // sees the sibling: that is exactly the silent-orphan shape.
+        let missing = base.path().join("nope-dddd3333").join("store.db");
+        let scan = Store::other_stores_in(base.path(), root.path(), CUR_ID, &missing, None, SIBLING_SCAN_CAP);
+        assert_eq!(scan.unadopted(), 2);
+    }
+
+    #[test]
+    fn adopt_merges_everything_never_writes_the_sibling_and_is_idempotent() {
+        let base = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let sib_dir = "git-bitbucket-org-acme-site-aaaa0000";
+        let ids = forked_store(base.path(), sib_dir, root.path(), &["first fact", "second fact", "third fact"]);
+        {
+            // Make the sibling exercise every lossless-merge path: a private
+            // memory, an archived one, and a FORWARD link (src sorts before
+            // dst, which a single import pass would drop).
+            let s = Store::open(&base.path().join(sib_dir).join("store.db")).unwrap();
+            s.conn.execute("UPDATE entries SET private = 1 WHERE id = ?1", [&ids[1]]).unwrap();
+            s.conn
+                .execute(
+                    "INSERT INTO archived(entry_id, archived_at) VALUES (?1, '2026-11-01T00:00:00Z')",
+                    [&ids[2]],
+                )
+                .unwrap();
+            s.conn
+                .execute("INSERT INTO links(src, dst, rel) VALUES (?1, ?2, 'supports')", [&ids[0], &ids[2]])
+                .unwrap();
+            // Checkpoint so the on-disk listing below is stable.
+            s.conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
+        }
+        let sib_path = base.path().join(sib_dir);
+        let before = dir_listing(&sib_path);
+        let sib_bytes = std::fs::read(sib_path.join("store.db")).unwrap();
+
+        let cur_dir = base.path().join("git-ssh-bitbucket-org-acme-site-cccc2222");
+        std::fs::create_dir_all(&cur_dir).unwrap();
+        let cur_db = cur_dir.join("store.db");
+        let mut cur = Store::open(&cur_db).unwrap();
+
+        let scan = Store::other_stores_in(base.path(), root.path(), CUR_ID, &cur_db, Some(&cur.conn), SIBLING_SCAN_CAP);
+        assert_eq!(scan.unadopted(), 3);
+        let rep = cur.adopt_from(&scan.stores[0]).unwrap();
+        assert_eq!((rep.entries, rep.added, rep.rejected, rep.links_dropped), (3, 3, 0, 0), "{rep:?}");
+
+        let private: i64 = cur
+            .conn
+            .query_row("SELECT private FROM entries WHERE id = ?1", [&ids[1]], |r| r.get(0))
+            .unwrap();
+        assert_eq!(private, 1, "private survives a same-machine adopt");
+        let archived: bool = cur
+            .conn
+            .query_row("SELECT EXISTS(SELECT 1 FROM archived WHERE entry_id = ?1)", [&ids[2]], |r| r.get(0))
+            .unwrap();
+        assert!(archived, "archival survives adopt");
+        let link: bool = cur
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM links WHERE src = ?1 AND dst = ?2)",
+                [&ids[0], &ids[2]],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(link, "a forward link lands via the second pass");
+
+        // The sibling is byte-identical and its dir unchanged (I-C4).
+        assert_eq!(dir_listing(&sib_path), before);
+        assert_eq!(std::fs::read(sib_path.join("store.db")).unwrap(), sib_bytes);
+
+        // The warning clears, and a re-run changes nothing (I-C5).
+        let scan = Store::other_stores_in(base.path(), root.path(), CUR_ID, &cur_db, Some(&cur.conn), SIBLING_SCAN_CAP);
+        assert_eq!(scan.unadopted(), 0);
+        let again = cur.adopt_from(&scan.stores[0]).unwrap();
+        assert_eq!((again.added, again.updated, again.skipped), (0, 0, 3), "{again:?}");
+    }
+
+    #[test]
+    fn adopt_watermark_clears_a_line_the_guards_reject() {
+        // A sibling line today's import guards refuse (here: an unknown
+        // kind written straight into the sibling) is rejected and counted,
+        // and the watermark stops it from holding the warning up forever.
+        let base = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let sib_dir = "git-bitbucket-org-acme-site-aaaa0000";
+        forked_store(base.path(), sib_dir, root.path(), &["kept fact"]);
+        {
+            let s = Store::open(&base.path().join(sib_dir).join("store.db")).unwrap();
+            // A blank body passes the schema but fails the import guard.
+            s.conn
+                .execute(
+                    "INSERT INTO entries(id, kind, body, created_at, updated_at, source, confidence, status)
+                     VALUES ('01ZZZZZZZZZZZZZZZZZZZZZZZZ', 'insight', '   ', '2026-11-01T00:00:00Z',
+                             '2026-11-01T00:00:00Z', 'explicit', 0.5, 'active')",
+                    [],
+                )
+                .unwrap();
+        }
+        let cur_dir = base.path().join("cur-cccc2222");
+        std::fs::create_dir_all(&cur_dir).unwrap();
+        let cur_db = cur_dir.join("store.db");
+        let mut cur = Store::open(&cur_db).unwrap();
+        let scan = Store::other_stores_in(base.path(), root.path(), CUR_ID, &cur_db, Some(&cur.conn), SIBLING_SCAN_CAP);
+        assert_eq!(scan.unadopted(), 2);
+        let rep = cur.adopt_from(&scan.stores[0]).unwrap();
+        assert_eq!((rep.added, rep.rejected), (1, 1), "{rep:?}");
+        let scan = Store::other_stores_in(base.path(), root.path(), CUR_ID, &cur_db, Some(&cur.conn), SIBLING_SCAN_CAP);
+        assert_eq!(scan.unadopted(), 0, "the watermark clears a guard-rejected line");
+    }
+
+    /// An ISO timestamp `secs` seconds from now.
+    fn later_iso(secs: u64) -> String {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        crate::index::iso_from_secs(now + secs)
+    }
+
+    /// The sibling scan, run as an explicit identity.
+    fn scan_as(base: &Path, root: &Path, identity: &str, cur_db: &Path, cur: &Store, cap: usize) -> SiblingScan {
+        Store::other_stores_in(base, root, identity, cur_db, Some(&cur.conn), cap)
+    }
+
+    fn fresh_current(base: &Path, dir: &str) -> (PathBuf, Store) {
+        let d = base.join(dir);
+        std::fs::create_dir_all(&d).unwrap();
+        let db = d.join("store.db");
+        let s = Store::open(&db).unwrap();
+        (db, s)
+    }
+
+    #[test]
+    fn an_alias_keyed_store_from_another_checkout_is_found_by_name() {
+        // A 0.17 checkout at ANOTHER path keyed its store under the alias
+        // host. Its project_root never matches this root, so only the key
+        // itself can connect it to this repository.
+        let base = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let elsewhere = tempfile::TempDir::new().unwrap();
+        let alias_dir = crate::util::key_from_identity("git:ssh.bitbucket.org/acme/site");
+        forked_store_as(base.path(), &alias_dir, elsewhere.path(), None, &["alias fact"]);
+        let (cur_db, cur) = fresh_current(base.path(), "cur-cccc2222");
+        let scan = scan_as(base.path(), root.path(), CUR_ID, &cur_db, &cur, SIBLING_SCAN_CAP);
+        assert_eq!(scan.stores.len(), 1, "{scan:?}");
+        assert!(scan.stores[0].same_repo);
+        assert_eq!(scan.unadopted(), 1);
+        // And it is found even when the capped part of the scan is empty.
+        let scan = scan_as(base.path(), root.path(), CUR_ID, &cur_db, &cur, 0);
+        assert_eq!(scan.unadopted(), 1);
+    }
+
+    #[test]
+    fn a_different_remote_at_this_path_is_reported_not_adopted_by_default() {
+        let base = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        // Another client's repository once lived at this path.
+        forked_store_as(base.path(), "git-github-com-clienta-site-11112222", root.path(),
+            Some("git:github.com/clienta/site"), &["client a fact", "client a detail"]);
+        // A pre-identity store under a key this root cannot explain.
+        forked_store_as(base.path(), "git-old-host-acme-site-33334444", root.path(), None, &["legacy fact"]);
+        let (cur_db, mut cur) = fresh_current(base.path(), "cur-cccc2222");
+        let scan = scan_as(base.path(), root.path(), CUR_ID, &cur_db, &cur, SIBLING_SCAN_CAP);
+        assert_eq!(scan.stores.len(), 2);
+        assert!(scan.stores.iter().all(|s| !s.same_repo), "{scan:?}");
+        assert_eq!(scan.unadopted(), 0, "nothing is claimed for this repository");
+        assert_eq!(scan.unadopted_elsewhere(), 3);
+        // Dismissing one silences it without merging a single memory.
+        let a = scan.stores.iter().find(|s| s.dir.contains("clienta")).unwrap();
+        cur.dismiss_sibling(a).unwrap();
+        let n: i64 = cur.conn.query_row("SELECT COUNT(*) FROM entries", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 0);
+        let scan = scan_as(base.path(), root.path(), CUR_ID, &cur_db, &cur, SIBLING_SCAN_CAP);
+        assert_eq!(scan.unadopted_elsewhere(), 1, "only the undismissed store remains");
+    }
+
+    #[test]
+    fn newer_edits_of_shared_ids_count_and_merge() {
+        // A forked store bootstraps the committed export, so it shares every
+        // id with the old store; the orphaned work is later EDITS there.
+        let base = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let sib_dir = "git-bitbucket-org-acme-site-aaaa0000";
+        let ids = forked_store(base.path(), sib_dir, root.path(), &["shared fact"]);
+        let sib = Store::open(&base.path().join(sib_dir).join("store.db")).unwrap();
+        let mut export = Vec::new();
+        sib.export_jsonl_inner(&mut export, true).unwrap();
+        let (cur_db, mut cur) = fresh_current(base.path(), "cur-cccc2222");
+        cur.import_jsonl_inner(&mut export.as_slice(), true).unwrap();
+        let scan = scan_as(base.path(), root.path(), CUR_ID, &cur_db, &cur, SIBLING_SCAN_CAP);
+        assert_eq!(scan.unadopted(), 0, "identical copies are not news");
+        sib.conn
+            .execute(
+                "UPDATE entries SET body = 'shared fact, corrected', updated_at = ?2 WHERE id = ?1",
+                rusqlite::params![&ids[0], later_iso(5)],
+            )
+            .unwrap();
+        drop(sib);
+        let scan = scan_as(base.path(), root.path(), CUR_ID, &cur_db, &cur, SIBLING_SCAN_CAP);
+        assert_eq!(scan.unadopted(), 1, "a newer edit of a shared id is orphaned work");
+        let rep = cur.adopt_from(&scan.stores[0]).unwrap();
+        assert_eq!(rep.updated, 1, "{rep:?}");
+        let body: String = cur
+            .conn
+            .query_row("SELECT body FROM entries WHERE id = ?1", [&ids[0]], |r| r.get(0))
+            .unwrap();
+        assert_eq!(body, "shared fact, corrected");
+    }
+
+    #[test]
+    fn adopt_snapshots_a_sibling_whose_writer_is_still_live() {
+        // A live (or killed) `serve` leaves its newest writes in the wal.
+        // The snapshot must carry them and must not write either file.
+        let base = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let sib_dir = "git-bitbucket-org-acme-site-aaaa0000";
+        forked_store(base.path(), sib_dir, root.path(), &["checkpointed fact"]);
+        let sib_db = base.path().join(sib_dir).join("store.db");
+        let writer = Store::open(&sib_db).unwrap();
+        writer.conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA wal_autocheckpoint = 0;").unwrap();
+        crate::memory::remember(&writer, "insight", "wal only fact", "explicit", None, &[], None, &[], None, false, None, true)
+            .unwrap();
+        let wal = base.path().join(sib_dir).join("store.db-wal");
+        assert!(std::fs::metadata(&wal).unwrap().len() > 0, "the fixture must leave frames in the wal");
+        let (db_before, wal_before) = (std::fs::read(&sib_db).unwrap(), std::fs::read(&wal).unwrap());
+
+        let (cur_db, mut cur) = fresh_current(base.path(), "cur-cccc2222");
+        let scan = scan_as(base.path(), root.path(), CUR_ID, &cur_db, &cur, SIBLING_SCAN_CAP);
+        assert_eq!(scan.unadopted(), 2, "wal frames count: {scan:?}");
+        let rep = cur.adopt_from(&scan.stores[0]).unwrap();
+        assert_eq!(rep.added, 2, "{rep:?}");
+        assert_eq!(std::fs::read(&sib_db).unwrap(), db_before, "sibling db untouched");
+        assert_eq!(std::fs::read(&wal).unwrap(), wal_before, "sibling wal untouched");
+        drop(writer);
+    }
+
+    #[test]
+    fn a_future_stamped_row_never_raises_the_watermark_past_now() {
+        let base = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let sib_dir = "git-bitbucket-org-acme-site-aaaa0000";
+        forked_store(base.path(), sib_dir, root.path(), &["kept fact"]);
+        let future = later_iso(7200);
+        {
+            let s = Store::open(&base.path().join(sib_dir).join("store.db")).unwrap();
+            s.conn
+                .execute(
+                    "INSERT INTO entries(id, kind, body, created_at, updated_at, source, confidence, status)
+                     VALUES ('01ZZZZZZZZZZZZZZZZZZZZZZZZ', 'insight', 'skewed fact', ?1, ?1, 'explicit', 0.5, 'active')",
+                    [&future],
+                )
+                .unwrap();
+        }
+        let (cur_db, mut cur) = fresh_current(base.path(), "cur-cccc2222");
+        let scan = scan_as(base.path(), root.path(), CUR_ID, &cur_db, &cur, SIBLING_SCAN_CAP);
+        let rep = cur.adopt_from(&scan.stores[0]).unwrap();
+        assert_eq!((rep.added, rep.rejected), (1, 1), "{rep:?}");
+        let wm = cur.kv_get(&format!("{ADOPTED_PREFIX}{sib_dir}")).unwrap().unwrap();
+        assert!(wm <= crate::index::now_iso(), "watermark {wm} is in the future");
+        let scan = scan_as(base.path(), root.path(), CUR_ID, &cur_db, &cur, SIBLING_SCAN_CAP);
+        assert_eq!(scan.unadopted(), 1, "the rejected future row stays visible, never hidden");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_data_dir_never_lists_the_current_store_as_its_own_sibling() {
+        let t = tempfile::TempDir::new().unwrap();
+        let real = t.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = t.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        forked_store(&real, "git-bitbucket-org-acme-site-aaaa0000", root.path(), &["fact"]);
+        let (_, cur) = fresh_current(&real, "cur-cccc2222");
+        cur.kv_set("project_root", &crate::util::canonicalize_plain(root.path()).unwrap().to_string_lossy())
+            .unwrap();
+        // SQLite's resolved path vs the unresolved base, both ways round.
+        let resolved = PathBuf::from(cur.conn.path().unwrap());
+        let unresolved = link.join("cur-cccc2222").join("store.db");
+        for (base, db) in [(&link, &resolved), (&real, &unresolved)] {
+            let scan = scan_as(base, root.path(), CUR_ID, db, &cur, SIBLING_SCAN_CAP);
+            assert_eq!(scan.stores.len(), 1, "{scan:?}");
+            assert_eq!(scan.stores[0].dir, "git-bitbucket-org-acme-site-aaaa0000");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_adopt_scratch_dir_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = ScratchDir::create().unwrap();
+        let mode = std::fs::metadata(&d.0).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+        let path = d.0.clone();
+        drop(d);
+        assert!(!path.exists(), "dropped scratch dir is removed");
+    }
+
+    #[test]
+    fn public_export_never_carries_the_private_field() {
+        let s = Store::open_in_memory().unwrap();
+        crate::memory::remember(&s, "insight", "public fact", "explicit", None, &[], None, &[], None, false, None, true)
+            .unwrap();
+        crate::memory::remember(&s, "insight", "secret-ish fact", "explicit", None, &[], None, &[], None, true, None, true)
+            .unwrap();
+        let mut out = Vec::new();
+        let rep = s.export_jsonl(&mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert_eq!((rep.exported, rep.private_withheld), (1, 1));
+        assert!(!text.contains("\"private\""), "{text}");
+        assert!(!text.contains("secret-ish"));
+    }
+
+    #[test]
+    fn a_peer_import_cannot_set_private() {
+        // `private` on the wire is honored only by adopt; a teammate's file
+        // carrying it is imported as an ordinary (public) memory.
+        let mut s = Store::open_in_memory().unwrap();
+        let line = "{\"id\":\"01JAAAAAAAAAAAAAAAAAAAAAAA\",\"kind\":\"insight\",\"body\":\"peer fact\",\
+                    \"created_at\":\"2026-11-01T00:00:00Z\",\"updated_at\":\"2026-11-01T00:00:00Z\",\
+                    \"source\":\"explicit\",\"confidence\":0.5,\"status\":\"active\",\"private\":true,\
+                    \"anchors\":[],\"links\":[]}\n";
+        let rep = s.import_jsonl(&mut line.as_bytes()).unwrap();
+        assert_eq!(rep.added, 1);
+        let private: i64 = s
+            .conn
+            .query_row("SELECT private FROM entries WHERE id = '01JAAAAAAAAAAAAAAAAAAAAAAA'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(private, 0);
+    }
+
     #[test]
     fn migrates_legacy_store_when_project_root_matches() {
         let base = tempfile::TempDir::new().unwrap();
@@ -1724,7 +2523,7 @@ mod tests {
             let s = Store::open(&legacy_dir.join("store.db")).unwrap();
             s.kv_set("project_root", &root.path().to_string_lossy()).unwrap();
         }
-        let db = Store::locate_db_path_in(base.path(), root.path());
+        let db = Store::locate_db_path_in(base.path(), root.path(), &crate::util::repo_identity(root.path()));
         assert_eq!(db, legacy_dir.join("store.db"), "locate must find the legacy store in place");
         assert!(legacy_dir.exists(), "locate must never rename or migrate");
     }

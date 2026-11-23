@@ -44,6 +44,16 @@ generated placeholder list for one IN clause and one WHERE fragment chosen
 from compile-time constants, with all values bound in both (swept
 2026-08-25).
 
+**The store identity.** A repository keeps its store across a failing
+`git` binary (the remote is read from `.git/config`), provider SSH host
+aliases, and moves or re-clones of the checkout. When the key does change
+(a remote moved hosts), the old store is never deleted, renamed, or
+written: `limpet doctor`, the SessionStart hook, and `admin` status
+(`other_stores`) report it, and `limpet adopt` merges it through the same
+guarded import path as a teammate's export (private and archived state
+preserved), stamping a watermark so a re-run is a no-op. A store recorded
+under a different remote is never merged unless named with `--from <dir>`.
+
 ## What is not promised
 
 - The UI's layout, endpoints, and JSON shapes. The UI is a local viewer,

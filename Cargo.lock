@@ -417,6 +417,7 @@ version = "0.17.0"
 dependencies = [
  "anyhow",
  "ignore",
+ "libc",
  "rusqlite",
  "self-replace",
  "serde",

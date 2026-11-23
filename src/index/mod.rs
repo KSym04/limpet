@@ -375,6 +375,9 @@ pub fn full_index(store: &Store, root: &Path) -> Result<IndexReport> {
     }
     store.kv_set("indexed_at", &now_iso())?;
     store.kv_set("project_root", &root.to_string_lossy())?;
+    // The identity the store was keyed by, so a later fork scan can tell a
+    // same-repository sibling from another repository that lived here.
+    store.kv_set("identity", &crate::util::repo_identity(root))?;
     report.took_ms = start.elapsed().as_millis();
     Ok(report)
 }
