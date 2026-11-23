@@ -40,7 +40,8 @@ store forked to a 0-entry `path:` key by F1.
   export, so the orphaned work is newer EDITS of shared ids). Each sibling
   carries its recorded `identity` and `same_repo`: true for a name match,
   a recorded `path:` identity, or a recorded identity canonically equal to
-  the current one. Reported by `limpet doctor` (advisory, never flips the
+  the current one. A dir with no `store.db` file, or a store with zero
+  entries, is never listed (nothing to adopt or dismiss). Reported by `limpet doctor` (advisory, never flips the
   exit code, uncapped scan), `limpet hook` (plain-text hint lines, also
   when the current store is missing or empty; a truncated scan says "run
   limpet doctor"), and `admin status` (`other_stores`,

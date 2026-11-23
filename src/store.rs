@@ -1567,6 +1567,11 @@ impl Store {
                     unadopted += 1;
                 }
             }
+            // An empty store (a fork that was opened but never written) has
+            // nothing to adopt or dismiss; listing it is noise.
+            if entries == 0 {
+                continue;
+            }
             scan.stores.push(OtherStore { dir: name, identity: recorded, same_repo, entries, unadopted, db });
         }
         scan
@@ -2296,6 +2301,20 @@ mod tests {
         assert_eq!(n, 0);
         let scan = scan_as(base.path(), root.path(), CUR_ID, &cur_db, &cur, SIBLING_SCAN_CAP);
         assert_eq!(scan.unadopted_elsewhere(), 1, "only the undismissed store remains");
+    }
+
+    #[test]
+    fn empty_and_dbless_sibling_dirs_are_not_listed() {
+        let base = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        // A fork opened but never written, under the alias key (found by name).
+        let alias_dir = crate::util::key_from_identity("git:ssh.bitbucket.org/acme/site");
+        forked_store(base.path(), &alias_dir, root.path(), &[]);
+        // A dir with no store.db at all.
+        std::fs::create_dir_all(base.path().join("git-bitbucket-org-acme-other-dddd4444")).unwrap();
+        let (cur_db, cur) = fresh_current(base.path(), "cur-cccc2222");
+        let scan = scan_as(base.path(), root.path(), CUR_ID, &cur_db, &cur, SIBLING_SCAN_CAP);
+        assert!(scan.stores.is_empty(), "{scan:?}");
     }
 
     #[test]
