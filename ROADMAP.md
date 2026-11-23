@@ -149,7 +149,10 @@ built.
   idempotently from a consistent private snapshot, never writing the
   original; a store recorded under a different remote needs `--from`.
   Upgrade note: memories written by 0.17 only under an alias key read as
-  empty until `limpet adopt` runs (see STABILITY.md).
+  empty until `limpet adopt` runs (see STABILITY.md). Building from
+  source now needs Rust 1.89: the bundled SQLite moves to 3.54
+  (rusqlite 0.41) for RUSTSEC-2026-0459, and the TLS stack moves to
+  rustls 0.23.46 for its 2026 advisories.
 
 **Next, from the same field report** (ranked by the cost of the miss):
 

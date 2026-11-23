@@ -134,6 +134,15 @@ store forked to a 0-entry `path:` key by F1.
       `--dismiss`), newer edits of shared ids counted, watermark clamped to
       now, 0700 scratch dir, canonical data dir compare, `VACUUM INTO`
       snapshot, uncapped doctor/adopt scans, `other_stores_truncated`
+- [x] T6b CI follow-ups: Windows clippy (`unused_mut` on the scratch
+      `DirBuilder`, now cfg-split), dependency advisories published after
+      main's last green audit: rustls 0.23.46, rustls-webpki 0.103.17,
+      url 2.5.9, webpki-roots 1.0.12, rustix 1.1.6 (lockfile only), and
+      rusqlite 0.32 -> 0.41 for libsqlite3-sys 0.39 / SQLite 3.54
+      (RUSTSEC-2026-0459, crafted `-wal` page-cache disclosure; `adopt`
+      opens sibling stores, so it is in reach). MSRV 1.86 -> 1.89, forced
+      by rusqlite 0.41; full suite run on 1.89. Stores written by SQLite
+      3.54 read back under 0.17 (proven on the fleet snapshot).
 - [ ] T7 version bump to 0.18.0 is NOT part of this PR (release is a
       separate gated step via the deploy skill)
 

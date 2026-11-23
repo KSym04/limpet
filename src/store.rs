@@ -1436,12 +1436,15 @@ impl ScratchDir {
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         let dir = std::env::temp_dir().join(format!("limpet-adopt-{}-{nanos}", std::process::id()));
-        let mut builder = std::fs::DirBuilder::new();
         #[cfg(unix)]
-        {
+        let builder = {
             use std::os::unix::fs::DirBuilderExt;
-            builder.mode(0o700);
-        }
+            let mut b = std::fs::DirBuilder::new();
+            b.mode(0o700);
+            b
+        };
+        #[cfg(not(unix))]
+        let builder = std::fs::DirBuilder::new();
         // Non-recursive: an existing path is never reused.
         builder
             .create(&dir)

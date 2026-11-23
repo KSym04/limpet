@@ -3,13 +3,15 @@ name = "limpet"
 version = "0.17.0"
 edition = "2021"
 # MSRV. Verified by building and testing on this exact toolchain, not guessed.
-# The floor is set by the dependency tree, not by limpet's own source: ureq ->
-# url -> idna -> idna_adapter -> icu_* 2.2 declare `rust-version = 1.86`, and
-# below that ureq -> rustls -> zeroize 1.9 is an edition-2024 crate, which
-# needs 1.85 just to parse. limpet's own code compiles well under this.
+# The floor is set by the dependency tree, not by limpet's own source:
+# rusqlite 0.41 declares `rust-version = 1.89`, and it is the first release
+# that bundles SQLite 3.54 (libsqlite3-sys 0.39, the fix for
+# RUSTSEC-2026-0459, a page-cache disclosure through a crafted `-wal`, which
+# is exactly the file pair `limpet adopt` opens). Below that, ureq -> url ->
+# idna -> icu_* 2.2 need 1.86 and zeroize 1.9 needs 1.85 to parse.
 # The CI `msrv` job pins this same version, so a bump here that is not built
 # fails CI instead of shipping.
-rust-version = "1.86"
+rust-version = "1.89"
 description = "small shell. long memory. Memory for AI coding agents that goes stale when your code does: AST-anchored, evidence-verified, local MCP server, zero network calls."
 license = "MIT"
 repository = "https://github.com/KSym04/limpet"
@@ -42,7 +44,7 @@ include = [
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 sha2 = "0.10"
 ignore = "0.4"
 tree-sitter = "0.25"
