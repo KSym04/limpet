@@ -1,6 +1,6 @@
 # SPEC: identity continuity, v0.18.0
 
-Status: IN PROGRESS (branch `feat/identity-continuity-0.18`). Source: field
+Status: SHIPPED in v0.18.0 (PR #32, merge c76d5e7; review fixes PR #33, dded897). Source: field
 report from a fleet of 39 client repositories on one machine (2026-11-24).
 Two silent store forks were found, both of which end the same way: the
 agent opens a brand-new empty store, the hook prints nothing, and hundreds
@@ -156,8 +156,8 @@ store forked to a 0-entry `path:` key by F1.
       the current code (was: stale canonical index gave correct adopted
       memories an old baseline, flagged stale by the next index), upgrade
       note covers path-keyed stores written while git failed
-- [ ] T7 version bump to 0.18.0 is NOT part of this PR (release is a
-      separate gated step via the deploy skill)
+- [x] T7 version bump to 0.18.0 (separate commit on main after PRs #32
+      and #33, released via the deploy skill)
 
 ---
 

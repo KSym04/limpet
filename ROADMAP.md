@@ -136,7 +136,7 @@ built.
   and a write timeout, so a slow-drip or never-reading client cannot hold a
   thread past five seconds.
 
-- **v0.18 (unreleased): identity continuity.** A field report found one
+- **v0.18.0: identity continuity.** A field report found one
   repository's memory split across three stores: a `git` that failed
   (macOS exit 69, Xcode licence not accepted) dropped the key to the path
   form, and a remote host change (`ssh.bitbucket.org`) minted a third, so
