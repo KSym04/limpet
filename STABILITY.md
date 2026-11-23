@@ -54,6 +54,19 @@ guarded import path as a teammate's export (private and archived state
 preserved), stamping a watermark so a re-run is a no-op. A store recorded
 under a different remote is never merged unless named with `--from <dir>`.
 
+**Upgrading to 0.18.** A repository whose memories were written by 0.17
+only under a provider alias key (for example
+`git-ssh-bitbucket-org-<org>-<repo>-*`, created after the remote moved to
+`ssh.bitbucket.org`) opens the canonical `git-bitbucket-org-*` store on
+0.18, which may not exist yet. Those memories are not lost and the
+SessionStart hook names the other store, but recall returns nothing until
+they are merged. After updating, run `limpet doctor` in each active
+repository; if it reports another store, run
+`limpet adopt --root <repo> --dry-run` to preview and then
+`limpet adopt --root <repo>` to merge. `limpet update` cannot print this
+for you on the 0.17 to 0.18 step, because its post-update check runs in the
+old binary.
+
 ## What is not promised
 
 - The UI's layout, endpoints, and JSON shapes. The UI is a local viewer,

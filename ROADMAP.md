@@ -148,6 +148,8 @@ built.
   recent writes count), and `limpet adopt` merges one losslessly and
   idempotently from a consistent private snapshot, never writing the
   original; a store recorded under a different remote needs `--from`.
+  Upgrade note: memories written by 0.17 only under an alias key read as
+  empty until `limpet adopt` runs (see STABILITY.md).
 
 **Next, from the same field report** (ranked by the cost of the miss):
 
