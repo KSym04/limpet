@@ -136,6 +136,35 @@ built.
   and a write timeout, so a slow-drip or never-reading client cannot hold a
   thread past five seconds.
 
+- **v0.18 (unreleased): identity continuity.** A field report found one
+  repository's memory split across three stores: a `git` that failed
+  (macOS exit 69, Xcode licence not accepted) dropped the key to the path
+  form, and a remote host change (`ssh.bitbucket.org`) minted a third, so
+  the agent started over in an empty store and the SessionStart hook said
+  nothing. The key now falls back to reading `.git/config` directly
+  (worktrees, `commondir`, a 64 KiB cap) and collapses provider SSH
+  aliases; `limpet doctor`, the hook, and `admin` status name any other
+  store recording the same root (WAL-aware, so a live or killed server's
+  recent writes count), and `limpet adopt` merges one losslessly and
+  idempotently from a consistent private snapshot, never writing the
+  original; a store recorded under a different remote needs `--from`.
+  Upgrade note: memories written by 0.17 only under an alias key read as
+  empty until `limpet adopt` runs (see STABILITY.md). Building from
+  source now needs Rust 1.89: the bundled SQLite moves to 3.54
+  (rusqlite 0.41) for RUSTSEC-2026-0459, and the TLS stack moves to
+  rustls 0.23.46 for its 2026 advisories.
+
+**Next, from the same field report** (ranked by the cost of the miss):
+
+- Refuse to index `$HOME` (or any root above a repository) without an
+  explicit flag: a home-root store indexed 960k files.
+- Default ignores for secrets and vendored trees (`.env*`, Bedrock
+  `web/wp`, vendored themes): indexing them at all is noise and risk.
+- A stale-binary notice on the hook path, not only in `doctor`.
+- `git` failure in `affected` (changed files, current branch) degrades
+  silently today; report it in the envelope instead.
+- Fleet-scope recall across one owner's stores, gated on the recall evals.
+
 ## v1.0: the stability contract (not features)
 
 The code half shipped in 0.17.0 (above). What the tag still waits for:

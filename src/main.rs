@@ -17,6 +17,8 @@
 //!   limpet demo                           anchor lifecycle on a throwaway repo
 //!   limpet seed <file> [--anchor auto|file|none] [--kind <kind>] [--force] [--root <path>]
 //!                                         ingest notes into anchored memory
+//!   limpet adopt   [--root <path>] [--dry-run] [--from <dir>]... [--dismiss <dir>]...
+//!                                         merge stores this root forked into
 
 use anyhow::{bail, Context, Result};
 use limpet::{index, mcp, memory, store, tools, ui};
@@ -38,6 +40,16 @@ fn arg_value(args: &[String], flag: &str) -> Option<String> {
         .position(|a| a == flag)
         .and_then(|i| args.get(i + 1))
         .cloned()
+}
+
+/// Every value given for a repeatable flag (`--from a --from b`), in order.
+/// A trailing flag with no value contributes nothing.
+fn arg_values(args: &[String], flag: &str) -> Vec<String> {
+    // A value that is itself a flag (`--from --dry-run`) is not a value.
+    args.windows(2)
+        .filter(|w| w[0] == flag && !w[1].starts_with("--"))
+        .map(|w| w[1].clone())
+        .collect()
 }
 
 fn root_from(args: &[String]) -> Result<PathBuf> {
@@ -118,6 +130,7 @@ fn run() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&out)?);
             Ok(())
         }
+        "adopt" => adopt(&args),
         "demo" => demo::run(),
         "seed" => seed::run(&args),
         "doctor" => doctor(&args),
@@ -187,6 +200,10 @@ USAGE:
   limpet hook    [--root <path>]   SessionStart brief for Claude Code hooks (read-only)
   limpet export  [--root <path>]   write memory to .limpet/memory.jsonl
   limpet import  [--root <path>] [--path <repo-relative file>]   read memory from a jsonl export
+  limpet adopt   [--root <path>] [--dry-run] [--from <dir>]... [--dismiss <dir>]...
+                                   merge memories from other stores of this repo (left behind
+                                   by a git failure or host alias); --from merges a store
+                                   recorded under a different remote, --dismiss silences one
   limpet demo                      run the anchor lifecycle on a throwaway repo
   limpet seed <file> [--anchor auto|file|none] [--kind <kind>] [--force] [--root <path>]
                                    ingest a MEMORY.md/CLAUDE.md into anchored memory
@@ -228,13 +245,96 @@ fn print_hook_brief(args: &[String]) {
 
 fn hook_brief(args: &[String]) -> Result<String> {
     let root = root_from(args)?;
-    // Read-only locate: the hook must never create or migrate a store.
-    let db = store::Store::locate_db_path(&root);
+    // Read-only locate: the hook must never create or migrate a store. The
+    // identity is resolved once: each `git` spawn costs tens of ms here.
+    let identity = limpet::util::repo_identity(&root);
+    let db = store::Store::locate_db_path_for(&root, &identity);
     if !db.is_file() {
-        return Ok(String::new());
+        // No store at this key is exactly the silent-orphan shape (I-C3):
+        // the memories may sit under a key this root used to have.
+        return Ok(fork_hint(&root, &identity, &db, None).join("\n"));
     }
+    let mut brief = memory_brief(&db)?;
+    for hint in fork_hint(&root, &identity, &db, open_read_only(&db).as_ref()) {
+        if !brief.is_empty() {
+            brief.push('\n');
+        }
+        brief.push_str(&hint);
+    }
+    Ok(brief)
+}
+
+/// Open the current store read-only for a display surface.
+fn open_read_only(db: &std::path::Path) -> Option<rusqlite::Connection> {
+    rusqlite::Connection::open_with_flags(
+        db,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()
+}
+
+fn plural(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+/// Plain-text lines when OTHER stores of this project hold memories this
+/// store lacks (I-C3). Empty when there is nothing to report. Siblings that
+/// are provably this repository get the plain adopt advice; siblings for a
+/// different remote are named, because they may be this repo before a
+/// remote move OR a different repository that once lived at this path, and
+/// only the user can tell which.
+fn fork_hint(
+    root: &std::path::Path,
+    identity: &str,
+    db: &std::path::Path,
+    current: Option<&rusqlite::Connection>,
+) -> Vec<String> {
+    let scan = store::Store::other_stores_for_root(root, identity, db, current, store::SIBLING_SCAN_CAP);
+    let mut lines = Vec::new();
+    let n = scan.unadopted();
+    if n > 0 {
+        let k = scan.stores.iter().filter(|s| s.same_repo && s.unadopted > 0).count();
+        lines.push(format!(
+            "limpet: {} for this project sit in {} (the store key changed, likely a git \
+             failure or a provider host alias). Tell the user: `limpet adopt --root \"{}\"` \
+             merges them (add --dry-run to preview); the old store is never modified.",
+            plural(n, "more memory", "more memories"),
+            plural(k, "other store", "other stores"),
+            root.display()
+        ));
+    }
+    let elsewhere: Vec<&str> = scan
+        .stores
+        .iter()
+        .filter(|s| !s.same_repo && s.unadopted > 0)
+        .map(|s| s.dir.as_str())
+        .collect();
+    if !elsewhere.is_empty() {
+        lines.push(format!(
+            "limpet: {} recorded this path under a different remote ({}): either this repo \
+             before a remote move, or another repository that once lived here. Tell the user to \
+             check with `limpet adopt --root \"{}\" --from <dir> --dry-run`, then merge with \
+             `--from <dir>` or silence with `--dismiss <dir>`; nothing is merged automatically.",
+            plural(scan.unadopted_elsewhere(), "memory", "memories"),
+            elsewhere.join(", "),
+            root.display()
+        ));
+    }
+    if scan.truncated {
+        lines.push(
+            "limpet: the data dir holds more stores than one session-start scan reads; run \
+             `limpet doctor` for the full fork check."
+                .to_string(),
+        );
+    }
+    lines
+}
+
+/// The memory-first brief for an existing store; empty when it holds no
+/// visible memories.
+fn memory_brief(db: &std::path::Path) -> Result<String> {
     let conn = rusqlite::Connection::open_with_flags(
-        &db,
+        db,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
     // Archived entries are invisible to recall/verify_queue/map, so counting
@@ -674,6 +774,45 @@ fn doctor_run(args: &[String], post_update: bool) -> Result<bool> {
                     )
                 },
             );
+            // 4b. Store fork (advisory, never flips ok; I-C3). A git failure
+            // or a remote host change re-keys the project and the agent
+            // silently starts over in an empty store; say so, with the fix.
+            // Doctor scans uncapped: it is the place a truncated hook scan
+            // sends the user.
+            let identity = limpet::util::repo_identity(&root);
+            let scan =
+                store::Store::other_stores_for_root(&root, &identity, &db, Some(&store.conn), usize::MAX);
+            let root_arg = format!("--root \"{}\"", root.display());
+            for s in scan.stores.iter().filter(|s| s.same_repo && s.unadopted > 0) {
+                println!(
+                    "warn store fork: {} memories for this root sit in another store ({}, {} total); \
+                     the store key changed (git failure or provider host alias). Run `limpet adopt \
+                     {root_arg} --dry-run` to preview, then `limpet adopt {root_arg}` to merge; the \
+                     old store is never modified.",
+                    s.unadopted, s.dir, s.entries
+                );
+            }
+            for s in scan.stores.iter().filter(|s| !s.same_repo && s.unadopted > 0) {
+                println!(
+                    "warn store fork: {} memories recorded this root under a different remote ({}, \
+                     identity {}); either this repo before a remote move or another repository that \
+                     once lived here. Check with `limpet adopt {root_arg} --from {} --dry-run`, then \
+                     merge with `--from {}` or silence with `--dismiss {}`.",
+                    s.unadopted,
+                    s.dir,
+                    s.identity.as_deref().unwrap_or("unrecorded"),
+                    s.dir,
+                    s.dir,
+                    s.dir
+                );
+            }
+            let adopted = scan.stores.iter().filter(|s| s.unadopted == 0).count();
+            if adopted > 0 {
+                println!(
+                    "note store fork: {adopted} other store dir(s) recorded this root; nothing left to adopt"
+                );
+            }
+            println!("note identity: {identity}");
         }
         Err(e) => check("store", false, format!("cannot open: {e}")),
     }
@@ -692,6 +831,138 @@ fn doctor_run(args: &[String], post_update: bool) -> Result<bool> {
         println!("\nfix the FAIL lines above, restart Claude Code, then re-run `limpet doctor`.");
     }
     Ok(ok)
+}
+
+/// `limpet adopt`: merge the other stores of this project into the current
+/// one (I-C5). The foreign stores are snapshotted, never written (I-C4).
+///
+/// - default: every sibling that is provably this repository (`same_repo`)
+///   with something to adopt;
+/// - `--from <dir>` (repeatable): exactly the named siblings, including one
+///   recorded under a different remote;
+/// - `--dismiss <dir>` (repeatable): mark the named siblings as seen without
+///   merging anything (a different repository that once lived here);
+/// - `--dry-run`: report what would happen and create nothing.
+///
+/// The scan is uncapped: this is the explicit, user-run surface.
+fn adopt(args: &[String]) -> Result<()> {
+    let root = root_from(args)?;
+    let dry_run = args.iter().any(|a| a == "--dry-run");
+    let from = arg_values(args, "--from");
+    let dismiss = arg_values(args, "--dismiss");
+    if !from.is_empty() && !dismiss.is_empty() {
+        bail!("--from and --dismiss cannot be combined; run them separately");
+    }
+    if args.iter().any(|a| a == "--from" || a == "--dismiss") && from.is_empty() && dismiss.is_empty() {
+        bail!("--from and --dismiss need a store dir name (see `limpet adopt --dry-run`)");
+    }
+    let named = if dismiss.is_empty() { &from } else { &dismiss };
+    let selected = |s: &store::OtherStore| {
+        if named.is_empty() {
+            s.same_repo && s.unadopted > 0
+        } else {
+            named.iter().any(|n| n == &s.dir)
+        }
+    };
+
+    // Preview first, read-only: locate, never resolve (resolve can migrate
+    // or create). A dry run, or a run with nothing to do, stops here and
+    // leaves no new store dir behind.
+    let identity = limpet::util::repo_identity(&root);
+    let located = store::Store::locate_db_path_for(&root, &identity);
+    let conn = if located.is_file() { open_read_only(&located) } else { None };
+    let preview = store::Store::other_stores_for_root(&root, &identity, &located, conn.as_ref(), usize::MAX);
+    drop(conn);
+    if let Some(missing) = named.iter().find(|n| !preview.stores.iter().any(|s| &s.dir == *n)) {
+        bail!(
+            "{missing} is not a store of this project (it neither recorded this root nor carries \
+             an equivalent key); run `limpet adopt --dry-run` to list the candidates"
+        );
+    }
+    let would: usize = preview.stores.iter().filter(|s| selected(s)).map(|s| s.unadopted).sum();
+    let action = if dismiss.is_empty() { "would_adopt" } else { "would_dismiss" };
+    let nothing_to_do = if dismiss.is_empty() { would == 0 } else { false };
+    if dry_run || nothing_to_do {
+        let mut out = serde_json::json!({
+            "root": root.to_string_lossy(),
+            "store": located.to_string_lossy(),
+            "dry_run": dry_run,
+            "other_stores": preview.stores,
+            "unadopted_other_remotes": preview.unadopted_elsewhere(),
+        });
+        out[action] = serde_json::json!(would);
+        if !dry_run {
+            // Same shape as a run that merged something, so callers can
+            // always read `adopted`.
+            out["adopted"] = serde_json::json!([]);
+            out["next"] = serde_json::json!(if preview.unadopted_elsewhere() > 0 {
+                "nothing to adopt by default; stores under a different remote need --from <dir> or --dismiss <dir>"
+            } else {
+                "nothing to adopt"
+            });
+        }
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+
+    let db = store::Store::default_db_path(&root);
+    let mut st = store::Store::open(&db)?;
+    st.version_guard()?;
+    let scan = store::Store::other_stores_for_root(&root, &identity, &db, Some(&st.conn), usize::MAX);
+    if !dismiss.is_empty() {
+        let mut dismissed = Vec::new();
+        for other in scan.stores.iter().filter(|s| selected(s)) {
+            st.dismiss_sibling(other)?;
+            dismissed.push(other.dir.clone());
+        }
+        stamp_owner(&st, &root)?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "root": root.to_string_lossy(),
+                "store": db.to_string_lossy(),
+                "dry_run": false,
+                "dismissed": dismissed,
+                "next": "dismissed stores stay on disk untouched; new writes to them surface again",
+            }))?
+        );
+        return Ok(());
+    }
+    let mut reports = Vec::new();
+    for other in scan.stores.iter().filter(|s| selected(s) && s.unadopted > 0) {
+        reports.push(st.adopt_from(other)?);
+    }
+    if !reports.is_empty() {
+        stamp_owner(&st, &root)?;
+    }
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "root": root.to_string_lossy(),
+            "store": db.to_string_lossy(),
+            "dry_run": false,
+            "adopted": reports,
+            "next": if reports.is_empty() {
+                "nothing to adopt"
+            } else {
+                "run `limpet index` so adopted anchors are judged against the current code"
+            },
+        }))?
+    );
+    Ok(())
+}
+
+/// The store `adopt` wrote is this root's from now on: stamp the owner and
+/// identity when absent, so a never-indexed store is still found (and
+/// classified) by the next fork scan.
+fn stamp_owner(st: &store::Store, root: &std::path::Path) -> Result<()> {
+    if st.kv_get("project_root")?.is_none() {
+        st.kv_set("project_root", &root.to_string_lossy())?;
+    }
+    if st.kv_get("identity")?.is_none() {
+        st.kv_set("identity", &limpet::util::repo_identity(root))?;
+    }
+    Ok(())
 }
 
 fn install(dry_run: bool) -> Result<()> {

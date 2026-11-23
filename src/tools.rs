@@ -598,12 +598,32 @@ fn tool_admin(store: &mut Store, root: &Path, sweep: &SweepReport, args: &Value)
             let archived: i64 = store
                 .conn
                 .query_row("SELECT COUNT(*) FROM archived", [], |r| r.get(0))?;
+            // Other stores that recorded this root (I-C3, additive field):
+            // a non-zero `unadopted` means the store key changed and
+            // memories were left behind; `limpet adopt` merges them. Only a
+            // file-backed store scans (an in-memory test store has no data
+            // dir of its own to compare against).
+            let (other_stores, other_stores_truncated) = match store.conn.path().filter(|p| !p.is_empty()) {
+                Some(db) => {
+                    let scan = crate::store::Store::other_stores_for_root(
+                        root,
+                        &crate::util::repo_identity(root),
+                        std::path::Path::new(db),
+                        Some(&store.conn),
+                        crate::store::SIBLING_SCAN_CAP,
+                    );
+                    (serde_json::to_value(&scan.stores)?, scan.truncated)
+                }
+                None => (json!([]), false),
+            };
             json!({
                 "files": files, "symbols": symbols, "entries": entries,
                 "private": private,
                 "archived": archived,
                 "entries_by_status": by_status,
                 "root": root.to_string_lossy(),
+                "other_stores": other_stores,
+                "other_stores_truncated": other_stores_truncated,
             })
         }
         "forget" => {

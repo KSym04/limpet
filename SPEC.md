@@ -1,3 +1,153 @@
+# SPEC: identity continuity, v0.18.0
+
+Status: IN PROGRESS (branch `feat/identity-continuity-0.18`). Source: field
+report from a fleet of 39 client repositories on one machine (2026-11-24).
+Two silent store forks were found, both of which end the same way: the
+agent opens a brand-new empty store, the hook prints nothing, and hundreds
+of real memories become unreachable with no error anywhere.
+
+| Fork | Trigger | Result |
+| --- | --- | --- |
+| F1 git failure | `git` exits non-zero for a reason unrelated to the repo (macOS Xcode licence not accepted: exit 69; git missing from PATH) | `git_remote_origin` returns None, identity falls to `path:<root>`, new empty store |
+| F2 host alias | provider changes the SSH host (Bitbucket `git@bitbucket.org:` became `git@ssh.bitbucket.org:`) | normalized identity changes, new key, old store orphaned |
+
+Measured on the reporting machine: ~330 memories orphaned across 6 repos
+(132/13, 67/2, 40/0, 34/none, 31/none, 28/7 old/new), plus this repo's own
+store forked to a 0-entry `path:` key by F1.
+
+## INVARIANTS
+
+- I-C1: identity does not depend on git being runnable. When the `git`
+  invocation fails for any reason, the `origin` url is read from the repo's
+  git config file directly (walk up to `.git`, follow a `gitdir:` file and
+  a `commondir`, parse `[remote "origin"] url`). Git output stays primary
+  when it succeeds. Includes and `insteadOf` rewrites are NOT applied by
+  the fallback (documented limit; a repo relying on them only diverges
+  while git itself is broken, never worse than before).
+- I-C2: known provider SSH host aliases normalize to the canonical host by
+  EXACT match only: `ssh.github.com` -> `github.com`; `ssh.bitbucket.org`,
+  `altssh.bitbucket.org` -> `bitbucket.org`; `altssh.gitlab.com` ->
+  `gitlab.com`. No generic `ssh.` stripping (`ssh.dev.azure.com` is a
+  different host from `dev.azure.com` and stays untouched).
+- I-C3: a fork is never silent. A sibling is any OTHER store dir in the
+  data dir whose recorded `project_root` canonically equals this root, or
+  whose dir NAME is this root's `path:` key or a provider-alias key of the
+  current remote (found by name whatever root it recorded, so a 0.17
+  alias-keyed store from another checkout is not orphaned; name matches
+  never count against the scan cap). Its `unadopted` count is the rows
+  newer than the `adopted:<dir>` watermark that this store lacks by id OR
+  holds in an older `updated_at` (a fork usually bootstrapped the committed
+  export, so the orphaned work is newer EDITS of shared ids). Each sibling
+  carries its recorded `identity` and `same_repo`: true for a name match,
+  a recorded `path:` identity, or a recorded identity canonically equal to
+  the current one. A dir with no `store.db` file, or a store with zero
+  entries, is never listed (nothing to adopt or dismiss). Reported by `limpet doctor` (advisory, never flips the
+  exit code, uncapped scan), `limpet hook` (plain-text hint lines, also
+  when the current store is missing or empty; a truncated scan says "run
+  limpet doctor"), and `admin status` (`other_stores`,
+  `other_stores_truncated`, additive). `index` stamps `identity` in
+  meta_kv so later scans can classify the store.
+- I-C4: foreign stores are never written. Detection opens a sibling as an
+  ordinary READ_ONLY reader only when its `-wal` (non-empty) and `-shm`
+  already exist, else `immutable=1`. Reason (found in T5 dogfood): a
+  killed or live `serve` leaves recent memories in the wal, invisible to an
+  immutable open, so the fork read as empty. A read-only reader creates no
+  file and never checkpoints; it takes read marks in the existing shm like
+  any concurrent reader. Adoption snapshots the sibling with `VACUUM INTO`
+  over that read-only connection into a private (0700) temp dir and reads
+  the SNAPSHOT (migrated to the current schema there); the original db and
+  wal bytes and the dir listing are untouched, nothing is renamed or
+  deleted.
+- I-C5: adoption is explicit, idempotent and lossless for what the store
+  holds. `limpet adopt [--dry-run] [--root <path>]` merges every
+  `same_repo` sibling's
+  entries (private and archived included, links, anchors, evidence,
+  `conf_before_stale`) through the existing guarded import path (LWW by
+  id, secrets/size/kind/status guards, per-source confidence caps that the
+  live write path already enforces). Re-running it changes nothing. After a
+  successful merge a watermark `adopted:<dir>` = min(the sibling's max
+  `updated_at`, now) is stamped so the warning clears even if a line was
+  rejected by a guard, and a future-stamped row can never hide later
+  writes. A sibling under a DIFFERENT remote (the repo moved hosts, or a
+  different repository once lived at this path) is never merged by
+  default: `--from <dir>` (repeatable) merges exactly the named dirs,
+  `--dismiss <dir>` (repeatable) stamps the watermark without merging.
+  Naming a dir the scan did not find is an error.
+- I-C6: no automatic rename or merge on open. Auto-moving data on a key
+  change can ping-pong between keys when the failure is transient (F1), and
+  display surfaces must stay read-only. The user runs `limpet adopt`.
+- Carried: display surfaces read-only and exit 0 silently on any problem,
+  doctor advisories never flip ok, tool API additive only (docs_in_sync),
+  I-P1 legacy migration unchanged, BENCH >= 4.0x, panic ratchet.
+
+## ATTACK SURFACE / HAZARDS
+
+- H1 hostile git config: the fallback parser reads an attacker-controlled
+  file in a cloned repo. Bounded read (64 KiB), no includes followed, no
+  command execution, output only feeds `normalize_git_remote` and a hash.
+- H2 gitdir pointer escape: a `.git` file can point anywhere. It is only
+  ever READ (config), size-capped; worst case is a wrong identity, the same
+  power the repo already has via its real origin url.
+- H3 sibling mis-claim: a dir whose `project_root` matches but whose
+  recorded identity is a different remote (another client's repository
+  once lived at this path). Classified `same_repo=false`, excluded from
+  the default adopt, named in the hint and doctor with `--from` /
+  `--dismiss` advice.
+- H4 torn copy: a plain file copy of db + wal can tear when the sibling's
+  writer checkpoints between the two copies. Fixed: `VACUUM INTO` takes a
+  transactionally consistent snapshot under a read transaction.
+- H5 hook latency: the sibling scan opens every store dir read-only on
+  each SessionStart. Cost is one small query per dir; hook and status cap
+  at 512 dirs (name matches excluded from the cap), the cap is reported,
+  and doctor and adopt scan uncapped.
+- H7 hostile `.git` shapes: a FIFO or device named `.git/config` (or a
+  gitfile) must not block the hook. The fallback reads only regular files,
+  opened `O_NONBLOCK` and re-checked as a regular file after open. A `.git`
+  dir without `HEAD` is not a repository (discovery walks past it), and
+  `GIT_CEILING_DIRECTORIES` stops the walk as git does.
+- H6 import guards still apply: a memory that was valid in the sibling but
+  fails today's guards (e.g. a secret pattern added since) is rejected and
+  counted, never smuggled in by the adopt path.
+
+## Task Implementation Checklist: 0.18.0
+
+- [x] T1 git-config fallback for `origin` (util.rs) + tests: plain `.git`
+      dir, gitdir file (relative), worktree `commondir`, quoted url,
+      comments, case-insensitive section/key, exact `"origin"` subsection,
+      first url wins, missing remote -> None
+- [x] T2 exact-match host alias table in `normalize_git_remote` + tests
+      (incl. azure untouched, ssh:// with port 443)
+- [x] T3a sibling scan (`store::other_stores_for_root`) + unadopted count +
+      watermark, read-only probes (WAL-aware, see I-C4), scan cap
+- [x] T3b `limpet adopt [--dry-run]`: copy, migrate copy, full export
+      (private included), double import (second pass lands forward links),
+      watermark stamp, report; CLI match, HELP, module doc, README table
+- [x] T3c doctor advisory, hook hint line, `admin status.other_stores`
+- [x] T4 docs: README identity paragraph, STABILITY identity note, ROADMAP
+- [x] T5 gates: build, test --locked, clippy, bench x4, panic ratchet,
+      em-dash grep, two-process dogfood (fake failing git, alias change,
+      adopt, idempotent re-run, warning clears)
+- [x] T6 adversarial review round, fixes: FIFO/device hang, git-config
+      parse parity (BOM, continuations, subsection escapes, `\b`), HEAD
+      check and ceiling dirs, alias-keyed siblings found by name,
+      different-remote siblings classified and excluded (`--from`,
+      `--dismiss`), newer edits of shared ids counted, watermark clamped to
+      now, 0700 scratch dir, canonical data dir compare, `VACUUM INTO`
+      snapshot, uncapped doctor/adopt scans, `other_stores_truncated`
+- [x] T6b CI follow-ups: Windows clippy (`unused_mut` on the scratch
+      `DirBuilder`, now cfg-split), dependency advisories published after
+      main's last green audit: rustls 0.23.46, rustls-webpki 0.103.17,
+      url 2.5.9, webpki-roots 1.0.12, rustix 1.1.6 (lockfile only), and
+      rusqlite 0.32 -> 0.41 for libsqlite3-sys 0.39 / SQLite 3.54
+      (RUSTSEC-2026-0459, crafted `-wal` page-cache disclosure; `adopt`
+      opens sibling stores, so it is in reach). MSRV 1.86 -> 1.89, forced
+      by rusqlite 0.41; full suite run on 1.89. Stores written by SQLite
+      3.54 read back under 0.17 (proven on the fleet snapshot).
+- [ ] T7 version bump to 0.18.0 is NOT part of this PR (release is a
+      separate gated step via the deploy skill)
+
+---
+
 # SPEC: the brain view, v0.17.0 (ui restyle)
 
 Status: SHIPPED 2026-09-08 as v0.17.0 (tag v0.17.0 on merge commit 9544d39,
