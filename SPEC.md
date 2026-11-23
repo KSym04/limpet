@@ -23,7 +23,13 @@ store forked to a 0-entry `path:` key by F1.
   a `commondir`, parse `[remote "origin"] url`). Git output stays primary
   when it succeeds. Includes and `insteadOf` rewrites are NOT applied by
   the fallback (documented limit; a repo relying on them only diverges
-  while git itself is broken, never worse than before).
+  while git itself is broken, never worse than before). The fallback never
+  overrides git's `safe.directory` ownership check (CVE-2022-24765): a git
+  "dubious ownership" refusal stands (path key), and on unix the worktree,
+  `.git` and common dir it reads must be owned by the effective uid (or
+  `SUDO_UID` under root); another account's metadata ends the walk. Not
+  modelled: a `safe.directory` allow-list (stricter than git, never looser)
+  and Windows ownership (only git's own refusal is honoured there).
 - I-C2: known provider SSH host aliases normalize to the canonical host by
   EXACT match only: `ssh.github.com` -> `github.com`; `ssh.bitbucket.org`,
   `altssh.bitbucket.org` -> `bitbucket.org`; `altssh.gitlab.com` ->
@@ -143,6 +149,13 @@ store forked to a 0-entry `path:` key by F1.
       opens sibling stores, so it is in reach). MSRV 1.86 -> 1.89, forced
       by rusqlite 0.41; full suite run on 1.89. Stores written by SQLite
       3.54 read back under 0.17 (proven on the fleet snapshot).
+- [x] T6c pre-release review fixes: config fallback honours git's
+      ownership rule (I-C1; a planted ancestor `.git` from another account
+      could choose the store identity while git was broken), `adopt`
+      indexes the current store before importing so anchors re-base onto
+      the current code (was: stale canonical index gave correct adopted
+      memories an old baseline, flagged stale by the next index), upgrade
+      note covers path-keyed stores written while git failed
 - [ ] T7 version bump to 0.18.0 is NOT part of this PR (release is a
       separate gated step via the deploy skill)
 

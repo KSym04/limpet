@@ -928,8 +928,17 @@ fn adopt(args: &[String]) -> Result<()> {
         );
         return Ok(());
     }
+    let to_adopt: Vec<&store::OtherStore> = scan.stores.iter().filter(|s| selected(s) && s.unadopted > 0).collect();
+    // The import re-bases every anchor onto THIS store's symbol and file
+    // hashes. In both fork shapes this store is the one that went stale
+    // (the fork took the writes while the code moved on), so index it first:
+    // adopted anchors then land on the current code's hashes instead of an
+    // outdated baseline that the next index would report as stale.
+    if !to_adopt.is_empty() {
+        index::full_index(&st, &root)?;
+    }
     let mut reports = Vec::new();
-    for other in scan.stores.iter().filter(|s| selected(s) && s.unadopted > 0) {
+    for other in to_adopt {
         reports.push(st.adopt_from(other)?);
     }
     if !reports.is_empty() {

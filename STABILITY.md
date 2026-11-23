@@ -46,7 +46,10 @@ from compile-time constants, with all values bound in both (swept
 
 **The store identity.** A repository keeps its store across a failing
 `git` binary (the remote is read from `.git/config`), provider SSH host
-aliases, and moves or re-clones of the checkout. When the key does change
+aliases, and moves or re-clones of the checkout. The config fallback never
+overrides git's `safe.directory` ownership check: a repository git refuses
+as owned by someone else, or (on unix) git metadata owned by another
+account, keys by path exactly as before. When the key does change
 (a remote moved hosts), the old store is never deleted, renamed, or
 written: `limpet doctor`, the SessionStart hook, and `admin` status
 (`other_stores`) report it, and `limpet adopt` merges it through the same
@@ -54,13 +57,21 @@ guarded import path as a teammate's export (private and archived state
 preserved), stamping a watermark so a re-run is a no-op. A store recorded
 under a different remote is never merged unless named with `--from <dir>`.
 
-**Upgrading to 0.18.** A repository whose memories were written by 0.17
-only under a provider alias key (for example
-`git-ssh-bitbucket-org-<org>-<repo>-*`, created after the remote moved to
-`ssh.bitbucket.org`) opens the canonical `git-bitbucket-org-*` store on
-0.18, which may not exist yet. Those memories are not lost and the
-SessionStart hook names the other store, but recall returns nothing until
-they are merged. After updating, run `limpet doctor` in each active
+**Upgrading to 0.18.** Two kinds of store written by 0.17 are not the
+store 0.18 opens for the same repository:
+
+- a path-keyed store (`path-<dir>-*`) created while `git` itself was
+  failing (on macOS, exit 69 until the Xcode licence is accepted; git
+  missing from PATH): 0.18 reads the remote from `.git/config` and opens
+  the `git-<host>-<org>-<repo>-*` store instead;
+- a store under a provider alias key only (for example
+  `git-ssh-bitbucket-org-<org>-<repo>-*`, created after the remote moved to
+  `ssh.bitbucket.org`): 0.18 opens the canonical `git-bitbucket-org-*`
+  store.
+
+In both cases the target store may hold fewer memories or not exist yet.
+Nothing is lost and the SessionStart hook names the other store, but
+recall does not see those memories until they are merged. After updating, run `limpet doctor` in each active
 repository; if it reports another store, run
 `limpet adopt --root <repo> --dry-run` to preview and then
 `limpet adopt --root <repo>` to merge. `limpet update` cannot print this
